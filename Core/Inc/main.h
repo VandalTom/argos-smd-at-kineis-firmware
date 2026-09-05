@@ -86,8 +86,10 @@ void request_dfu_mode(uint32_t protocol);
 #include "bsp/bsp_smd_stdalone.h"
 #elif defined(SMD_OP)
 #include "bsp/bsp_smd_op.h"
+#elif defined(CC_CARRIER)
+#include "bsp/bsp_cc_carrier.h"
 #else
-#error "No board defined. Set BOARD= to SMD_PA, SMD_NOPA, SMD_STDALONE, or SMD_OP."
+#error "No board defined. Set BOARD= to SMD_PA, SMD_NOPA, SMD_STDALONE, SMD_OP, or CC_CARRIER."
 #endif
 
 /* USER CODE BEGIN Private defines */

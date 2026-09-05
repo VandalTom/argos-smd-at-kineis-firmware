@@ -10,7 +10,7 @@ set -u
 
 cd "$(dirname "$0")/.."
 
-CFLAGS="-Wall -Wextra -g -O0 -std=c99 -Iunit"
+CFLAGS="-Wall -Wextra -g -O0 -std=c99 -Iunit -I../Kineis/App/Managers/MGR_CC/Inc"
 
 mkdir -p build
 
@@ -18,12 +18,14 @@ build_ok=0
 build_fail=0
 for src in unit/test_*.c; do
     name=$(basename "$src" .c)
-    if gcc $CFLAGS "$src" -o "build/$name" 2>/dev/null; then
+    # Explicit .exe suffix: MSYS2 gcc adds it implicitly, Linux gcc does not —
+    # naming it here keeps the run loop's build/test_*.exe glob valid on both.
+    if gcc $CFLAGS "$src" -o "build/$name.exe" 2>/dev/null; then
         build_ok=$((build_ok + 1))
     else
         build_fail=$((build_fail + 1))
         printf "BUILD FAIL: %s\n" "$name"
-        gcc $CFLAGS "$src" -o "build/$name" 2>&1 | grep -E "error|warning:" | head -5
+        gcc $CFLAGS "$src" -o "build/$name.exe" 2>&1 | grep -E "error|warning:" | head -5
     fi
 done
 

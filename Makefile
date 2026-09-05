@@ -123,8 +123,8 @@ BOARD = SMD_PA
 SMPS_BYPASS_TX = 0
 
 # Validate APP selection
-ifneq ($(APP),$(filter $(APP),STDLN GUI UW_DOPPLER DOPPLER))
-$(error Invalid APP=$(APP). Must be one of: STDLN GUI UW_DOPPLER DOPPLER)
+ifneq ($(APP),$(filter $(APP),STDLN GUI UW_DOPPLER DOPPLER CC_TRACKER))
+$(error Invalid APP=$(APP). Must be one of: STDLN GUI UW_DOPPLER DOPPLER CC_TRACKER)
 endif
 
 # DOPPLER and UW_DOPPLER are UART-only trackers (RTC/reed driven, no SPI host
@@ -133,8 +133,16 @@ endif
 # whose STOP-over-SPI grace window does not cover the DOPPLER idle loop (LPM-01).
 # Only GUI (and STDLN) are intended for COMM=SPI.
 ifeq ($(COMM),SPI)
-ifneq ($(filter $(APP),DOPPLER UW_DOPPLER),)
+ifneq ($(filter $(APP),DOPPLER UW_DOPPLER CC_TRACKER),)
 $(error $(APP) is UART-only; COMM=SPI is unsupported. Use COMM=UART, or APP=GUI for an SPI host.)
+endif
+endif
+
+# CC_TRACKER drives the CounterCurrent carrier's sensors: its pin map only
+# exists in bsp_cc_carrier.h, so the board is locked.
+ifeq ($(APP),CC_TRACKER)
+ifneq ($(BOARD),CC_CARRIER)
+$(error APP=CC_TRACKER requires BOARD=CC_CARRIER)
 endif
 endif
 
@@ -382,6 +390,35 @@ ifeq ($(APP),DOPPLER)
 	$(KINEIS_DIR)/App/kns_app_doppler.c
 endif
 
+ifeq ($(APP),CC_TRACKER)
+	C_DEFS += \
+	-DUSE_CC_TRACKER_APP \
+	-DHAL_ADC_MODULE_ENABLED \
+	-DHAL_I2C_MODULE_ENABLED \
+	-DHAL_RNG_MODULE_ENABLED
+
+	C_SOURCES += \
+	Core/Src/adc.c \
+	Drivers/STM32WLxx_HAL_Driver/Src/stm32wlxx_hal_adc.c \
+	Drivers/STM32WLxx_HAL_Driver/Src/stm32wlxx_hal_adc_ex.c \
+	Drivers/STM32WLxx_HAL_Driver/Src/stm32wlxx_ll_adc.c \
+	Drivers/STM32WLxx_HAL_Driver/Src/stm32wlxx_hal_i2c.c \
+	Drivers/STM32WLxx_HAL_Driver/Src/stm32wlxx_hal_i2c_ex.c \
+	Drivers/STM32WLxx_HAL_Driver/Src/stm32wlxx_hal_rng.c \
+	Drivers/STM32WLxx_HAL_Driver/Src/stm32wlxx_hal_rng_ex.c \
+	$(KINEIS_DIR)/App/Managers/MGR_ERR/Src/mgr_err.c \
+	$(KINEIS_DIR)/App/Managers/MGR_WDG/Src/mgr_wdg.c \
+	$(KINEIS_DIR)/App/Managers/MGR_EVTLOG/Src/mgr_evtlog.c \
+	$(KINEIS_DIR)/App/Managers/MGR_BAT/Src/mgr_bat.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_payload.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_tier.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_ws85.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_nmea.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_i2c_sens.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_hw.c \
+	$(KINEIS_DIR)/App/kns_app_cc_tracker.c
+endif
+
 # DOPPLER: ADC only needed for battery check on STDALONE board
 ifeq ($(APP),DOPPLER)
 ifeq ($(BOARD),SMD_STDALONE)
@@ -489,6 +526,9 @@ endif
 ifeq ($(APP),DOPPLER)
 BUILD_VERSION := $(BUILD_VERSION)_doppler
 endif
+ifeq ($(APP),CC_TRACKER)
+BUILD_VERSION := $(BUILD_VERSION)_cc_tracker
+endif
 ifeq ($(MAC_PRFL), BASIC)
 BUILD_VERSION := $(BUILD_VERSION)_basic
 endif
@@ -506,6 +546,9 @@ BUILD_VERSION := $(BUILD_VERSION)_StdAlone
 endif
 ifeq ($(BOARD),SMD_OP)
 BUILD_VERSION := $(BUILD_VERSION)_Op
+endif
+ifeq ($(BOARD),CC_CARRIER)
+BUILD_VERSION := $(BUILD_VERSION)_CcCarrier
 endif
 ifeq ($(SMPS_BYPASS_TX), 1)
 BUILD_VERSION := $(BUILD_VERSION)_SmpsByp
@@ -568,6 +611,14 @@ ifeq ($(APP),DOPPLER)
 C_INCLUDES += -I$(KINEIS_DIR)/App/Managers/MGR_ERR/Inc
 C_INCLUDES += -I$(KINEIS_DIR)/App/Managers/MGR_WDG/Inc
 C_INCLUDES += -I$(KINEIS_DIR)/App/Managers/MGR_EVTLOG/Inc
+endif
+
+ifeq ($(APP),CC_TRACKER)
+C_INCLUDES += -I$(KINEIS_DIR)/App/Managers/MGR_ERR/Inc
+C_INCLUDES += -I$(KINEIS_DIR)/App/Managers/MGR_WDG/Inc
+C_INCLUDES += -I$(KINEIS_DIR)/App/Managers/MGR_EVTLOG/Inc
+C_INCLUDES += -I$(KINEIS_DIR)/App/Managers/MGR_BAT/Inc
+C_INCLUDES += -I$(KINEIS_DIR)/App/Managers/MGR_CC/Inc
 endif
 
 ifeq ($(APP),DOPPLER)
@@ -802,6 +853,8 @@ BL_UART_BAUD ?= 115200
 endif
 
 ifeq ($(APP),UW_DOPPLER)
+APP_CONSOLE_BAUD := 115200
+else ifeq ($(APP),CC_TRACKER)
 APP_CONSOLE_BAUD := 115200
 else ifeq ($(COMM),SPI)
 APP_CONSOLE_BAUD := 115200

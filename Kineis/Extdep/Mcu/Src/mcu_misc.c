@@ -74,7 +74,7 @@ static volatile uint32_t pa_on_tick = 0;
 void MCU_MISC_turn_on_pa()
 {
 	/** @attention this code may run under ISR, especially during continuous modulated wave */
-#if defined(SMD_PA) || defined(SMD_STDALONE) || defined(SMD_OP)
+#if defined(SMD_PA) || defined(SMD_STDALONE) || defined(SMD_OP) || defined(CC_CARRIER)
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
 #ifdef DEBUG
 	/* DEV: PA entry trace — TRACE-grade, gated by MGR_LOG_passes so an
@@ -185,7 +185,7 @@ void MCU_MISC_turn_on_pa()
 void MCU_MISC_turn_off_pa()
 {
 	/** @attention this code may run under ISR, especially during continuous modulated wave */
-#if defined(SMD_PA) || defined(SMD_STDALONE) || defined(SMD_OP)
+#if defined(SMD_PA) || defined(SMD_STDALONE) || defined(SMD_OP) || defined(CC_CARRIER)
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
 
 	MGR_LOG_DEBUG("[PA] turn_off_pa\r\n");
@@ -226,7 +226,7 @@ enum KNS_status_t MCU_MISC_getSettingsHwRf(int8_t rf_level_dBm, void* rfSettings
 	int8_t rficPaLevel, rficPaLevel_min, rficPaLevel_max;
 
 
-#if defined(SMD_PA) || defined(SMD_STDALONE) || defined(SMD_OP)
+#if defined(SMD_PA) || defined(SMD_STDALONE) || defined(SMD_OP) || defined(CC_CARRIER)
 	rficPaLevel_min = -17; // dBm
 	rficPaLevel_max = 15;  // dBm
 

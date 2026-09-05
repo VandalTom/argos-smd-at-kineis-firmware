@@ -47,9 +47,14 @@
 /* External divider on PB13 (BAT_SENSE).
  * R4=120k from VBAT, R5=300k to GND. ADC sees VBAT * R5 / (R4+R5).
  * Recover VBAT by multiplying ADC voltage by (R4+R5)/R5.
- * Values in kOhm; only the ratio matters for the formula. */
+ * Values in kOhm; only the ratio matters for the formula.
+ * Overridable from the BSP (CC_CARRIER routes a different divider). */
+#ifndef MGR_BAT_DIV_R_TOP_KOHM
 #define MGR_BAT_DIV_R_TOP_KOHM   120
+#endif
+#ifndef MGR_BAT_DIV_R_BOT_KOHM
 #define MGR_BAT_DIV_R_BOT_KOHM   300
+#endif
 
 /* 12-bit ADC full-scale count (raw value at VDDA). */
 #define MGR_BAT_ADC_FULL_SCALE   4095

@@ -71,13 +71,13 @@
  * GUI APP is about AT commands support sent to device from GUI or SERIAL hyperterminal).
  * @note both flags are exclusive as standalone app will send periodic frame indefinitively
  */
-#if !defined(USE_STDALONE_APP) && !defined(USE_GUI_APP) && !defined(USE_UW_DOPPLER_APP) && !defined(USE_DOPPLER_APP)
+#if !defined(USE_STDALONE_APP) && !defined(USE_GUI_APP) && !defined(USE_UW_DOPPLER_APP) && !defined(USE_DOPPLER_APP) && !defined(USE_CC_TRACKER_APP)
 //#define USE_STDALONE_APP
 #define USE_GUI_APP
 #endif
 
-#if (defined(USE_STDALONE_APP) + defined(USE_GUI_APP) + defined(USE_UW_DOPPLER_APP) + defined(USE_DOPPLER_APP)) > 1
-#error "Cannot build FW with multiple APPs, select only one of STDALONE/GUI/UW_DOPPLER/DOPPLER."
+#if (defined(USE_STDALONE_APP) + defined(USE_GUI_APP) + defined(USE_UW_DOPPLER_APP) + defined(USE_DOPPLER_APP) + defined(USE_CC_TRACKER_APP)) > 1
+#error "Cannot build FW with multiple APPs, select only one of STDALONE/GUI/UW_DOPPLER/DOPPLER/CC_TRACKER."
 #endif
 
 #include "stm32wlxx_it.h"
@@ -107,6 +107,11 @@
 #if defined(BSP_HAS_VBAT_ADC)
 #include "adc.h"
 #endif
+#include "mgr_err.h"
+#endif
+#ifdef USE_CC_TRACKER_APP
+#include "kns_app_cc_tracker.h"
+#include "adc.h"
 #include "mgr_err.h"
 #endif
 #if defined(USE_GUI_APP) || defined(USE_UW_DOPPLER_APP) || defined(USE_DOPPLER_APP)
@@ -365,6 +370,36 @@ static void IDLE_task(void)
   __disable_irq();
   __disable_fault_irq();
   if (KNS_Q_isEvtInSomeQ() || MGR_AT_CMD_isPendingAt()) {
+    if (!prim){
+      __enable_fault_irq();
+      __enable_irq();
+    }
+    return;
+  }
+  LPM_enter();
+  if (!prim){
+    __enable_fault_irq();
+    __enable_irq();
+  }
+  }
+#else
+  LPM_enter();
+#endif
+#endif
+
+  /* ---- CC_TRACKER APP -------------------------------------------------------------------------- */
+
+#ifdef USE_CC_TRACKER_APP
+#ifdef USE_BAREMETAL
+  {
+  uint32_t prim;
+
+  prim = __get_PRIMASK();
+  __disable_irq();
+  __disable_fault_irq();
+  /* No LPM while a sensor session is pumping (UART ring would overrun in
+   * anything deeper than SLEEP) or an event is pending. */
+  if (KNS_Q_isEvtInSomeQ() || KNS_APP_cc_tracker_isBusy()) {
     if (!prim){
       __enable_fault_irq();
       __enable_irq();
@@ -855,7 +890,7 @@ int main(void)
 #if defined(USE_SPI_DRIVER)
   MX_SPI1_Init();
 #endif
-#if defined(USE_UW_DOPPLER_APP)
+#if defined(USE_UW_DOPPLER_APP) || defined(USE_CC_TRACKER_APP)
   MX_ADC_Init();
 #endif
   /* USER CODE BEGIN 2 */
@@ -1080,6 +1115,11 @@ int main(void)
   KNS_APP_doppler_init();
   MGR_LOG_DEBUG("Build: DOPPLER\r\n");
   assert_param(KNS_OS_registerTask(KNS_OS_TASK_APP, KNS_APP_doppler_loop) == KNS_STATUS_OK);
+#endif
+#if defined(USE_CC_TRACKER_APP)
+  KNS_APP_cc_tracker_init();
+  MGR_LOG_DEBUG("Build: CC_TRACKER\r\n");
+  assert_param(KNS_OS_registerTask(KNS_OS_TASK_APP, KNS_APP_cc_tracker_loop) == KNS_STATUS_OK);
 #endif
   assert_param(KNS_OS_registerTask(KNS_OS_TASK_IDLE, IDLE_task) == KNS_STATUS_OK);
 

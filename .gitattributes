@@ -1,0 +1,4 @@
+# Shell scripts must stay LF — they are executed by bash inside the Linux
+# devcontainer, and bash cannot run CRLF scripts. Everything else keeps the
+# default (core.autocrlf) behaviour this repo has always used on Windows.
+*.sh text eol=lf
