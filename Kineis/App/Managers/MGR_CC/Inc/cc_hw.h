@@ -6,17 +6,18 @@
  * Everything electrical for the CounterCurrent carrier, mirroring the roles of
  * the Arduino Board.h but on STM32WL55 HAL:
  *
- *  - VCCIO rail (CC_IO_EN): powers GPS + external I2C sensors. Reference-
- *    counted by the GPS and I2C sessions; dropped when neither needs it.
+ *  - Power: one always-on 3.3 V rail feeds module + BME280 + I2C pull-ups
+ *    (no switched VCCIO — the AP2112K era ended with the XIAO board). Only
+ *    the GPS is hard-switched, via CC_GPS_EN.
  *  - USART1 time-share: session A = GPS on PB6/PB7 @ 9600, session B = WS85
  *    on PA10 @ 115200. The publish cycle is sequential, so one peripheral
  *    serves both; each open is a full deinit / pin-mux / init. RX is
  *    interrupt-driven into a ring buffer the app drains each loop pass.
- *  - I2C2 session: rail up -> settle -> bus-idle check (bit-banged bus-clear
- *    if a slave holds SDA low) -> HAL init. Close parks SDA/SCL pulled DOWN,
- *    not hi-Z: the dead VCCIO rail floats and exchanges current with the
- *    sensors' ESD diodes through floating lines (~1.4 mA measured on the
- *    XIAO board); pulldowns pin the lines at 0 V and bleed the rail.
+ *  - I2C2 session: bus-idle check (bit-banged bus-clear if a slave holds SDA
+ *    low) -> HAL init. Close parks SDA/SCL high-Z (analog): the pull-ups sit
+ *    on the live rail, so the bus idles high at zero static current. (The
+ *    old pulldown-parking trick was for a DEAD switched rail — against a
+ *    live rail it would burn ~1.4 mA through the pull-ups.)
  *  - ADC: supercap on ADC_IN3 (PB4) with VREFINT-calibrated true-VDDA math
  *    (same approach as MGR_BAT, which owns the NiMH/ADC_IN0 read).
  *  - RNG: one hardware-random word per cycle for the TX-period jitter.
@@ -50,15 +51,16 @@ uint16_t CC_HW_uartOverruns(void);
 /** Close the session: UART off, pins parked, rail released. */
 void CC_HW_uartClose(void);
 
-/* ---- GPS power (rail + enable; UART handled by the session) ---- */
+/* ---- GPS power (CC_GPS_EN; UART handled by the session) ---- */
 
 void CC_HW_gpsPowerOn(void);
 void CC_HW_gpsPowerOff(void);
 
 /* ---- I2C2 env-sensor session ---- */
 
-/** Rail up + bus-clear + HAL init. False = bus stuck low (skip this sample;
- *  the rail is power-cycled, which is the best unstick). */
+/** Bus-idle check / bus-clear + HAL init. False = bus stuck low (skip this
+ *  sample; retried next cycle — with an always-on rail the 9-clock bus-clear
+ *  is the only unstick lever, so a persistent failure is a hardware fault). */
 bool CC_HW_i2cSessionOpen(void);
 /** Bus ops for the cc_i2c_sens drivers (valid between open and close). */
 const cc_i2c_ops_t *CC_HW_i2cOps(void);

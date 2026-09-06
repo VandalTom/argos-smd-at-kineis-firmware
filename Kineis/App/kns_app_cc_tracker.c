@@ -137,10 +137,16 @@ static bool ws_session_open;
 #endif
 
 #if CC_ENABLE_ENV_I2C
+#if CC_ENABLE_SHT45
 static struct { cc_cache_meta_t meta; float rh, tc; }  sht_cache;   /* SHT45 */
+#endif
+#if CC_ENABLE_BMP280
 static struct { cc_cache_meta_t meta; float tc, hpa; } baro_cache;  /* BMP/BME */
 static struct { cc_cache_meta_t meta; float rh, tc; }  bmehum_cache;/* BME280 RH */
+#endif
+#if CC_ENABLE_AHT20
 static struct { cc_cache_meta_t meta; float rh, tc; }  aht_cache;   /* AHT20 */
+#endif
 #endif
 
 #if CC_ENABLE_ADC_SENSE
@@ -302,23 +308,30 @@ static void env_sample(void)
 #endif
 
 	bool sht_found = false;
-	cc_sht45_t sht;
 
-	sht_found = cc_sht45_begin(&sht, bus, CC_SHT45_ADDR);
-	if (sht_found) {
-		float rh, tc;
+	(void)sht_found;
+#if CC_ENABLE_SHT45
+	{
+		cc_sht45_t sht;
 
-		if (cc_sht45_read(&sht, &rh, &tc)) {
-			sht_cache.rh = rh;
-			sht_cache.tc = tc;
-			cache_stamp(&sht_cache.meta);
-			MGR_LOG_DEBUG("[SHT] %d %%RH  %d.%02u C (BMP/AHT skipped)\r\n",
-				(int)rh, (int)tc, (unsigned)((int)(tc * 100) % 100));
-		} else {
-			MGR_LOG_DEBUG("[SHT] read failed — keeping previous\r\n");
+		sht_found = cc_sht45_begin(&sht, bus, CC_SHT45_ADDR);
+		if (sht_found) {
+			float rh, tc;
+
+			if (cc_sht45_read(&sht, &rh, &tc)) {
+				sht_cache.rh = rh;
+				sht_cache.tc = tc;
+				cache_stamp(&sht_cache.meta);
+				MGR_LOG_DEBUG("[SHT] %d %%RH  %d.%02u C (BMP/AHT skipped)\r\n",
+					(int)rh, (int)tc, (unsigned)((int)(tc * 100) % 100));
+			} else {
+				MGR_LOG_DEBUG("[SHT] read failed — keeping previous\r\n");
+			}
 		}
 	}
+#endif
 
+#if CC_ENABLE_BMP280
 	if (!sht_found) {
 		cc_bmp280_t bmp;
 
@@ -340,8 +353,14 @@ static void env_sample(void)
 			} else {
 				MGR_LOG_DEBUG("[BMP] read failed — keeping previous\r\n");
 			}
+		} else {
+			MGR_LOG_DEBUG("[BMP] not responding — keeping previous\r\n");
 		}
+	}
+#endif
 
+#if CC_ENABLE_AHT20
+	if (!sht_found) {
 		cc_aht20_t aht;
 
 		if (cc_aht20_begin(&aht, bus)) {
@@ -358,6 +377,7 @@ static void env_sample(void)
 			}
 		}
 	}
+#endif
 
 	CC_HW_i2cSessionClose();
 }
@@ -366,9 +386,15 @@ static bool env_stale(void)
 {
 	bool stale = false;
 
+#if CC_ENABLE_SHT45
 	stale = stale || !cache_fresh(&sht_cache.meta, CC_ENV_MAX_AGE_MS);
+#endif
+#if CC_ENABLE_BMP280
 	stale = stale || !cache_fresh(&baro_cache.meta, CC_ENV_MAX_AGE_MS);
+#endif
+#if CC_ENABLE_AHT20
 	stale = stale || !cache_fresh(&aht_cache.meta, CC_ENV_MAX_AGE_MS);
+#endif
 #if CC_ENABLE_ADC_SENSE
 	stale = true; /* supply voltages: sample every cycle */
 #endif
@@ -399,13 +425,17 @@ static void build_fields(cc_payload_fields_t *f)
 
 #if CC_ENABLE_ENV_I2C
 	/* Temp priority: SHT45 > BMP/BME > AHT20; humidity: SHT45 > BME > AHT20;
-	 * pressure: BMP/BME only. */
+	 * pressure: BMP/BME only. (On the CC carrier only the BME280 is fitted,
+	 * so it supplies all three fields.) */
+#if CC_ENABLE_SHT45
 	if (cache_fresh(&sht_cache.meta, CC_ENV_MAX_AGE_MS)) {
 		f->hum_valid = true;
 		f->hum_pct = sht_cache.rh;
 		f->temp_valid = true;
 		f->temp_c = sht_cache.tc;
 	}
+#endif
+#if CC_ENABLE_BMP280
 	if (cache_fresh(&baro_cache.meta, CC_ENV_MAX_AGE_MS)) {
 		f->press_valid = true;
 		f->press_hpa = baro_cache.hpa;
@@ -418,6 +448,8 @@ static void build_fields(cc_payload_fields_t *f)
 		f->hum_valid = true;
 		f->hum_pct = bmehum_cache.rh;
 	}
+#endif
+#if CC_ENABLE_AHT20
 	if (cache_fresh(&aht_cache.meta, CC_ENV_MAX_AGE_MS)) {
 		if (!f->hum_valid) {
 			f->hum_valid = true;
@@ -428,6 +460,7 @@ static void build_fields(cc_payload_fields_t *f)
 			f->temp_c = aht_cache.tc;
 		}
 	}
+#endif
 #endif
 
 #if CC_ENABLE_WS85

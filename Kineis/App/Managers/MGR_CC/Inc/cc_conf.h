@@ -18,8 +18,15 @@
 /* ---- Staged bring-up switches ------------------------------------------ */
 #define CC_ENABLE_WS85      1   /**< WS85 wind/rain sampling (USART1 session B) */
 #define CC_ENABLE_GPS       1   /**< GPS fix acquisition (USART1 session A) */
-#define CC_ENABLE_ENV_I2C   1   /**< SHT45/BMP-BME280/AHT20 on I2C2 */
+#define CC_ENABLE_ENV_I2C   1   /**< env sensors on I2C2 (always-powered rail) */
 #define CC_ENABLE_ADC_SENSE 1   /**< Supercap + NiMH via internal ADC */
+
+/* Per-chip env gates. The CC carrier fits ONLY a BME280 (temp + pressure +
+ * humidity, ~0.1 uA sleeping on the always-on rail); the SHT45/AHT20 paths
+ * from the XIAO design are compiled out but kept portable. */
+#define CC_ENABLE_BMP280    1   /**< BMP280/BME280 (auto-detects which) */
+#define CC_ENABLE_SHT45     0
+#define CC_ENABLE_AHT20     0
 
 /* ---- Timing (mission cadence) ------------------------------------------ */
 /* Base publish period per battery tier. One full cycle = WS85 sample ->
@@ -54,6 +61,10 @@
 #define CC_WS85_ADDR            0x85      /**< Modbus slave address */
 
 /* ---- GPS ---------------------------------------------------------------- */
+/* The carrier routes the receiver's NMEA output to PB6 — USART1's TX-capable
+ * pad — so the GPS session enables the WL55 UART's CR2.SWAP feature to make
+ * PB6 the receive pin. The session is RX-only (no wire toward the GPS). */
+#define CC_GPS_UART_SWAP        1
 #define CC_GPS_BAUD             9600UL
 #define CC_GPS_TTFF_BUDGET_MS   90000UL   /**< one search window */
 #define CC_GPS_MAX_DURATIONS    6         /**< adaptive ramp: max chained windows

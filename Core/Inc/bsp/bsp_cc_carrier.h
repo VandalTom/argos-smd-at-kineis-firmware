@@ -48,32 +48,35 @@
 #define EXT_WKUP_BUTTON_Pin         GPIO_PIN_3
 #define EXT_WKUP_BUTTON_GPIO_Port   GPIOB
 
-/* ---- Battery monitoring: NiMH pack via gated divider (SMD_STDALONE
- * pattern: PB9/P1 gates the divider, PB13/P0 = ADC_IN0 senses it) ---- */
+/* ---- Battery monitoring: NiMH pack sensed DIRECTLY on PB13/P0 = ADC_IN0
+ * through a 10 k series resistor (R6 on the carrier netlist) — no divider
+ * (2S NiMH tops out ~2.9 V, inside VDDA) and no gate. PB9/VBAT_EN is NOT
+ * wired on this carrier: MGR_BAT still toggles it, harmlessly, into a
+ * floating pad kept here so the shared code compiles unchanged. ---- */
 #define VBAT_EN_Pin             GPIO_PIN_9
 #define VBAT_EN_GPIO_Port       GPIOB
 #define VBAT_ADC_Pin            GPIO_PIN_13
 #define VBAT_ADC_GPIO_Port      GPIOB
-/* Divider ratio override for MGR_BAT (values in kOhm; only the ratio matters).
- * CARRIER TODO: set to the routed divider before flight; 1:1 shown here. */
-#define MGR_BAT_DIV_R_TOP_KOHM  1000
-#define MGR_BAT_DIV_R_BOT_KOHM  1000
+/* Direct sense: ratio (TOP+BOT)/BOT must equal 1 -> TOP = 0. */
+#define MGR_BAT_DIV_R_TOP_KOHM  0
+#define MGR_BAT_DIV_R_BOT_KOHM  100
 
-/* ---- CC carrier rails and sensors ---- */
-
-/* VCCIO rail switch (AP2112K EN): powers GPS + external I2C. PB5 = P22. */
-#define CC_IO_EN_Pin            GPIO_PIN_5
-#define CC_IO_EN_GPIO_Port      GPIOB
+/* ---- CC carrier rails and sensors ----
+ * Power architecture (rev-next): one always-on 3.3 V buck (TPS62842) feeds
+ * the module (VDD/VBAT/VDD_EXTPA), the BME280, and the I2C pull-ups — no
+ * switched VCCIO rail (AP2112K deleted). Only the GPS is hard-switched,
+ * via its own enable. PB5 (P22) is a spare GPIO. */
 
 /* GPS power switch (HIGH = on). PA1 = P3. */
 #define CC_GPS_EN_Pin           GPIO_PIN_1
 #define CC_GPS_EN_GPIO_Port     GPIOA
 
-/* USART1 session A — GPS @ 9600: PB6 TX (P11) / PB7 RX (P12), AF7. */
-#define CC_GPS_TX_Pin           GPIO_PIN_6
-#define CC_GPS_TX_GPIO_Port     GPIOB
-#define CC_GPS_RX_Pin           GPIO_PIN_7
-#define CC_GPS_RX_GPIO_Port     GPIOB
+/* USART1 session A — GPS @ 9600, RX-ONLY as routed: the receiver's NMEA
+ * output lands on PB6 (P11), which is USART1's TX-capable pad, so the GPS
+ * session runs with CR2.SWAP enabled (CC_GPS_UART_SWAP) making PB6 the
+ * receive pin. PB7 (P12) is not wired on this carrier. */
+#define CC_GPS_NMEA_Pin         GPIO_PIN_6
+#define CC_GPS_NMEA_GPIO_Port   GPIOB
 
 /* USART1 session B — WS85 @ 115200: PA10 RX (P33), AF7. The WS85 lives on
  * the always-on 3V3 rail (rain counter) and broadcasts unprompted; PA9 (P34)
@@ -81,9 +84,10 @@
 #define CC_WS85_RX_Pin          GPIO_PIN_10
 #define CC_WS85_RX_GPIO_Port    GPIOA
 
-/* I2C2 — env sensors: PA11 SDA (P28) / PA12 SCL (P27), AF4.
- * Pull-ups to VCCIO on the carrier; firmware parks the pins pulled-down
- * whenever the rail is off (kills the ESD-diode back-feed). */
+/* I2C2 — BME280: PA11 SDA (P28) / PA12 SCL (P27), AF4.
+ * Pull-ups to the always-on 3.3 V rail; between samples the firmware parks
+ * the pins high-Z (analog) and the pull-ups hold the bus idle-high at zero
+ * static current. */
 #define CC_I2C_SDA_Pin          GPIO_PIN_11
 #define CC_I2C_SDA_GPIO_Port    GPIOA
 #define CC_I2C_SCL_Pin          GPIO_PIN_12

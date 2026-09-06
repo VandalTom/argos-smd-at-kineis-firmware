@@ -18,27 +18,11 @@
 #include "mgr_log.h"
 
 /*******************************************************************************
- * Rail state (single translation unit — plain statics)
+ * Power state (single translation unit — plain statics)
  ******************************************************************************/
 
 static bool s_gps_powered;
 static bool s_i2c_open;
-
-/* VCCIO settle: rail + attached chips' power-on reset (a chip probed mid-boot
- * can jam the I2C bus). Same 10 ms as the Arduino original. */
-#define CC_VCCIO_SETTLE_MS 10
-
-static void io_enable(void)
-{
-	HAL_GPIO_WritePin(CC_IO_EN_GPIO_Port, CC_IO_EN_Pin, GPIO_PIN_SET);
-	HAL_Delay(CC_VCCIO_SETTLE_MS);
-}
-
-static void io_maybe_disable(void)
-{
-	if (!s_gps_powered && !s_i2c_open)
-		HAL_GPIO_WritePin(CC_IO_EN_GPIO_Port, CC_IO_EN_Pin, GPIO_PIN_RESET);
-}
 
 /*******************************************************************************
  * Init: safe pin states
@@ -48,10 +32,10 @@ static void park_i2c_pins(void)
 {
 	GPIO_InitTypeDef g = {0};
 
-	/* Pulled DOWN, not hi-Z: bleeds the dead VCCIO rail through the sensor
-	 * pull-ups instead of floating mid-rail (see header). */
-	g.Mode = GPIO_MODE_INPUT;
-	g.Pull = GPIO_PULLDOWN;
+	/* High-Z (analog): the external pull-ups sit on the always-on 3.3 V
+	 * rail and hold the bus idle-high at zero static current. */
+	g.Mode = GPIO_MODE_ANALOG;
+	g.Pull = GPIO_NOPULL;
 	g.Pin = CC_I2C_SDA_Pin;
 	HAL_GPIO_Init(CC_I2C_SDA_GPIO_Port, &g);
 	g.Pin = CC_I2C_SCL_Pin;
@@ -65,15 +49,10 @@ void CC_HW_init(void)
 	__HAL_RCC_GPIOA_CLK_ENABLE();
 	__HAL_RCC_GPIOB_CLK_ENABLE();
 
-	/* Rails: outputs, OFF */
+	/* GPS switch: output, OFF (the only switched load on this carrier) */
 	g.Mode = GPIO_MODE_OUTPUT_PP;
 	g.Pull = GPIO_NOPULL;
 	g.Speed = GPIO_SPEED_FREQ_LOW;
-
-	g.Pin = CC_IO_EN_Pin;
-	HAL_GPIO_Init(CC_IO_EN_GPIO_Port, &g);
-	HAL_GPIO_WritePin(CC_IO_EN_GPIO_Port, CC_IO_EN_Pin, GPIO_PIN_RESET);
-
 	g.Pin = CC_GPS_EN_Pin;
 	HAL_GPIO_Init(CC_GPS_EN_GPIO_Port, &g);
 	HAL_GPIO_WritePin(CC_GPS_EN_GPIO_Port, CC_GPS_EN_Pin, GPIO_PIN_RESET);
@@ -90,10 +69,8 @@ void CC_HW_init(void)
 	 * analog input neither loads it nor back-feeds anything). */
 	g.Pin = CC_WS85_RX_Pin;
 	HAL_GPIO_Init(CC_WS85_RX_GPIO_Port, &g);
-	g.Pin = CC_GPS_RX_Pin;
-	HAL_GPIO_Init(CC_GPS_RX_GPIO_Port, &g);
-	g.Pin = CC_GPS_TX_Pin;
-	HAL_GPIO_Init(CC_GPS_TX_GPIO_Port, &g);
+	g.Pin = CC_GPS_NMEA_Pin;
+	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
 
 	s_gps_powered = false;
 	s_i2c_open = false;
@@ -147,10 +124,8 @@ void CC_HW_uartClose(void)
 	g.Mode = GPIO_MODE_ANALOG;
 	g.Pull = GPIO_NOPULL;
 	if (s_session == CC_UART_GPS) {
-		g.Pin = CC_GPS_TX_Pin;
-		HAL_GPIO_Init(CC_GPS_TX_GPIO_Port, &g);
-		g.Pin = CC_GPS_RX_Pin;
-		HAL_GPIO_Init(CC_GPS_RX_GPIO_Port, &g);
+		g.Pin = CC_GPS_NMEA_Pin;
+		HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
 	} else {
 		g.Pin = CC_WS85_RX_Pin;
 		HAL_GPIO_Init(CC_WS85_RX_GPIO_Port, &g);
@@ -176,10 +151,10 @@ bool CC_HW_uartOpen(cc_uart_session_t s)
 	uint32_t baud;
 
 	if (s == CC_UART_GPS) {
-		g.Pin = CC_GPS_TX_Pin;
-		HAL_GPIO_Init(CC_GPS_TX_GPIO_Port, &g);
-		g.Pin = CC_GPS_RX_Pin;
-		HAL_GPIO_Init(CC_GPS_RX_GPIO_Port, &g);
+		/* NMEA arrives on PB6 (USART1's TX-capable pad) — CR2.SWAP below
+		 * turns it into the receive pin. PB7 is unwired on this carrier. */
+		g.Pin = CC_GPS_NMEA_Pin;
+		HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
 		baud = CC_GPS_BAUD;
 	} else {
 		/* WS85: RX only — PA9 (bench config TX) is deliberately untouched */
@@ -196,11 +171,17 @@ bool CC_HW_uartOpen(cc_uart_session_t s)
 	cc_huart1.Init.WordLength = UART_WORDLENGTH_8B;
 	cc_huart1.Init.StopBits = UART_STOPBITS_1;
 	cc_huart1.Init.Parity = UART_PARITY_NONE;
-	cc_huart1.Init.Mode = (s == CC_UART_GPS) ? UART_MODE_TX_RX : UART_MODE_RX;
+	cc_huart1.Init.Mode = UART_MODE_RX; /* both sensor sessions only listen */
 	cc_huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
 	cc_huart1.Init.OverSampling = UART_OVERSAMPLING_16;
 	cc_huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
 	cc_huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+#if CC_GPS_UART_SWAP
+	if (s == CC_UART_GPS) {
+		cc_huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_SWAP_INIT;
+		cc_huart1.AdvancedInit.Swap = UART_ADVFEATURE_SWAP_ENABLE;
+	}
+#endif
 	if (HAL_UART_Init(&cc_huart1) != HAL_OK) {
 		MGR_LOG_WARN("[CCHW] USART1 init failed (session %d)\r\n", (int)s);
 		__HAL_RCC_USART1_CLK_DISABLE();
@@ -244,8 +225,8 @@ void CC_HW_gpsPowerOn(void)
 	if (s_gps_powered)
 		return;
 	MGR_LOG_DEBUG("[CCHW] GPS on\r\n");
-	io_enable();
 	HAL_GPIO_WritePin(CC_GPS_EN_GPIO_Port, CC_GPS_EN_Pin, GPIO_PIN_SET);
+	HAL_Delay(10); /* receiver power-on settle before opening the UART */
 	s_gps_powered = true;
 }
 
@@ -256,7 +237,6 @@ void CC_HW_gpsPowerOff(void)
 	MGR_LOG_DEBUG("[CCHW] GPS off\r\n");
 	HAL_GPIO_WritePin(CC_GPS_EN_GPIO_Port, CC_GPS_EN_Pin, GPIO_PIN_RESET);
 	s_gps_powered = false;
-	io_maybe_disable();
 }
 
 /*******************************************************************************
@@ -330,16 +310,12 @@ static bool i2c_bus_idle(void)
 
 bool CC_HW_i2cSessionOpen(void)
 {
-	s_i2c_open = true; /* holds the rail through the whole session */
-	io_enable();
-
 	if (!i2c_bus_idle()) {
 		MGR_LOG_WARN("[CCHW] I2C bus stuck low — skipping env sample\r\n");
 		park_i2c_pins();
-		s_i2c_open = false;
-		io_maybe_disable(); /* full rail power-cycle = best unstick */
 		return false;
 	}
+	s_i2c_open = true;
 
 	GPIO_InitTypeDef g = {0};
 
@@ -369,7 +345,6 @@ bool CC_HW_i2cSessionOpen(void)
 		__HAL_RCC_I2C2_CLK_DISABLE();
 		park_i2c_pins();
 		s_i2c_open = false;
-		io_maybe_disable();
 		return false;
 	}
 	return true;
@@ -383,7 +358,6 @@ void CC_HW_i2cSessionClose(void)
 	__HAL_RCC_I2C2_CLK_DISABLE();
 	park_i2c_pins();
 	s_i2c_open = false;
-	io_maybe_disable();
 }
 
 /* --- cc_i2c_ops_t implementation over HAL (polling, 100 ms guard) --- */
