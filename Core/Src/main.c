@@ -391,31 +391,20 @@ static void IDLE_task(void)
   /* ---- CC_TRACKER APP -------------------------------------------------------------------------- */
 
 #ifdef USE_CC_TRACKER_APP
-#ifdef USE_BAREMETAL
+  /* CC never uses the LPM aggregator: its SLEEP path suspends SysTick and
+   * nothing periodic wakes CYCLE_WAIT, so HAL_GetTick() would stall. Deep
+   * sleep belongs to the tracker (STOP2 until the cycle deadline,
+   * cc_sleep.c); every other idle moment is WFI with SysTick running —
+   * <= 1 ms latency, the loop keeps refreshing the IWDG. */
   {
-  uint32_t prim;
+  uint32_t prim = __get_PRIMASK();
 
-  prim = __get_PRIMASK();
   __disable_irq();
-  __disable_fault_irq();
-  /* No LPM while a sensor session is pumping (UART ring would overrun in
-   * anything deeper than SLEEP), an event or a console line is pending. */
-  if (KNS_Q_isEvtInSomeQ() || MGR_AT_CMD_isPendingAt() || KNS_APP_cc_tracker_isBusy()) {
-    if (!prim){
-      __enable_fault_irq();
-      __enable_irq();
-    }
-    return;
-  }
-  LPM_enter();
-  if (!prim){
-    __enable_fault_irq();
+  if (!KNS_Q_isEvtInSomeQ() && !MGR_AT_CMD_isPendingAt())
+    __WFI();
+  if (!prim)
     __enable_irq();
   }
-  }
-#else
-  LPM_enter();
-#endif
 #endif
 
   /* ---- KINEIS STDLN APP ---------------------------------------------------------------------- */

@@ -64,6 +64,7 @@
 #include "cc_console.h"
 #include "cc_selftest.h"
 #include "cc_commission.h"
+#include "cc_sleep.h"
 #include "cc_hw.h"
 #include "cc_payload.h"
 #include "cc_tier.h"
@@ -1026,10 +1027,11 @@ static void send_state(void)
 	const char *st_name = st.running ? "RUNNING" : !st.done ? "NONE" :
 	                      cc_selftest_passed(&st) ? "PASS" : "FAIL";
 
-	MCU_AT_CONSOLE_send("+STATE=%s,up=%lu,tx=%lu,mac=%u,comm=%s,st=%s\r\n",
+	MCU_AT_CONSOLE_send("+STATE=%s,up=%lu,tx=%lu,mac=%u,comm=%s,st=%s,slp=%lu\r\n",
 		cc_state_names[cc_state], (unsigned long)(HAL_GetTick() / 1000UL),
 		(unsigned long)tx_count, mac_ready ? 1u : 0u,
-		cc_comm_phase_name(comm.phase), st_name);
+		cc_comm_phase_name(comm.phase), st_name,
+		(unsigned long)(CC_SLEEP_totalMs() / 1000UL));
 	bMGR_AT_CMD_logSucceedMsg();
 }
 
@@ -1086,6 +1088,8 @@ static void console_poll(void)
 
 	while ((line = MGR_AT_CMD_popNextAt()) != NULL) {
 		const char *l = (const char *)line;
+
+		CC_SLEEP_holdAwake(CC_CONSOLE_AWAKE_MS);
 
 		switch (cc_console_classify(l)) {
 		case CC_CON_BOOT:
@@ -1197,7 +1201,13 @@ bool KNS_APP_cc_tracker_isBusy(void)
 
 void KNS_APP_cc_tracker_init(void)
 {
-	/* IWDG early — before any slow init */
+	/* IWDG early — before any slow init. STOP2 sleeps far longer than the
+	 * 16 s window, so the IWDG must be frozen in STOP first (option byte;
+	 * on a fresh chip this programs it and does one OBL reset, VDD-gated).
+	 * Without it MGR_WDG_init leaves the watchdog off ("not frozen yet"). */
+#if CC_USE_STOP2
+	(void)MGR_WDG_ensureIwdgStopOptionByte();
+#endif
 	MGR_WDG_init();
 
 	MGR_EVTLOG_init();
@@ -1508,8 +1518,14 @@ void KNS_APP_cc_tracker_loop(void)
 
 		uint32_t elapsed = HAL_GetTick() - cycle_start_tick;
 
-		if (elapsed < cycle_period_ms)
+		if (elapsed < cycle_period_ms) {
+#if CC_USE_STOP2
+			/* Deep sleep to the deadline; refused (console active, MAC
+			 * busy, < CC_STOP2_MIN_MS left...) -> the idle task WFIs */
+			(void)CC_SLEEP_stop2Until(cycle_start_tick + cycle_period_ms);
+#endif
 			return;
+		}
 
 		/* End-of-cycle maintenance: graceful reboot at the uptime cap,
 		 * never mid-TX (keeps tick-based ages far from the 49.7-day wrap;

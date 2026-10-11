@@ -118,6 +118,18 @@
 #define CC_COMM_GPS_WINDOW_MS    120000UL  /**< fixed window per fast attempt */
 #define CC_COMM_DONE_MAGIC       0xC0331551UL /**< TAMP BKP12R value = commissioned */
 
+/* ---- Deep sleep (cc_sleep.c) ----------------------------------------------
+ * Between cycles the MCU sleeps in STOP2 until the next cycle's deadline
+ * (RTC wake-up timer, HAL tick RTC-compensated). Every other wait (sensor
+ * sessions, TX) idles with WFI + SysTick running. Needs the IWDG frozen in
+ * STOP (option byte, programmed once on first boot). */
+#define CC_USE_STOP2           1
+#define CC_STOP2_MIN_MS        2000UL      /**< shorter waits just WFI */
+#define CC_STOP2_MAX_MS        3600000UL   /**< per call; WUT range and the
+                                                <24 h tick compensation */
+#define CC_CONSOLE_AWAKE_MS    30000UL     /**< no STOP2 this long after console
+                                                activity or a console-RX wake */
+
 /* ---- Rescue mode (keeps the UART update path alive through a bad build) ----
  * Every boot bumps a counter in TAMP BKP13R; a boot that stays up
  * CC_BOOT_STABLE_MS clears it, and so do deliberate resets (AT+RESET, DFU

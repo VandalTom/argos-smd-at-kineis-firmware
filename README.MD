@@ -142,6 +142,71 @@ The SWS uses an adaptive biofouling-resistant detection algorithm:
 make full APP=UW_DOPPLER BOARD=SMD_STDALONE LPM=STOP MAC_PRFL=BLIND COMM=UART DEBUG=1 -j20
 ```
 
+### Naiad Weather Tracker (`APP=CC_TRACKER`, `BOARD=CC_CARRIER`)
+
+Drifting weather station: the STM32WL55 on the argos-smd module is the only
+processor. Each cycle it samples an Ecowitt WS85 (wind/rain, UART), a BME280
+(I2C), the NiMH pack and supercap (ADC) and, on schedule, a GPS (NMEA), packs
+the 24-byte payload v3 and transmits it as one LDA2 frame. Cadence is
+battery-tiered (7/15/30 min + 0..30 % jitter). Configuration is compile-time
+(`Kineis/App/Managers/MGR_CC/Inc/cc_conf.h`).
+
+```bash
+make APP=CC_TRACKER BOARD=CC_CARRIER COMM=UART MAC_PRFL=BASIC DEBUG=0 -j8 full
+```
+
+**Console** — debug UART (module P5 = PA2 TX, P4 = PA3 RX), 115200 8N1. Only
+the commands below are accepted (`+ERROR=1203` otherwise), so nothing on the
+console can drive the radio behind the tracker's back:
+
+| Command | Reply |
+|---------|-------|
+| `AT+FW=?` `AT+VERSION=?` `AT+PING=?` `AT+ID=?` `AT+ADDR=?` `AT+SN=?` `AT+RCONF=?` | standard `+X=...` then `+OK` |
+| `AT+ID=<dec>` `AT+ADDR=<8hex>` `AT+SECKEY=<32hex>` `AT+RCONF=<32hex>` `AT+SAVE_RCONF=` | `+OK`; `+ERROR=BUSY` while transmitting; effective after `AT+RESET` |
+| `AT+SECKEY=?` | `+SECKEYCRC=<8hex>` — CRC-32 of the key; the key is never echoed |
+| `AT+STATE=?` | `+STATE=<state>,up=<s>,tx=<n>,mac=<0/1>,comm=<phase>,st=<NONE/RUNNING/PASS/FAIL>` |
+| `AT+SELFTEST=[GPS,WS85,ENV,ADC,TX]` / `AT+SELFTEST=?` | run (all items by default) / replay the last report |
+| `AT+COMMISSION=?` / `=START` / `=SKIP` / `=ARM` | deployment-burst status / force / mark done / re-arm |
+| `AT+RESET=` | `+RESET=OK` (or `+RESET=PENDING` until a TX finishes), reboot |
+| `AT+BOOT=` | `+BOOT=OK` (or `PENDING`), hands over to the UART DFU bootloader |
+
+**Boot self-test** — runs once per boot right after the MAC is ready, and on
+demand. Line-test fast: GPS passes on a checksum-valid NMEA sentence within
+5 s (no fix needed), WS85 on one CRC-valid broadcast (≤ 35 s), ENV on a
+plausible BME280 reading, ADC on the NiMH voltage being in range, TX on the
+MAC's TX_DONE for one real frame (no satellite pass needed). Report:
+`+ST=<ITEM>,<PASS|FAIL|SKIP>,<detail>` per item, then
+`+SELFTEST=PASS` or `+SELFTEST=FAIL,<items>`.
+
+**Deployment (commissioning) burst** — units are switched on indoors and
+deployed later with no button. The first GPS fix since power-up is the
+"outdoors now" signal: the unit transmits every 60 s (+0..5 s jitter) for
+30 min so it is heard quickly, then runs normally. Until that fix, GPS is
+tried every cycle for the first 48 h (one window, no backoff) and the window
+ends after 45 s if the receiver tracks fewer than two satellites above
+20 dBHz (indoors). The "done" flag lives in a TAMP backup register: it
+survives watchdog/soft resets and updates and is cleared only by real power
+loss.
+
+**Update and recovery path**
+
+1. Normal update: `Tools/uart_dfu_check.py --port <port> --flash build/argos-smd-at-kineis-firmware.bin`
+   (`AT+BOOT` → DFU bootloader → erase/write/CRC → app restarts, ~30 s at 115200).
+2. Interrupted update (power loss): the flashers write the vector table last,
+   so the first flash word is still erased and the next power-up boots ST's
+   ROM bootloader on the same pads — recover with `Tools/rom_uart_flash.py`,
+   no BOOT0 needed.
+3. Build that crashes early: after 3 failed boots in a row (a boot is "good"
+   once it stays up 90 s) the next boot is a **rescue boot** — no sensors, no
+   radio, console only for 10 min (`+RESCUE=failed_boots=N,window_s=600`),
+   enough to `AT+BOOT` and reflash. Fault handlers always reset (never hang).
+4. Last resort: BOOT0 test pad high at power-up + `Tools/rom_uart_flash.py`,
+   or SWD (`make flash-full`).
+
+**Power** — `Tools/naiad_power_model.py` ranks the consumers from a tagged
+assumption table (replace with rail measurements). GPS acquisition and the
+27 dBm TX dominate once the MCU sleeps in STOP2 between phases.
+
 ## Board Variants
 
 | Feature | SMD_PA | SMD_NOPA | SMD_STDALONE | SMD_OP |
