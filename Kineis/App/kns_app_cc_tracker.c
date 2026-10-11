@@ -65,6 +65,7 @@
 #include "cc_selftest.h"
 #include "cc_commission.h"
 #include "cc_sleep.h"
+#include "mgr_cred.h"
 #include "cc_hw.h"
 #include "cc_payload.h"
 #include "cc_tier.h"
@@ -93,13 +94,15 @@ typedef enum {
 	CC_ST_CYCLE_WAIT,
 	CC_ST_SELFTEST,      /**< appended: keeps the evtlog/err numbering stable */
 	CC_ST_RESCUE,        /**< console-only after repeated failed boots */
+	CC_ST_NO_CREDS,      /**< unprovisioned: MAC never started, console up */
 } cc_state_t;
 
 static const char *const cc_state_names[] = {
 	"BOOT", "INIT_MAC", "WAIT_MAC_READY", "SAMPLE_WS85", "SAMPLE_ENV",
 	"SAMPLE_GPS", "TX_SEND", "WAIT_TX_DONE", "CYCLE_WAIT", "SELFTEST", "RESCUE",
+	"NO_CREDS",
 };
-_Static_assert(sizeof(cc_state_names) / sizeof(cc_state_names[0]) == CC_ST_RESCUE + 1,
+_Static_assert(sizeof(cc_state_names) / sizeof(cc_state_names[0]) == CC_ST_NO_CREDS + 1,
 	"cc_state_names must list every cc_state_t");
 
 static cc_state_t cc_state;
@@ -132,6 +135,7 @@ static bool mac_ready;              /**< MAC init OK at least once since boot */
 static bool boot_selftest_done;
 static bool boot_stable;            /**< up CC_BOOT_STABLE_MS: failed-boot counter cleared */
 static bool rescue;                 /**< console-only boot (see cc_conf.h rescue mode) */
+static bool creds_ok;               /**< ID/ADDR/SECKEY provisioned (or test creds allowed) */
 
 typedef enum {
 	STS_GPS, STS_WS85, STS_ENV, STS_ADC, STS_TX, STS_TX_WAIT, STS_DONE,
@@ -753,6 +757,11 @@ static void selftest_finish(void)
 	MCU_AT_CONSOLE_send("%s", line);
 	MGR_LOG_INFO("[ST] self-test %s\r\n", cc_selftest_passed(&st) ? "PASS" : "FAIL");
 
+	if (!creds_ok) {
+		transition_to(CC_ST_NO_CREDS); /* still waiting for provisioning */
+		return;
+	}
+
 	if (st.at_boot) {
 		/* Boot run: straight into the first cycle (its GPS step is the
 		 * commissioning probe). Sensor caches are fresh from the test. */
@@ -911,7 +920,7 @@ static void selftest_run(void)
 			cc_payload_pack(payload, &f);
 			st_tx_evt = 0;
 			if (!mac_ready) {
-				st_report(CC_STI_TX, CC_STV_FAIL, "mac_not_ready");
+				st_report(CC_STI_TX, CC_STV_FAIL, creds_ok ? "mac_not_ready" : "unprovisioned");
 				st_goto(STS_DONE);
 				return;
 			}
@@ -1027,11 +1036,11 @@ static void send_state(void)
 	const char *st_name = st.running ? "RUNNING" : !st.done ? "NONE" :
 	                      cc_selftest_passed(&st) ? "PASS" : "FAIL";
 
-	MCU_AT_CONSOLE_send("+STATE=%s,up=%lu,tx=%lu,mac=%u,comm=%s,st=%s,slp=%lu\r\n",
+	MCU_AT_CONSOLE_send("+STATE=%s,up=%lu,tx=%lu,mac=%u,comm=%s,st=%s,slp=%lu,prov=%u\r\n",
 		cc_state_names[cc_state], (unsigned long)(HAL_GetTick() / 1000UL),
 		(unsigned long)tx_count, mac_ready ? 1u : 0u,
 		cc_comm_phase_name(comm.phase), st_name,
-		(unsigned long)(CC_SLEEP_totalMs() / 1000UL));
+		(unsigned long)(CC_SLEEP_totalMs() / 1000UL), creds_ok ? 1u : 0u);
 	bMGR_AT_CMD_logSucceedMsg();
 }
 
@@ -1112,7 +1121,7 @@ static void console_poll(void)
 				MCU_AT_CONSOLE_send("+SELFTEST=RUNNING\r\n");
 			} else {
 				st_req_mask |= m; /* started by service_requests() */
-				if (!mac_ready || radio_busy())
+				if ((!mac_ready && cc_state != CC_ST_NO_CREDS) || radio_busy())
 					MCU_AT_CONSOLE_send("+SELFTEST=PENDING\r\n");
 			}
 			break;
@@ -1158,7 +1167,8 @@ static void service_requests(void)
 		else
 			do_reset();
 	}
-	if (st_req_mask && mac_ready && !radio_busy() && cc_state != CC_ST_SELFTEST &&
+	if (st_req_mask && (mac_ready || cc_state == CC_ST_NO_CREDS) && !radio_busy() &&
+	    cc_state != CC_ST_SELFTEST &&
 	    cc_state != CC_ST_BOOT && cc_state != CC_ST_INIT_MAC &&
 	    cc_state != CC_ST_WAIT_MAC_READY) {
 		uint8_t m = st_req_mask;
@@ -1235,6 +1245,17 @@ void KNS_APP_cc_tracker_init(void)
 		}
 	}
 
+	{
+		MGR_CRED_Result_t cr = MGR_CRED_syncAndRestore();
+
+		creds_ok = (cr != MGR_CRED_FAIL_LOUD) || CC_ALLOW_TEST_CREDS;
+		if (cr == MGR_CRED_RESTORED)
+			MGR_LOG_WARN("[CC] credentials restored from the mirror\r\n");
+		if (!creds_ok)
+			MGR_LOG_ERR("[CC] NOT PROVISIONED (no ID/ADDR/SECKEY) - radio stays off until "
+				"credentials are written over the console\r\n");
+	}
+
 	CC_HW_init();
 	MGR_BAT_init();
 	cc_tier_init(&tier);
@@ -1290,9 +1311,37 @@ void KNS_APP_cc_tracker_loop(void)
 		return;
 
 	case CC_ST_INIT_MAC:
+		if (!creds_ok) {
+			MGR_EVTLOG_log(EVT_ERROR, (uint16_t)ERR_CREDS_BLANK);
+			MGR_ERR_log(ERR_CREDS_BLANK);
+			MCU_AT_CONSOLE_send("+PROV=NONE\r\n");
+			transition_to(CC_ST_NO_CREDS);
+			if (!boot_selftest_done && CC_SELFTEST_AT_BOOT) {
+				/* Factory flow: sensors are checked before provisioning */
+				boot_selftest_done = true;
+				selftest_start((uint8_t)CC_SELFTEST_BOOT_ITEMS, true);
+			}
+			return;
+		}
 		start_mac_profile();
 		transition_to(CC_ST_WAIT_MAC_READY);
 		return;
+
+	case CC_ST_NO_CREDS: {
+		/* Re-check ~1 Hz; console credential writes complete the set */
+		static uint32_t recheck_tick;
+
+		if (HAL_GetTick() - recheck_tick < 1000u)
+			return;
+		recheck_tick = HAL_GetTick();
+		if (MGR_CRED_syncAndRestore() != MGR_CRED_FAIL_LOUD) {
+			creds_ok = true;
+			MGR_LOG_INFO("[CC] credentials provisioned - starting the radio\r\n");
+			MCU_AT_CONSOLE_send("+PROV=OK\r\n");
+			transition_to(CC_ST_INIT_MAC);
+		}
+		return;
+	}
 
 	case CC_ST_WAIT_MAC_READY:
 		process_mac_events();

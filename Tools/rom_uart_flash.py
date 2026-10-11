@@ -38,6 +38,10 @@ import serial
 ACK, NACK = 0x79, 0x1F
 FLASH_BASE, FLASH_SIZE, PAGE = 0x08000000, 0x40000, 0x800
 FLASH_USER = 0x0803B000                  # mcu_flash.h FLASH_USER_START_ADDR
+# FLASH_PMLOG (0x08032000-0x08032FFF): page 100 = persistent event log, page
+# 101 = MGR_CRED credential mirror. The merged image only pads 0xFF there, so
+# they are never erased (a wiped mirror would cost the brownout safety net).
+PRESERVE_PAGES = (100, 101)
 PID_WL55 = 0x497
 CHUNK = 256                              # AN3155 max per Read/Write Memory
 
@@ -184,7 +188,13 @@ def main():
         if start == FLASH_BASE and not (0x20000000 <= sp <= 0x20010000 and FLASH_BASE <= (pc & ~1) < end and pc & 1):
             sys.exit(f"    {args.flash}: vector table looks wrong (SP=0x{sp:08X} PC=0x{pc:08X}) - refusing")
         pages = list(range((start - FLASH_BASE) // PAGE, (end - FLASH_BASE + PAGE - 1) // PAGE))
-        print(f"[3] flashing {args.flash}: {len(img)} bytes at 0x{start:08X}, erasing pages {pages[0]}-{pages[-1]}")
+        for pg in PRESERVE_PAGES:
+            o = FLASH_BASE + pg * PAGE - start
+            if 0 <= o < len(img) and img[o:o + PAGE] != b"\xff" * len(img[o:o + PAGE]):
+                sys.exit(f"    image has data in preserved page {pg} (PMLOG / credential mirror) - refusing")
+        pages = [pg for pg in pages if pg not in PRESERVE_PAGES]
+        print(f"[3] flashing {args.flash}: {len(img)} bytes at 0x{start:08X}, erasing pages {pages[0]}-{pages[-1]}"
+              f" (keeping {', '.join(str(p) for p in PRESERVE_PAGES)})")
         bl.erase_pages(pages)
         print("    erase OK")
         chunks = [(start + o, img[o:o + CHUNK]) for o in range(0, len(img), CHUNK)]

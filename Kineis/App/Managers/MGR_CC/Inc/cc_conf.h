@@ -118,6 +118,16 @@
 #define CC_COMM_GPS_WINDOW_MS    120000UL  /**< fixed window per fast attempt */
 #define CC_COMM_DONE_MAGIC       0xC0331551UL /**< TAMP BKP12R value = commissioned */
 
+/* ---- Credentials --------------------------------------------------------------
+ * MGR_CRED keeps a CRC-protected mirror of ID/ADDR/SECKEY (page 0x08032800)
+ * and restores page 0 from it at boot. With blank credentials and no mirror
+ * the libkineis getters would silently use a TEST identity, so a unit would
+ * transmit under an ID nobody receives: instead the tracker never starts the
+ * MAC, sits in NO_CREDS with the console up (sensor self-test still runs) and
+ * resumes as soon as ID, ADDR and SECKEY have been written over the console.
+ * 1 = engineering benches may transmit under the test identity. */
+#define CC_ALLOW_TEST_CREDS    0
+
 /* ---- Deep sleep (cc_sleep.c) ----------------------------------------------
  * Between cycles the MCU sleeps in STOP2 until the next cycle's deadline
  * (RTC wake-up timer, HAL tick RTC-compensated). Every other wait (sensor

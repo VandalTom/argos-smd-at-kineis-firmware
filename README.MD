@@ -188,6 +188,16 @@ ends after 45 s if the receiver tracks fewer than two satellites above
 survives watchdog/soft resets and updates and is cleared only by real power
 loss.
 
+**Provisioning** — credentials (ID, ADDR, SECKEY from CLS; RCONF optional)
+are written over the console. A CRC-protected mirror (`MGR_CRED`, page
+`0x08032800`) restores them if a brownout wipes page 0. A unit with no
+credentials never starts the radio (it would otherwise transmit under the
+Kineis test identity): it reports `+PROV=NONE`, sits in state `NO_CREDS`
+(`AT+STATE=?` shows `prov=0`), still runs the sensor self-test, and resumes
+by itself (`+PROV=OK`) once ID, ADDR and SECKEY are present. Build with
+`CC_ALLOW_TEST_CREDS=1` (cc_conf.h) to transmit under the test identity on a
+bench.
+
 **Update and recovery path**
 
 1. Normal update: `Tools/uart_dfu_check.py --port <port> --flash build/argos-smd-at-kineis-firmware.bin`
