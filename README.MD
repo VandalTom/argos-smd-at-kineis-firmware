@@ -238,6 +238,19 @@ unit" wizard. A built-in simulator runs everything without hardware;
 `node Tools/naiad_tool_selftest.mjs` tests the protocol layer against it.
 Windows blocks PL2303 clones: use a CP2102/CH340/FTDI adapter.
 
+*Voyage view* (default for new users; "Pro" in the header switches to the
+full panel view, and the choice is remembered): a step-by-step route through
+seven "seas", one task each, in production order: hail the module (or
+practise on the simulator) → fresh firmware (installs the latest release when
+the module runs anything older; says when a module needs a one-time SWD
+flash) → sensor check → ship's papers (next free set from the team vault,
+written and verified) → first signal (TX test) → deployment orders (arm the
+burst or not) → home port (verdict, production-log line, report). Each sea
+shows one plain-language status with what to do next, and how to fix it
+when something fails; seas unlock in order and the chart tracks progress.
+An original jingle plays once when a voyage starts (Sound on/off; "Music…"
+can use an audio file of your own, kept in that browser only).
+
 *Released firmware*: the Flash panel lists the Naiad images attached to the
 GitHub Releases (field and bench builds) and loads one with a click; the
 flash is then verified against the release's firmware ID (`Naiad vX.Y.Z (`).

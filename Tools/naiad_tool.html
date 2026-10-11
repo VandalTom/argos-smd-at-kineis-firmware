@@ -154,6 +154,87 @@ table.vault tr.st-inuse > td.num { box-shadow: inset 3px 0 var(--pass); }
 table.vault tr.st-retired input, table.vault tr.st-retired select { color: var(--muted); text-decoration: line-through; }
 table.vault tr.hist td { padding: 4px 10px; font: 12px/1.4 var(--mono); white-space: pre-wrap; background: var(--panel2); color: var(--muted); }
 pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---------- view switch + Voyage (guided) mode ---------- */
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+.seg button { font: inherit; font-size: 12.5px; font-weight: 600; padding: 3px 12px; border: 0; background: var(--panel); color: var(--muted); cursor: pointer; }
+.seg button[aria-pressed=true] { background: var(--accent); color: var(--accent-fg); }
+body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #provBanner { display: none !important; }
+:root { --sea1: #0b4f7c; --sea2: #1477a8; --sea3: #4fb3d9; --sand: #f6e7c1; --foam: #e8f6fc; --gold: #c98a12; }
+@media (prefers-color-scheme: dark) { :root { --sea1: #06263d; --sea2: #0b4166; --sea3: #1f6f99; --sand: #4a3f22; --foam: #0d2433; --gold: #e8b04a; } }
+.voyage { max-width: 1040px; margin: 12px auto 24px; padding: 0 16px; display: flex; flex-direction: column; gap: 12px; }
+.chart { position: relative; border-radius: 12px; padding: 16px 14px 12px; color: #fff; overflow-x: auto;
+  background: radial-gradient(circle at 20% 120%, var(--sea3) 0, transparent 55%), linear-gradient(160deg, var(--sea2), var(--sea1)); }
+.chart::before { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .18;
+  background: repeating-radial-gradient(circle at 50% 160%, transparent 0 14px, #fff 15px 16px); }
+.chart-head { position: relative; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 10px; }
+.chart-head h2 { margin: 0; font-size: 17px; letter-spacing: .2px; }
+.chart-head .tally { font-size: 12.5px; opacity: .9; }
+.chipbtn { font: inherit; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; border: 1px solid rgba(255,255,255,.6); background: rgba(255,255,255,.12); color: #fff; cursor: pointer; }
+.chipbtn[aria-pressed=false] { opacity: .65; text-decoration: line-through; }
+.vmusic { position: relative; margin: -2px 0 10px; padding: 8px 10px; border-radius: 8px; background: rgba(0,0,0,.22); font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
+.vmusic .row { gap: 6px 12px; }
+.route { position: relative; display: grid; grid-template-columns: repeat(7, minmax(92px, 1fr)); min-width: 660px; padding-top: 26px; }
+.route::before { content: ""; position: absolute; left: 7%; right: 7%; top: 56px; border-top: 2px dashed rgba(255,255,255,.55); }
+.sea { position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0 2px; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; text-align: center; }
+.sea:disabled { cursor: default; opacity: .7; }
+.sea .isle { position: relative; width: 40px; height: 40px; margin-top: 10px; border-radius: 50%; display: grid; place-items: center; font-size: 17px; font-weight: 800;
+  background: var(--sand); color: #5b4a1c; border: 3px solid rgba(255,255,255,.9); box-shadow: 0 2px 6px rgba(0,0,0,.25); transition: transform .2s; }
+.sea.done .isle { background: #2f9e5b; color: #fff; }
+.sea.warn .isle { background: #e0a526; color: #3a2800; }
+.sea.storm .isle { background: #c8323b; color: #fff; }
+.sea.current .isle { transform: scale(1.18); border-color: #ffe08a; }
+.sea .name { font-size: 11px; opacity: .85; text-transform: uppercase; letter-spacing: .6px; }
+.sea .task { font-size: 12.5px; font-weight: 650; line-height: 1.2; }
+.ship { position: absolute; top: 0; left: 0; width: calc(100% / 7); display: flex; justify-content: center; pointer-events: none; transition: left .7s ease-in-out; }
+.ship svg { width: 32px; height: 28px; filter: drop-shadow(0 2px 2px rgba(0,0,0,.35)); animation: bob 2.6s ease-in-out infinite; }
+@keyframes bob { 50% { transform: translateY(-3px) rotate(-3deg); } }
+.vcard { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.vkicker { font-size: 12px; font-weight: 700; color: var(--sea2); text-transform: uppercase; letter-spacing: .7px; }
+@media (prefers-color-scheme: dark) { .vkicker { color: var(--sea3); } }
+.vcard h3 { margin: 2px 0 0; font-size: 21px; }
+.vlead { margin: 0; color: var(--muted); font-size: 14px; max-width: 70ch; }
+.vstate { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-radius: 10px; background: var(--panel2); }
+.vstate .vicon { flex: none; color: var(--accent); }
+.vstate .vicon svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.vstate.ok .vicon { color: var(--pass); } .vstate.warn .vicon { color: var(--warn); } .vstate.storm .vicon { color: var(--fail); } .vstate.run .vicon { color: var(--run); }
+.vstate b { display: block; font-size: 15px; }
+.vstate .vtext { color: var(--muted); font-size: 13.5px; overflow-wrap: anywhere; }
+.vstate.ok { background: var(--pass-bg); } .vstate.ok b { color: var(--pass); }
+.vstate.warn { background: var(--warn-bg); } .vstate.warn b { color: var(--warn); }
+.vstate.storm { background: var(--fail-bg); } .vstate.storm b { color: var(--fail); }
+.vstate.run { background: var(--run-bg); } .vstate.run b { color: var(--run); }
+.vactions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.vactions .btn { padding: 7px 16px; }
+.vactions .btn.primary { font-size: 15px; }
+.vlink { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; }
+.vfix { margin: 0; padding-left: 20px; font-size: 13.5px; }
+.vfix li { margin: 3px 0; }
+.vprog { display: flex; flex-direction: column; gap: 4px; }
+.vprog .ptext { font-size: 13px; color: var(--muted); }
+.vprog progress { height: 12px; }
+.vlist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.vlist li { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; border-radius: 8px; background: var(--panel2); }
+.vlist li .badge { flex: none; }
+.vlist li .what { font-weight: 600; }
+.vlist li .det { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.vchoices { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
+.vchoice { text-align: left; font: inherit; color: inherit; padding: 10px 12px; border-radius: 10px; border: 2px solid var(--border); background: var(--panel); cursor: pointer; }
+.vchoice[aria-pressed=true] { border-color: var(--accent); background: var(--run-bg); }
+.vchoice b { display: block; margin-bottom: 2px; }
+.vchoice span { color: var(--muted); font-size: 13px; }
+.vnav { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 12px; }
+.vnav .btn.primary { font-size: 15px; padding: 7px 18px; }
+.vfields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px 12px; }
+.vlog { font-size: 12.5px; }
+.vlog summary { cursor: pointer; color: var(--muted); }
+.vlog ol { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.landho { position: relative; overflow: hidden; text-align: center; padding: 18px 12px; border-radius: 12px; color: #fff; background: linear-gradient(160deg, var(--sea2), var(--sea1)); }
+.landho .big { font-size: 26px; font-weight: 800; }
+.landho .medal { display: inline-grid; place-items: center; width: 64px; height: 64px; margin: 8px auto; border-radius: 50%; background: var(--gold); color: #fff; font-size: 30px; box-shadow: 0 0 0 5px rgba(255,255,255,.35); }
+.landho .gull { position: absolute; top: 14px; width: 28px; animation: fly 9s linear infinite; }
+@keyframes fly { from { left: -10%; } to { left: 110%; } }
+@media (prefers-reduced-motion: reduce) { .ship, .sea .isle { transition: none; } .ship svg, .landho .gull { animation: none; } }
 </style>
 </head>
 <body>
@@ -164,6 +245,10 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
   <span id="fwPill" class="pill idle mono" hidden></span>
   <span id="batPill" class="pill warn" hidden title="Pack below 2.10 V: no GPS, no deployment burst, one TX per 2 h until it recovers past 2.15 V">Battery CRIT</span>
   <span class="spacer"></span>
+  <div class="seg" role="group" aria-label="View">
+    <button type="button" id="btnViewVoyage" aria-pressed="false" title="Step by step, for new users">Voyage</button>
+    <button type="button" id="btnViewPro" aria-pressed="true" title="Every panel at once">Pro</button>
+  </div>
   <div id="opBox" class="opbox" hidden role="status" aria-live="polite">
     <span class="spin" aria-hidden="true"></span><span id="opName"></span>
     <button id="opCancel" class="btn small" data-cancel>Cancel</button>
@@ -179,6 +264,29 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
   <span>Not provisioned: enter the CLS credentials. The radio stays off until ID, ADDR and SECKEY are written.</span>
   <button class="btn small" id="btnGoCreds">Go to Credentials</button>
 </div>
+
+<!-- ======================= Voyage (guided) view ======================= -->
+<section id="voyage" class="voyage" hidden aria-label="Guided commissioning">
+  <div class="chart">
+    <div class="chart-head"><h2 id="vChartTitle">Sail the seven seas</h2><span class="tally" id="vTally"></span>
+      <span class="spacer"></span>
+      <button type="button" class="chipbtn" id="vSound" aria-pressed="true" title="Music when a voyage starts">Sound on</button>
+      <button type="button" class="chipbtn" id="vMusicBtn" aria-expanded="false" aria-controls="vMusic">Music…</button></div>
+    <div class="vmusic" id="vMusic" hidden>
+      <div>Voyage music plays once, when you hail the module at the start of a voyage.</div>
+      <div class="row">
+        <label class="chk"><input type="radio" name="vMusicSrc" value="jingle" checked> Original sea jingle</label>
+        <label class="chk"><input type="radio" name="vMusicSrc" value="own"> My own audio file</label>
+        <label class="chipbtn" id="vMusicPick">Choose a file…<input type="file" id="vMusicFile" accept="audio/*" hidden></label>
+        <button type="button" class="chipbtn" id="vMusicPlay">Play</button>
+        <button type="button" class="chipbtn" id="vMusicStop">Stop</button>
+      </div>
+      <div class="small" id="vMusicMsg">Your own file is kept in this browser only (never uploaded).</div>
+    </div>
+    <div class="route" id="vRoute"></div>
+  </div>
+  <div class="vcard" id="vCard" aria-live="polite"></div>
+</section>
 
 <main class="layout">
 <div class="maincol">
@@ -630,7 +738,7 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.1.0';
+const TOOL_VERSION = '1.2.0';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -2094,13 +2202,16 @@ class NaiadSimulator {
     this._enterBl(false);
   }
   _fwFromFlash() {
-    const m = asciiBytes('NAIADFW=');
     const f = this.flash;
-    outer: for (let i = 0; i + m.length < f.length; i++) {
-      for (let j = 0; j < m.length; j++) if (f[i + j] !== m[j]) continue outer;
-      let s = '';
-      for (let k = i + m.length; k < f.length && s.length < 80; k++) { const c = f[k]; if (c < 0x20 || c > 0x7E) break; s += String.fromCharCode(c); }
-      return s || 'CC_TRACKER (sim)';
+    // test images carry 'NAIADFW=<id>'; real Naiad builds carry their AT+FW=? string 'Naiad vX.Y.Z (<commit>)'
+    for (const [marker, keep] of [['NAIADFW=', false], ['Naiad v', true]]) {
+      const m = asciiBytes(marker);
+      outer: for (let i = 0; i + m.length < f.length; i++) {
+        for (let j = 0; j < m.length; j++) if (f[i + j] !== m[j]) continue outer;
+        let s = keep ? marker : '';
+        for (let k = i + m.length; k < f.length && s.length < 80; k++) { const c = f[k]; if (c < 0x20 || c > 0x7E) break; s += String.fromCharCode(c); }
+        if (!keep || /^Naiad v\d+\.\d+\.\d+/.test(s)) return s.trim() || 'CC_TRACKER (sim)';
+      }
     }
     return 'CC_TRACKER (sim, unknown build)';
   }
@@ -3552,6 +3663,7 @@ function stRequested() { return ST_ITEMS.filter(i => $(`.st-run[data-item="${i}"
 function requiredItems() { return ST_ITEMS.filter(i => $(`.st-req[data-item="${i}"]`).checked); }
 
 function renderSelftest() {
+  vSchedule();
   const run = ui.selftest;
   const live = run && !['PASS', 'FAIL', 'ERROR'].includes(run.status);
   for (const it of ST_ITEMS) {
@@ -4508,6 +4620,7 @@ function teamRows() {
 }
 
 function renderTeam() {
+  vSchedule();
   const open = teamOpen(), signedIn = team.state === 'in';
   $('#teamOut').hidden = open; $('#teamIn').hidden = !open;
   if (!open) {
@@ -4710,6 +4823,7 @@ async function doCredErase() {
 /* ---------- commissioning ---------- */
 
 function renderCommission() {
+  vSchedule();
   const c = ui.commission;
   const st = $('#commState'), bar = $('#commBar'), sum = $('#commSum');
   sum.innerHTML = '';
@@ -4886,6 +5000,7 @@ function currentReport() {
   });
 }
 function renderReport() {
+  vSchedule();
   const r = currentReport();
   const kv = $('#repView');
   kv.innerHTML = '';
@@ -4923,6 +5038,7 @@ function reportFileStem(r) { return `naiad_${realId(r.unit) || r.unit.sn || r.un
 /* ---------- rendering: header, unit, controls ---------- */
 
 function renderConn() {
+  vSchedule();
   const pill = $('#connPill');
   const conn = ui.link && ui.link.isOpen;
   const sim = ui.transport && ui.transport.kind === 'sim';
@@ -5048,6 +5164,761 @@ async function sendManual() {
   }
   ui.histPos = ui.history.length;
   inp.value = '';
+}
+
+/* ---------- Voyage view (guided, step by step) ----------
+ * A linear route through the same operations as the Pro view: seven "seas", one task each, in
+ * production order. Each sea's status is derived from the live unit state (ui.*), so the two views
+ * never disagree and switching view never disconnects. Steps unlock in order; a finished sea can be
+ * revisited. "Storm" = the step failed and shows how to fix it; "choppy" = done with a warning or
+ * skipped on purpose. */
+
+const VSTEPS = [
+  { key: 'connect', sea: 'North Atlantic', task: 'Hail the module' },
+  { key: 'firmware', sea: 'South Atlantic', task: 'Fresh firmware' },
+  { key: 'sensors', sea: 'Indian Ocean', task: 'Sensor check' },
+  { key: 'papers', sea: 'Southern Ocean', task: "Ship's papers" },
+  { key: 'signal', sea: 'South Pacific', task: 'First signal' },
+  { key: 'orders', sea: 'North Pacific', task: 'Deployment orders' },
+  { key: 'port', sea: 'Arctic Ocean', task: 'Home port' },
+];
+const SENSOR_ITEMS = ['GPS', 'WS85', 'ENV', 'ADC'];
+const SENSOR_INFO = {
+  GPS: { name: 'GPS receiver', fix: "Check the GPS module's power and its serial wiring. This check only needs data from the receiver, not a position fix." },
+  WS85: { name: 'WS85 wind sensor', fix: 'Check the WS85 cable and its power. On a bench without a WS85, make WS85 optional (Pro view → Self-test → Required).' },
+  ENV: { name: 'BME280 air sensor', fix: 'Check the BME280 (I2C) solder joints and its 3.3 V supply.' },
+  ADC: { name: 'Battery voltage', fix: 'Connect a charged NiMH pack: the reading must be between 1.8 and 3.3 V.' },
+  TX: { name: 'Radio (test transmission)', fix: 'Check that the antenna is connected and the battery is charged, then send again.' },
+};
+const K_VOYAGES = 'naiadTool.voyages.v1';
+const SHIP_SVG = '<svg viewBox="0 0 40 34" aria-hidden="true"><path d="M20 3 20 24 8 24Z" fill="#fff"/><path d="M22 7 22 24 33 24Z" fill="#ffe08a"/><path d="M4 26H36L31 32H9Z" fill="#8b4a22"/><path d="M20 2V26" stroke="#5b3a1a" stroke-width="1.5"/></svg>';
+
+const voy = { step: 0, busy: false, prog: null, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, src: null, manual: false, raf: 0, hailed: false, sang: false };
+
+/** Small DOM builder: el('div', { class, text, onclick, ...attrs }, ...children) */
+function el(tag, props = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') e.className = v;
+    else if (k === 'text') e.textContent = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+const vLead = text => el('p', { class: 'vlead', text });
+const VICONS = {   // 24x24 line icons: anchor (fair winds), waves (choppy), storm, compass (under way), chart
+  ok: '<circle cx="12" cy="5" r="2"/><path d="M12 7v14M5 13H3a9 9 0 0 0 18 0h-2M8 10h8"/>',
+  warn: '<path d="M2 8c2-2 4-2 6 0s4 2 6 0 4-2 6 0M2 13c2-2 4-2 6 0s4 2 6 0 4-2 6 0M2 18c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/>',
+  storm: '<path d="M7 16a4 4 0 1 1 .9-7.9A5 5 0 0 1 17.5 9 3.5 3.5 0 0 1 17 16"/><path d="M12.5 12 10 16.5h3.5L11 21"/>',
+  run: '<circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/>',
+  info: '<path d="m3 6 6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/>',
+};
+function vState(kind, title, text) {
+  const icon = el('span', { class: 'vicon', 'aria-hidden': 'true' });
+  icon.innerHTML = `<svg viewBox="0 0 24 24">${VICONS[kind] || VICONS.info}</svg>`;
+  return el('div', { class: `vstate ${kind === 'info' ? '' : kind}`, role: kind === 'storm' ? 'alert' : null },
+    icon, el('div', {}, el('b', { text: title }), text ? el('div', { class: 'vtext', text }) : null));
+}
+function vFixes(list) { return el('ul', { class: 'vfix' }, list.map(t => el('li', { text: t }))); }
+function vBtn(label, fn, { primary = false, disabled = false, title = null } = {}) {
+  return el('button', { type: 'button', class: `btn${primary ? ' primary' : ''}`, disabled: disabled || voy.busy || !!ui.op, title, onclick: () => void fn() }, label);
+}
+function vLink(label, fn) { return el('button', { type: 'button', class: 'vlink', disabled: voy.busy || !!ui.op, onclick: () => void fn() }, label); }
+
+/* ---- status of each sea, from the live unit state ---- */
+function vConn() { return !!(ui.link && ui.link.isOpen); }
+function vLatest() { return defaultRelease(rel.list); }
+function vProv() { const s = ui.unit.state; return (s && typeof s === 'object' && s.prov != null) ? s.prov === '1' : ui.mon.prov; }
+function vFwState() {
+  if (!vConn()) return 'offline';
+  if (ui.mode === 'bl' || ui.mon.rescue) return 'needs';
+  if (ui.mode !== 'app') return 'offline';
+  const fw = typeof ui.unit.fw === 'string' ? ui.unit.fw : '';
+  const L = vLatest();
+  if (!L || !L.release.fwId) return /^Naiad v/.test(fw) ? 'naiad' : 'unknown';
+  return fw.includes(L.release.fwId) ? 'current' : 'outdated';
+}
+function vRunItems(keys) {
+  const run = ui.selftest;
+  if (!run || !run.items) return {};
+  return Object.fromEntries(keys.filter(k => run.items[k]).map(k => [k, run.items[k]]));
+}
+function vSensorEval() {
+  const items = vRunItems(SENSOR_ITEMS);
+  if (!Object.keys(items).length) return null;
+  return evaluateSelftest(items, requiredItems().filter(i => i !== 'TX'));
+}
+function vStatus(key) {
+  const conn = vConn();
+  switch (key) {
+    case 'connect':
+      if (!conn) return voy.err.connect ? 'storm' : 'todo';
+      if (ui.mode === 'app') return ui.mon.rescue ? 'warn' : 'done';
+      if (ui.mode === 'bl') return 'warn';
+      if (voy.hailed && (ui.op || voy.busy)) return 'done';      // rebooting during a flash or a credentials reset
+      return ui.op ? 'todo' : 'storm';
+    case 'firmware': {
+      if (voy.err.firmware) return 'storm';
+      const f = vFwState();
+      if (f === 'current' || f === 'naiad') return 'done';
+      return voy.skip.firmware && f !== 'needs' && f !== 'offline' ? 'warn' : 'todo';
+    }
+    case 'sensors': {
+      const ev = vSensorEval();
+      if (!ev) return voy.skip.sensors ? 'warn' : 'todo';
+      if (ev.verdict === 'PASS') return ev.warnings.length ? 'warn' : 'done';
+      if (ev.verdict === 'FAIL') return voy.skip.sensors ? 'warn' : 'storm';
+      return voy.skip.sensors ? 'warn' : 'todo';
+    }
+    case 'papers':
+      if (vProv() === true && realId(ui.unit)) return 'done';
+      return voy.err.papers ? 'storm' : 'todo';
+    case 'signal': {
+      const tx = vRunItems(['TX']).TX;
+      if (tx && tx.verdict === 'PASS') return 'done';
+      const def = tx ? txDeferral(tx) : null;
+      if ((def && /battery/.test(def.reason)) || voy.skip.signal) return 'warn';
+      if (tx && !def) return 'storm';
+      return 'todo';
+    }
+    case 'orders': return voy.orders ? 'done' : 'todo';
+    case 'port': return voy.logged ? 'done' : 'todo';
+  }
+  return 'todo';
+}
+const vPassable = st => st === 'done' || st === 'warn';
+function vReachable() {
+  let i = 0;
+  while (i < VSTEPS.length - 1 && vPassable(vStatus(VSTEPS[i].key))) i++;
+  return i;
+}
+
+/* ---- rendering ---- */
+function vSchedule() {
+  if (voy.raf || $('#voyage').hidden) return;
+  voy.raf = requestAnimationFrame(() => { voy.raf = 0; vRender(); });
+}
+function vRenderChart() {
+  const route = $('#vRoute');
+  route.innerHTML = '';
+  const reach = vReachable();
+  let done = 0;
+  VSTEPS.forEach((s, i) => {
+    const st = vStatus(s.key);
+    if (vPassable(st)) done++;
+    const mark = { done: '✓', warn: '✓', storm: '!' }[st] || String(i + 1);
+    const label = { done: 'done', warn: 'done with a warning', storm: 'needs attention', todo: i <= reach ? 'to do' : 'locked' }[st];
+    route.append(el('button', {
+      type: 'button', class: `sea ${st}${i === voy.step ? ' current' : ''}`, disabled: i > reach || voy.busy,
+      'aria-current': i === voy.step ? 'step' : null, 'aria-label': `Sea ${i + 1}, ${s.sea}: ${s.task}, ${label}`,
+      onclick: () => { voy.step = i; vRender(); },
+    }, el('span', { class: 'isle', 'aria-hidden': 'true', text: mark }), el('span', { class: 'name', text: s.sea }), el('span', { class: 'task', text: s.task })));
+  });
+  const ship = el('div', { class: 'ship', style: `left:${(voy.step * 100) / VSTEPS.length}%` });
+  ship.innerHTML = SHIP_SVG;
+  route.append(ship);
+  const voyages = store.get(K_VOYAGES, 0);
+  $('#vTally').textContent = `${done} of 7 seas crossed${voyages ? ` · ${voyages} voyage${voyages === 1 ? '' : 's'} completed on this computer` : ''}`;
+}
+function vProgress() {
+  const p = voy.prog || { text: 'Working…' };
+  const bar = el('progress', { id: 'vProgBar', max: p.total || 1 });
+  if (p.total) bar.value = p.done; else bar.removeAttribute('value');
+  return el('div', { class: 'vprog' }, el('span', { class: 'ptext', id: 'vProgText', text: p.text }), bar,
+    ui.op && ui.op.cancellable ? el('div', {}, el('button', { type: 'button', class: 'btn small', onclick: cancelOp }, 'Cancel')) : null);
+}
+/** Progress updates touch only the bar, so a typed passphrase or a focused button survives. */
+function vSetProg(text, done, total) {
+  voy.prog = { text, done, total };
+  const t = $('#vProgText'), b = $('#vProgBar');
+  if (!t || !b) { vSchedule(); return; }
+  t.textContent = text;
+  if (total) { b.max = total; b.value = done; } else b.removeAttribute('value');
+}
+function vNav() {
+  const i = voy.step, st = vStatus(VSTEPS[i].key), last = i === VSTEPS.length - 1;
+  return el('div', { class: 'vnav' },
+    i > 0 ? el('button', { type: 'button', class: 'btn', disabled: voy.busy, onclick: () => { voy.step--; vRender(); } }, '← Back') : null,
+    el('span', { class: 'spacer' }),
+    last ? null : el('button', {
+      type: 'button', class: `btn${vPassable(st) ? ' primary' : ''}`, id: 'vNext', disabled: !vPassable(st) || voy.busy,
+      title: vPassable(st) ? null : 'Finish this sea first',
+      onclick: () => { voy.step = Math.min(i + 1, VSTEPS.length - 1); vRender(); $('#vCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' }); },
+    }, `Next sea: ${VSTEPS[i + 1].task} →`));
+}
+function vLog() {
+  const notes = con.entries.concat(con.pending).filter(e => e.kind === 'note').slice(-8);
+  if (!notes.length) return null;
+  return el('details', { class: 'vlog' }, el('summary', { text: "Ship's log (latest events; the full console is in the Pro view)" }),
+    el('ol', {}, notes.map(e => el('li', { text: `${e.ts.toTimeString().slice(0, 8)}  ${e.text}` }))));
+}
+function vRender() {
+  if ($('#voyage').hidden) return;
+  if (!vConn()) voy.hailed = false;
+  else if (ui.mode === 'app' || ui.mode === 'bl') voy.hailed = true;
+  const reach = vReachable();
+  if (voy.step > reach && !voy.busy && !ui.op) voy.step = reach;     // never move the ship while an operation runs
+  vRenderChart();
+  const card = $('#vCard');
+  // keep what the user typed and where the focus was across re-renders
+  const kept = {};
+  for (const inp of card.querySelectorAll('input[id], select[id]')) kept[inp.id] = inp.value;
+  const focusId = card.contains(document.activeElement) ? document.activeElement.id : null;
+  card.innerHTML = '';
+  const s = VSTEPS[voy.step];
+  card.append(el('div', { class: 'vkicker', text: `Sea ${voy.step + 1} of 7 · ${s.sea}` }), el('h3', { text: s.task }));
+  card.append(...VVIEWS[s.key]().filter(Boolean));
+  card.append(vNav());
+  const log = vLog(); if (log) card.append(log);
+  for (const [id, v] of Object.entries(kept)) { const inp = card.querySelector('#' + CSS.escape(id)); if (inp && inp.type !== 'file' && !inp.dataset.fresh) inp.value = v; }
+  if (focusId) { const f = card.querySelector('#' + CSS.escape(focusId)); if (f) f.focus({ preventScroll: true }); }
+}
+
+/* ---- running an operation from the Voyage view ---- */
+async function vDo(label, fn) {
+  if (voy.busy || ui.op) return;
+  voy.busy = true; voy.prog = { text: label };
+  vRender();
+  try { await fn(); }
+  catch (e) { note(`${label}: ${e.message}`, 'error'); }
+  finally { voy.busy = false; voy.prog = null; vRender(); }
+}
+/** Self-test results are merged by item, so a TX-only run keeps the sensor results (and the other way round). */
+function vMergeRun(prev, run) {
+  if (!prev || !prev.items) return run;
+  const items = { ...prev.items, ...run.items };
+  const failed = Object.values(items).some(r => r.verdict === 'FAIL' && !isTxDeferred(r));
+  return { ...run, items, requested: [...new Set([...(prev.requested || []), ...(run.requested || [])])], lines: (prev.lines || []).concat(run.lines || []), status: ['PASS', 'FAIL'].includes(run.status) ? (failed ? 'FAIL' : 'PASS') : run.status };
+}
+/** The unit's own boot self-test if it is still running (it includes TX once provisioned), else an explicit run. */
+async function vSelftest(items, label) {
+  const q = await runOp('Reading self-test status', signal => querySelftest(ui.link, { signal }));
+  const prev = ui.selftest;
+  // only the items this sea asked for are taken over: a later check never undoes an earlier sea
+  const show = run => {
+    const part = { ...run, source: 'run', items: Object.fromEntries(Object.entries(run.items || {}).filter(([k]) => items.includes(k))) };
+    ui.selftest = vMergeRun(prev, part); renderSelftest(); vSchedule();
+  };
+  if (q.ok && (q.value.status === 'RUNNING' || q.value.status === 'PENDING')) {
+    vSetProg('The module is running its own start-up check: collecting it…');
+    const r = await runOp('Waiting for the boot self-test', signal => pollBootSelftest(ui.link, { signal, onUpdate: show }));
+    if (r.ok) show(r.value);
+    if (r.ok && items.every(i => r.value.items[i])) { renderReport(); return r; }
+  }
+  vSetProg(label);
+  const r = await runOp('Self-test', signal => runSelftest(ui.link, items, { signal, onUpdate: show }));
+  if (r.ok) show(r.value);
+  renderReport();
+  return r;
+}
+
+/* ---- the seas ---- */
+const VVIEWS = {
+  connect() {
+    const conn = vConn(), out = [];
+    out.push(vLead('Connect the USB-serial adapter to this computer and to the module, and power the module. Then hail it: the tool finds the module and reads what it is running. No module at hand? Practise the whole voyage on a simulated one.'));
+    if (voy.busy) { out.push(vProgress()); return out; }
+    if (!conn) {
+      const serialOk = 'serial' in navigator;
+      const src = voy.src || (serialOk ? 'serial' : 'sim');
+      if (voy.err.connect) out.push(vState('storm', voy.err.connect.title, voy.err.connect.text));
+      out.push(el('div', { class: 'vchoices', role: 'group', 'aria-label': 'Connection' },
+        el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(src === 'serial'), disabled: !serialOk, onclick: () => { voy.src = 'serial'; vRender(); } },
+          el('b', { text: 'Real module (USB-serial adapter)' }), el('span', { text: serialOk ? 'Chrome or Edge asks which port to use.' : 'Needs Chrome or Edge on a desktop computer.' })),
+        el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(src === 'sim'), onclick: () => { voy.src = 'sim'; vRender(); } },
+          el('b', { text: 'Simulated module (practice)' }), el('span', { text: 'A virtual Naiad with old firmware and no credentials.' }))));
+      out.push(el('div', { class: 'vactions' }, vBtn('Hail the module', vConnect, { primary: true })));
+      out.push(el('details', { class: 'help' }, el('summary', { text: 'How to wire the adapter' }), vFixes([
+        'Adapter TX → module P4 (PA3), adapter RX ← module P5 (PA2), GND ↔ GND.',
+        'Use a 3.3 V adapter (CP2102, CH340 or FT232). Never 5 V signals.',
+        'Prolific PL2303 clone adapters are blocked by the Windows 11 driver.',
+      ])));
+      return out;
+    }
+    const u = ui.unit, sim = ui.transport && ui.transport.kind === 'sim';
+    if (ui.mode === 'app') {
+      const id = realId(u);
+      const facts = [u.sn ? `serial number ${u.sn}` : null, typeof u.fw === 'string' ? `firmware ${u.fw}` : null, id ? `Argos ID ${id}` : 'no Argos ID yet'].filter(Boolean).join(' · ');
+      out.push(ui.mon.rescue
+        ? vState('warn', 'The module answered, in rescue mode', 'Its firmware failed to start three times, so it runs a minimal console. The next sea installs fresh firmware.')
+        : vState('ok', sim ? 'The simulated module answered' : 'The module answered', facts));
+      const s = u.state;
+      if (s && s.tier === 'CRIT') out.push(vState('warn', 'Battery critical', 'Below 2.10 V the module skips GPS and radio tests. Charge the pack above 2.15 V before the radio test.'));
+    } else if (ui.mode === 'bl') {
+      out.push(vState('warn', 'The module is waiting in its bootloader', 'A firmware update did not finish. Nothing is lost: the next sea installs the firmware.'));
+    } else {
+      out.push(vState('storm', 'No answer from the module', 'The port is open but the module stays silent.'));
+      out.push(vFixes([
+        'Is the module powered (battery pack connected, or the bench supply on)?',
+        'Wiring: adapter TX → P4 (PA3), adapter RX ← P5 (PA2), GND ↔ GND. Swapped TX and RX is the most common mistake.',
+        'Use a 3.3 V CP2102, CH340 or FT232 adapter: Prolific PL2303 clones are blocked on Windows 11.',
+        'Still silent? The firmware may be damaged or the module asleep in a deep state: flash it with a debug probe (Pro view → Firmware flash → SWD), or ask for the recovery steps.',
+      ]));
+      out.push(el('div', { class: 'vactions' }, vBtn('Try again', async () => { await disconnect(false); await vConnect(); }, { primary: true })));
+    }
+    out.push(el('div', { class: 'vactions' }, vLink('Disconnect, or switch to another module', async () => { await disconnect(false); voy.err = {}; vRender(); })));
+    return out;
+  },
+
+  firmware() {
+    const out = [], L = vLatest(), f = vFwState(), fw = typeof ui.unit.fw === 'string' ? ui.unit.fw : '';
+    out.push(vLead('Your module should run the latest released Naiad firmware. The update goes over the same serial cable, takes about half a minute, and keeps the module’s credentials.'));
+    if (voy.busy) { out.push(vProgress()); return out; }
+    const tag = L ? L.release.tag : null;
+    const install = () => vInstall(L);
+    if (voy.err.firmware) {
+      const e = voy.err.firmware;
+      out.push(vState('storm', e.title, e.text));
+      if (e.fixes) out.push(vFixes(e.fixes));
+    }
+    if (f === 'offline') { out.push(vState('warn', 'Not connected', 'Go back to the first sea and hail the module.')); return out; }
+    if (f === 'current') out.push(vState('ok', `Fresh firmware: ${tag}`, fw));
+    else if (f === 'naiad') out.push(vState('ok', 'Naiad firmware installed', `${fw}${onSite() ? '' : ' (the release list is only available at arribada.siliconvandals.com)'}`));
+    else if (!voy.err.firmware) {
+      const title = f === 'needs' ? (ui.mon.rescue ? 'Fresh firmware needed (rescue mode)' : 'Finish the firmware update') : L ? `Update available: ${tag}` : 'Firmware update';
+      out.push(vState(f === 'needs' ? 'warn' : 'info', title, fw ? `The module runs: ${fw}` : 'The module did not report its firmware.'));
+    }
+    if (L && L.release.warn) out.push(vState('warn', 'Note on this release', L.release.warn));
+    if (f !== 'current' && f !== 'naiad') {
+      const acts = el('div', { class: 'vactions' });
+      if (L) acts.append(vBtn(`Install ${tag}`, install, { primary: true }));
+      acts.append(el('label', { class: 'btn', style: 'display:inline-flex;gap:6px;align-items:center' }, L ? 'Use a .bin file instead…' : 'Choose a firmware .bin…',
+        el('input', { type: 'file', accept: '.bin', hidden: true, onchange: e => { const file = e.target.files[0]; if (file) void vInstallFile(file); } })));
+      if (f !== 'needs') acts.append(vLink('Keep the current firmware', () => { voy.skip.firmware = true; vRender(); }));
+      out.push(acts);
+    }
+    return out;
+  },
+
+  sensors() {
+    const out = [], run = ui.selftest, req = requiredItems();
+    out.push(vLead('The module checks its own lookouts: GPS receiver, WS85 wind sensor, BME280 air sensor and battery voltage. It takes up to 40 seconds (the wind sensor sends a reading every few seconds).'));
+    out.push(el('ul', { class: 'vlist' }, SENSOR_ITEMS.map(it => {
+      const r = run && run.items && run.items[it];
+      const waiting = voy.busy && run && run.requested && run.requested.includes(it) && !r;
+      return el('li', {}, r ? badge(r.verdict) : badge(waiting ? 'WAIT' : '—', waiting ? 'run' : 'idle'),
+        el('span', { class: 'what', text: SENSOR_INFO[it].name }), el('span', { class: 'det', text: `${req.includes(it) ? '' : '(optional) '}${r ? r.detail || '' : ''}` }));
+    })));
+    if (voy.busy) { out.push(vProgress()); return out; }
+    const ev = vSensorEval();
+    if (ev && ev.verdict === 'PASS') out.push(vState(ev.warnings.length ? 'warn' : 'ok', ev.warnings.length ? 'Required sensors fine, an optional one is not' : 'All lookouts report fair weather', ev.warnings.join(' · ')));
+    else if (ev && ev.verdict === 'FAIL') {
+      out.push(vState('storm', 'A sensor did not report', ev.reasons.join(' · ')));
+      out.push(vFixes(SENSOR_ITEMS.filter(i => run.items[i] && run.items[i].verdict === 'FAIL').map(i => `${SENSOR_INFO[i].name}: ${SENSOR_INFO[i].fix}`)));
+    }
+    out.push(el('div', { class: 'vactions' },
+      vBtn(ev ? 'Check again' : 'Check the sensors', () => vDo('Checking the sensors', async () => { voy.skip.sensors = false; await vSelftest(SENSOR_ITEMS, 'Checking the sensors (up to 40 s)…'); }), { primary: !ev || ev.verdict !== 'PASS', disabled: !vConn() || ui.mode !== 'app' }),
+      ev && ev.verdict === 'FAIL' ? vLink('Continue anyway (recorded in the report)', () => { voy.skip.sensors = true; vRender(); }) : null));
+    return out;
+  },
+
+  papers() {
+    const out = [], id = realId(ui.unit), prov = vProv();
+    out.push(vLead('Every Naiad transmits under its own Argos ID, address and secret key from CLS. They come from the team vault, go straight into the module, and the key is never shown. The module only switches its radio on once it has them.'));
+    if (voy.busy) { out.push(vProgress()); return out; }
+    if (prov === true && id) {
+      const r = team.state === 'in' ? team.records.find(x => x.id === id) : null;
+      let text = 'The module will transmit under this ID.';
+      if (r) text = r.status === 'in use' && (!r.sn || r.sn === ui.unit.sn) ? `The team vault has it in use on ${r.sn || 'this module'}.` : `Team vault: ${r.status}${r.sn ? ` on ${r.sn}` : ''}. Check that this is the right module.`;
+      else if (team.state === 'in') text = 'This ID is not in the team vault.';
+      out.push(vState(r && r.status === 'in use' && (!r.sn || r.sn === ui.unit.sn) || team.state !== 'in' ? 'ok' : 'warn', `Papers in order: Argos ID ${id}`, text));
+      out.push(el('p', { class: 'vlead small', text: 'To give this module different credentials, use the Pro view (Kineis credentials → Erase, then write new ones).' }));
+      return out;
+    }
+    if (voy.err.papers) out.push(vState('storm', voy.err.papers.title, voy.err.papers.text));
+    if (!vConn() || ui.mode !== 'app') { out.push(vState('warn', 'Not connected', 'Go back to the first sea and hail the module.')); return out; }
+    // 1. team vault (shared): sign in, unlock, assign the next free set
+    if (team.state === 'out' || team.state === 'error' || team.state === 'unknown') {
+      out.push(vState('info', 'Sign in to the team vault', 'Use your @siliconvandals.com Google account. A pop-up window opens for the sign-in.'));
+      out.push(el('div', { class: 'vactions' }, vBtn('Sign in with Google', () => { teamLogin(); }, { primary: true, disabled: team.state === 'unknown' })));
+    } else if (team.state === 'in' && !team.kdf) {
+      out.push(vState('warn', 'The team vault has not been created yet', 'The first person to use it chooses the team passphrase in the Pro view (Team credentials). Ask your team lead.'));
+    } else if (team.state === 'in' && !team.key) {
+      out.push(vState('info', 'Unlock the team vault', `Signed in as ${team.email}. Enter the team passphrase (ask your team lead if you don't have it).`));
+      out.push(el('div', { class: 'vactions' },
+        el('input', { type: 'password', id: 'vTeamPass', autocomplete: 'current-password', placeholder: 'Team passphrase', 'aria-label': 'Team passphrase', onkeydown: e => { if (e.key === 'Enter') void vUnlock(); } }),
+        vBtn('Unlock', vUnlock, { primary: true })));
+      if (team.msg) out.push(el('div', { class: 'msg err small', text: team.msg }));
+    } else if (teamOpen()) {
+      const next = team.records.find(x => x.status === 'free');
+      if (next) {
+        out.push(vState('info', `Next free set: Argos ID ${next.id}`, `ADDR ${next.addr} · key CRC-32 ${next.key_crc}. It is written to the module, checked, and marked in use with the module's serial number.`));
+        out.push(el('div', { class: 'vactions' }, vBtn(`Write ID ${next.id} to the module`, () => vProvisionTeam(next.id), { primary: true })));
+      } else out.push(vState('warn', 'No free credential set left', 'Import the next CLS file into the team vault (Pro view → Team credentials).'));
+    } else if (team.state === 'unconfigured' || team.state === 'offline') {
+      out.push(vState('info', 'The team vault is not available here', team.state === 'offline' ? 'Open the tool from arribada.siliconvandals.com to use it.' : 'It is not set up yet.'));
+    }
+    // 2. by hand (or the offline vault)
+    if (vault.open) {
+      const r = vault.data.records.find(x => x.status === 'free' && vaultRecValid(x));
+      if (r) out.push(el('div', { class: 'vactions' }, vBtn(`Use ID ${r.id} from the offline vault`, () => vProvisionSet(r, 'offline vault'))));
+    }
+    if (!voy.manual) out.push(el('div', { class: 'vactions' }, vLink('Enter the credentials by hand instead', () => { voy.manual = true; vRender(); })));
+    else {
+      out.push(el('div', { class: 'vfields' },
+        el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'Argos ID (decimal)' }), el('input', { type: 'text', id: 'vId', class: 'mono', autocomplete: 'off', spellcheck: 'false' })),
+        el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'ADDR (8 hex)' }), el('input', { type: 'text', id: 'vAddr', class: 'mono', autocomplete: 'off', spellcheck: 'false' })),
+        el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'Secret key (32 hex)' }), el('input', { type: 'password', id: 'vKey', class: 'mono', autocomplete: 'off', spellcheck: 'false' })),
+        el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'RCONF (optional)' }), el('input', { type: 'text', id: 'vRconf', class: 'mono', autocomplete: 'off', spellcheck: 'false' }))));
+      out.push(el('div', { class: 'vactions' }, vBtn('Write to the module', () => vProvisionSet({ id: $('#vId').value, addr: $('#vAddr').value, key: $('#vKey').value, rconf: $('#vRconf').value }, 'by hand'), { primary: !teamOpen() })));
+    }
+    return out;
+  },
+
+  signal() {
+    const out = [], prov = vProv();
+    let tx = vRunItems(['TX']).TX, def = tx ? txDeferral(tx) : null;
+    if (def && !/battery/.test(def.reason)) { tx = null; def = null; }       // 'unprovisioned' from before the papers: not sent yet
+    out.push(vLead('Time for the first signal: the module sends one test message to the Argos satellites. The check passes when the radio reports the message sent (there is no reply to wait for). Up to a minute, longer if the radio is busy.'));
+    if (voy.busy) { out.push(vProgress()); return out; }
+    if (prov !== true) { out.push(vState('warn', 'No papers yet', 'The radio stays off until the module has its credentials: go back one sea.')); return out; }
+    if (tx && tx.verdict === 'PASS') out.push(vState('ok', 'Signal sent!', `The radio reported the test message sent${tx.detail ? ` (${tx.detail})` : ''}.`));
+    else if (def && /battery/.test(def.reason)) out.push(vState('warn', 'Battery too low for a radio test', 'The module skips radio tests below 2.10 V. Charge the pack above 2.15 V, then send again; or continue and test later.'));
+    else if (tx && !def) { out.push(vState('storm', 'The test message was not sent', `${tx.verdict}${tx.detail ? `: ${tx.detail}` : ''}`)); out.push(vFixes([SENSOR_INFO.TX.fix, 'Radio busy (PENDING)? Wait a minute and send again.'])); }
+    out.push(el('div', { class: 'vactions' },
+      vBtn(tx ? 'Send again' : 'Send a test signal', () => vDo('Sending a test signal', async () => { voy.skip.signal = false; await vSelftest(['TX'], 'Transmitting (up to 1 min)…'); }), { primary: !tx || tx.verdict !== 'PASS', disabled: !vConn() || ui.mode !== 'app' }),
+      !tx || tx.verdict !== 'PASS' ? vLink('Skip the radio test', () => { voy.skip.signal = true; vRender(); }) : null));
+    return out;
+  },
+
+  orders() {
+    const out = [], c = ui.commission;
+    out.push(vLead('Naiads are switched on indoors and carried out later. Armed for deployment, a module waits for its first GPS fix under open sky, then transmits every minute for 30 minutes so its first positions arrive quickly. Choose its orders.'));
+    if (voy.busy) { out.push(vProgress()); return out; }
+    if (c) out.push(vState('info', `Current orders: ${{ WAIT_FIX: 'armed, waiting for the first GPS fix', BURST: `deployment burst in progress (${c.sent ?? '?'}/${c.target ?? 30})`, DONE: 'commissioned (no burst pending)' }[c.state] || c.state}`, ''));
+    const pick = voy.ordersPick;
+    out.push(el('div', { class: 'vchoices', role: 'group', 'aria-label': 'Orders' },
+      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(pick === 'ARM'), onclick: () => { voy.ordersPick = 'ARM'; vRender(); } },
+        el('b', { text: 'Ready for deployment' }), el('span', { text: 'Burst after the first GPS fix outdoors. Choose this for units going to sea.' })),
+      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(pick === 'SKIP'), onclick: () => { voy.ordersPick = 'SKIP'; vRender(); } },
+        el('b', { text: 'No burst' }), el('span', { text: 'Bench units, or a unit that is already deployed.' }))));
+    if (voy.orders) out.push(vState('ok', voy.orders === 'ARM' ? 'Orders given: ready for deployment' : 'Orders given: no burst', ''));
+    out.push(el('div', { class: 'vactions' }, vBtn(voy.orders ? 'Give the orders again' : 'Give the orders', vOrders, { primary: !voy.orders, disabled: !vConn() || ui.mode !== 'app' })));
+    out.push(el('p', { class: 'vlead small', text: 'Real power loss (battery removed) re-arms the burst. A reset or a firmware update does not.' }));
+    return out;
+  },
+
+  port() {
+    const out = [], rep = currentReport(), pass = rep.verdict === 'PASS';
+    const rows = store.get(K_ROWS, []).length;
+    if (voy.logged && pass) {
+      const gull = el('span', { class: 'gull', 'aria-hidden': 'true' });
+      gull.innerHTML = '<svg viewBox="0 0 24 10"><path d="M1 8c3-5 7-5 11 0 4-5 8-5 11 0" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>';
+      const box = el('div', { class: 'landho' }, gull,
+        el('div', { class: 'big', text: 'Land ho!' }), el('div', { class: 'medal', 'aria-hidden': 'true', text: '⚓' }),
+        el('div', { text: `${rep.unit.sn || 'The module'}${realId(rep.unit) ? ` (Argos ID ${realId(rep.unit)})` : ''} is ready for the high seas.` }));
+      out.push(box);
+    } else out.push(vLead('Check the logbook entry, then write it down. Every commissioned module gets one line in the production log.'));
+    const sensors = vSensorEval(), tx = vRunItems(['TX']).TX, c = rep.commissioning;
+    const orders = c ? ({ WAIT_FIX: 'ready for deployment (burst after the first GPS fix)', BURST: 'deployment burst in progress', DONE: 'no burst pending' }[c.state] || c.raw) : '—';
+    out.push(el('ul', { class: 'vlist' },
+      el('li', {}, badge(rep.verdict), el('span', { class: 'what', text: 'Verdict' }), el('span', { class: 'det', text: pass ? 'every required check passed' : (rep.selftest && rep.selftest.reasons && rep.selftest.reasons.length ? rep.selftest.reasons.join(' · ') : 'not every required check passed') })),
+      el('li', {}, el('span', { class: 'what', text: 'Module' }), el('span', { class: 'det', text: `${rep.unit.sn || '—'} · firmware ${rep.unit.fw || '—'}` })),
+      el('li', {}, el('span', { class: 'what', text: 'Argos ID' }), el('span', { class: 'det', text: realId(rep.unit) || 'none' })),
+      el('li', {}, el('span', { class: 'what', text: 'Sensors' }), el('span', { class: 'det', text: sensors ? sensors.verdict + (voy.skip.sensors ? ' (continued anyway)' : '') + (sensors.warnings.length ? ` · ${sensors.warnings.join(' · ')}` : '') : 'not checked' })),
+      el('li', {}, el('span', { class: 'what', text: 'First signal' }), el('span', { class: 'det', text: tx ? `${tx.verdict} ${tx.detail || ''}` : voy.skip.signal ? 'skipped' : 'not sent' })),
+      el('li', {}, el('span', { class: 'what', text: 'Orders' }), el('span', { class: 'det', text: orders }))));
+    out.push(el('div', { class: 'vfields' },
+      el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'Your name (for the log)' }),
+        el('input', { type: 'text', id: 'vOperator', value: $('#repOperator').value, autocomplete: 'name', onchange: e => { $('#repOperator').value = e.target.value; $('#repOperator').dispatchEvent(new Event('change')); } }))));
+    out.push(el('div', { class: 'vactions' },
+      voy.logged ? vBtn('Commission another module', vNextUnit, { primary: true }) : vBtn('Write it in the logbook', vLogIt, { primary: true }),
+      vBtn('Download the report', () => { const r = currentReport(); download(reportFileStem(r) + '.json', JSON.stringify(r, null, 2) + '\n', 'application/json'); }),
+      rows ? vBtn(`Download the production log (${rows} row${rows === 1 ? '' : 's'})`, () => download(`naiad_production_${stamp()}.csv`, buildCsv(store.get(K_ROWS, [])), 'text/csv')) : null));
+    return out;
+  },
+};
+
+/* ---- actions ---- */
+async function vConnect() {
+  voy.err.connect = null;
+  if (!voy.sang) { voy.sang = true; void playVoyageMusic(); }     // once per voyage, inside the click
+  const src = voy.src || ('serial' in navigator ? 'serial' : 'sim');
+  const radio = $(`input[name=src][value=${src}]`);
+  if (radio && !radio.checked) { radio.checked = true; radio.dispatchEvent(new Event('change')); }
+  await vDo('Hailing the module', async () => {
+    vSetProg(src === 'sim' ? 'Waking the simulated module…' : 'Choose the adapter in the browser’s list, then wait a few seconds…');
+    await connect();
+    if (!vConn()) {
+      const msg = $('#connMsg').textContent;
+      if (msg && !/No port selected/.test(msg)) voy.err.connect = { title: 'Could not open the port', text: msg };
+    }
+  });
+}
+function vPhaseText(p, msg) {
+  return { enter: 'Asking the module to enter update mode…', ping: 'The bootloader answered…', info: 'Reading the flash layout…', erase: 'Clearing the old firmware (do not unplug)…', verify: 'Checking the new firmware…', reboot: 'Starting the new firmware…' }[p] || msg;
+}
+async function vFlash(bytes, name, expectFw) {
+  voy.err.firmware = null;
+  const fromBl = ui.mode === 'bl';
+  let phase = '';
+  const r = await runOp('Flashing firmware', signal => flashFirmware(ui.link, bytes, {
+    signal, name, startMode: fromBl ? 'bl' : 'app', expectFw,
+    onPhase: (p, msg) => {
+      phase = p;
+      setCancellable(p !== 'erase' && p !== 'verify');
+      if (['ping', 'info', 'erase', 'write', 'verify'].includes(p)) ui.mode = 'bl';
+      if (p === 'reboot') ui.mode = null;
+      renderConn(); vSetProg(vPhaseText(p, msg));
+    },
+    onProgress: p => vSetProg(`Writing the new firmware: ${Math.floor(p.done * 100 / p.total)} % · ⛵ making way`, p.done, p.total),
+  }));
+  if (r.ok) {
+    ui.mode = 'app'; ui.unit.fw = r.value.newFw; ui.flash = r.value; ui.lastFailedFlash = false;
+    renderFlashResult(r.value, r.value.ok ? null : new Error(`The FW string "${r.value.newFw}" does not contain "${r.value.expectFw}"`));
+    if (!r.value.ok) voy.err.firmware = { title: 'Installed, but the version check failed', text: `The module reports "${r.value.newFw}", expected "${r.value.expectFw}…".` };
+    ui.selftest = null;                                   // a new boot: earlier self-test results no longer apply
+    renderConn(); renderReport();
+    await refreshUnit();
+    return;
+  }
+  const err = r.error || new Error('Cancelled');
+  ui.lastFailedFlash = true;
+  ui.flash = Object.assign({}, err.result || {}, { ok: false, error: err.message });
+  if (err.noBootloader || /AT\+BOOT|1203/.test(err.message)) {
+    ui.mode = 'app';
+    voy.err.firmware = {
+      title: 'This module cannot update over the serial cable', text: 'Its factory firmware has no update mode. It needs a one-time update with a debug probe (SWD); after that, updates go over the cable.',
+      fixes: ['Pro view → Firmware flash → "Debug probe (SWD)", with a CMSIS-DAP probe on the module’s SWD pads.', 'Or ask the firmware team to flash it (make flash-full with a J-Link).'],
+    };
+  } else if (err.inBootloader) {
+    ui.mode = 'bl';
+    voy.err.firmware = { title: 'The update stopped', text: ['erase', 'write', 'verify'].includes(phase) ? 'The module waits in its bootloader with no firmware. Keep it powered and click Install again.' : 'Nothing was erased. Click Install again.', fixes: ['Check the cable and the module’s power, then install again.'] };
+  } else if (!(err instanceof CancelledError)) {
+    voy.err.firmware = { title: 'The update did not complete', text: err.message, fixes: ['Check the cable and the module’s power, then try again.', 'Pro view → Firmware flash has the recovery steps.'] };
+  }
+  renderConn(); renderReport();
+}
+async function vInstall(L) {
+  await vDo('Installing firmware', async () => {
+    vSetProg(`Fetching ${L.release.tag} from GitHub…`);
+    const res = await fetch(L.asset.url);
+    if (!res.ok) throw new Error(`Download failed (HTTP ${res.status})`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    setImage(bytes, `${L.release.tag} field build`, { tag: L.release.tag, variant: L.asset.variant, warn: L.release.warn, url: L.release.url });
+    if (!ui.image.analysis.ok) throw new Error(`The downloaded image failed the check: ${ui.image.analysis.errors.join(' ')}`);
+    await vFlash(bytes, ui.image.name, L.release.fwId || '');
+  });
+}
+async function vInstallFile(file) {
+  await vDo('Installing firmware', async () => {
+    await loadImageFile(file);
+    if (!ui.image || !ui.image.analysis.ok) { voy.err.firmware = { title: `${file.name} is not a firmware image for this module`, text: ui.image ? ui.image.analysis.errors.join(' ') : '' }; return; }
+    await vFlash(ui.image.bytes, ui.image.name, '');
+  });
+}
+async function vUnlock() {
+  const f = $('#vTeamPass');
+  if (!f || !f.value) return;
+  $('#teamPass').value = f.value; f.value = '';
+  await vDo('Unlocking the team vault', async () => { await teamUnlock(); if (!team.key) team.msg = $('#teamState').textContent || 'Wrong team passphrase'; });
+}
+/** Write a credential set (fields: id, addr, key, rconf), reset, read back: same steps as "Write, reset & verify". */
+async function vProvision(set, source) {
+  $('#credId').value = set.id; $('#credAddr').value = set.addr; $('#credKey').value = set.key; $('#credRconf').value = set.rconf || '';
+  const v = credValidateUi(true);
+  $('#credKey').value = '';
+  if (!v.ok) { voy.err.papers = { title: 'These credentials are not valid', text: Object.entries(v.errors).map(([k, e]) => `${k.toUpperCase()}: ${e}`).join(' · ') }; return; }
+  voy.err.papers = null;
+  const labels = Object.fromEntries(CRED_STEPS);
+  const r = await runOp('Provisioning credentials', signal => provisionCredentials(ui.link, { id: set.id, addr: set.addr, seckey: set.key, rconf: set.rconf || '' }, {
+    signal,
+    onStep: (key, status, label) => {
+      if (key === 'reset' && status === 'ok') ui.mode = null;
+      if (key === 'reboot' && status === 'ok') ui.mode = 'app';
+      if (status === 'run') vSetProg(`${label || labels[key]}…`);
+      renderConn();
+    },
+  }));
+  if (r.ok && r.value.ok) {
+    const res = r.value, p = res.post || {};
+    ui.creds = res;
+    Object.assign(ui.unit, { id: p.id, addr: p.addr, seckeyCrc: p.seckeyCrc, rconf: p.rconf, fw: res.fw || ui.unit.fw });
+    ui.mode = 'app';                                      // sensor results stay valid across this reset
+    vaultTrack('provisioned', p.id || v.values.id, { sn: ui.unit.sn, fw: ui.unit.fw });
+    note(`Credentials from the ${source} written and verified: ID ${p.id || v.values.id}`);
+    renderCredChecks(res.checks);
+    await refreshUnit();
+  } else {
+    ui.creds = r.ok ? r.value : { ok: false, at: new Date().toISOString(), error: r.error ? r.error.message : 'cancelled', checks: [] };
+    voy.err.papers = { title: 'Writing the credentials did not complete', text: r.ok ? 'The module reads back different values (Pro view → Kineis credentials shows the comparison).' : (r.error ? r.error.message : 'Cancelled') };
+  }
+  renderUnit(); renderReport(); renderConn();
+}
+async function vProvisionTeam(id) {
+  await vDo('Writing the papers', async () => {
+    await teamReload();
+    const r = team.records.find(x => x.id === id);
+    if (!r || r.status !== 'free') { voy.err.papers = { title: `ID ${id} was just taken by another station`, text: 'Pick the next free set.' }; return; }
+    vSetProg('Fetching the key from the team vault…');
+    let key;
+    try { key = await teamFetchKey(id, 'provision'); }
+    catch (e) { voy.err.papers = { title: 'The key could not be fetched', text: e.message }; return; }
+    await vProvision({ id: r.id, addr: r.addr, key, rconf: r.rconf || '' }, 'team vault');
+  });
+}
+async function vProvisionSet(set, source) { await vDo('Writing the papers', () => vProvision(set, source)); }
+async function vOrders() {
+  const action = voy.ordersPick;
+  await vDo('Giving the orders', async () => {
+    const r = await runOp(`Commissioning ${action}`, signal => commissionCmd(ui.link, action, { signal }));
+    if (r.ok) { ui.commission = r.value; ui.commUpdated = new Date(); voy.orders = action; renderCommission(); renderReport(); }
+    else note(`Orders not given: ${r.error ? r.error.message : 'cancelled'}`, 'error');
+  });
+}
+function vLogIt() {
+  const r = currentReport();
+  const rows = store.get(K_ROWS, []);
+  rows.push(csvRecord(reportToCsvRow(r)));
+  store.set(K_ROWS, rows);
+  voy.logged = true;
+  if (r.verdict === 'PASS') store.set(K_VOYAGES, store.get(K_VOYAGES, 0) + 1);
+  note(`Logbook: ${r.unit.sn || 'unit'} recorded (${r.verdict})`);
+  renderReport(); vRender();
+}
+async function vNextUnit() {
+  const sim = ui.transport && ui.transport.kind === 'sim';
+  await disconnect(false);
+  if (sim) ensureSim(true);
+  Object.assign(ui, { unit: {}, selftest: null, flash: null, creds: null, commission: null, wizard: null });
+  Object.assign(voy, { step: 0, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, manual: false, sang: false });
+  renderUnit(); renderSelftest(); renderCommission(); renderReport();
+  note(sim ? 'New simulated module ready: hail it.' : 'Connect the next module, then hail it.');
+  vRender();
+}
+
+/* ---- voyage music ----
+ * Plays once when a voyage starts (the "Hail the module" click). Either an original jingle
+ * synthesised here (no audio file ships with the tool), or an audio file the user picked, kept in
+ * this browser's IndexedDB and never uploaded. */
+const K_SOUND = 'naiadTool.sound.v1';
+const music = { ctx: null, nodes: [] };
+const soundPrefs = () => Object.assign({ on: true, src: 'jingle' }, store.get(K_SOUND, {}));
+function setSound(patch) { store.set(K_SOUND, Object.assign(soundPrefs(), patch)); renderSound(); }
+function audioCtx() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  if (!music.ctx) music.ctx = new AC();
+  return music.ctx;
+}
+/** The one stored music file: op 'get' | 'put' | 'delete' (IndexedDB, this browser only). */
+function idbMusic(op, value) {
+  return new Promise((resolve, reject) => {
+    let req;
+    try { req = indexedDB.open('naiad-tool', 1); } catch (e) { reject(e); return; }
+    req.onupgradeneeded = () => req.result.createObjectStore('files');
+    req.onerror = () => reject(req.error || new Error('storage unavailable'));
+    req.onsuccess = () => {
+      const db = req.result, tx = db.transaction('files', op === 'get' ? 'readonly' : 'readwrite'), st = tx.objectStore('files');
+      const r = op === 'get' ? st.get('voyageMusic') : op === 'put' ? st.put(value, 'voyageMusic') : st.delete('voyageMusic');
+      r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
+      tx.oncomplete = () => db.close();
+    };
+  });
+}
+function stopMusic() { for (const n of music.nodes) { try { n.stop(); } catch (e) { /* already stopped */ } } music.nodes = []; }
+function playJingle(ctx) {
+  const t0 = ctx.currentTime + 0.05, out = ctx.createGain();
+  out.gain.value = 0.18; out.connect(ctx.destination);
+  // surf: filtered noise swelling in and out
+  const len = Math.floor(ctx.sampleRate * 2.2), buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  const surf = ctx.createBufferSource(); surf.buffer = buf;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 700;
+  const sg = ctx.createGain(); sg.gain.setValueAtTime(0, t0); sg.gain.linearRampToValueAtTime(0.35, t0 + 0.8); sg.gain.linearRampToValueAtTime(0, t0 + 2.2);
+  surf.connect(lp).connect(sg).connect(out); surf.start(t0); music.nodes.push(surf);
+  const note = (midi, at, dur, type = 'triangle', vol = 0.5) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.value = 440 * 2 ** ((midi - 69) / 12);
+    g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(vol, at + 0.02); g.gain.exponentialRampToValueAtTime(0.001, at + Math.max(dur, 0.12) * 0.95);
+    o.connect(g).connect(out); o.start(at); o.stop(at + dur + 0.05); music.nodes.push(o);
+  };
+  // an original little sea-going tune: D major arpeggios in a lilting 6/8, over a drone
+  const tune = [[62, 1], [66, 1], [69, 1], [74, 3], [73, 1], [71, 1], [69, 1], [66, 3], [67, 1], [71, 1], [74, 1], [71, 2], [69, 1], [66, 1], [64, 1], [62, 4]];
+  const beat = 0.16;
+  let t = t0 + 0.5;
+  for (const [n, l] of tune) { note(n, t, l * beat); t += l * beat; }
+  note(50, t0 + 0.5, t - t0 - 0.5, 'sine', 0.22);
+  return 'jingle';
+}
+async function playVoyageMusic(force = false) {
+  if (!force && !soundPrefs().on) return null;
+  const ctx = audioCtx();                       // created inside the click, so the browser allows sound
+  if (!ctx) return null;
+  try { await ctx.resume(); } catch (e) { return null; }
+  stopMusic();
+  let played = null;
+  if (soundPrefs().src === 'own') {
+    try {
+      const rec = await idbMusic('get');
+      if (rec && rec.blob) {
+        const audio = await ctx.decodeAudioData(await rec.blob.arrayBuffer());
+        const src = ctx.createBufferSource(), g = ctx.createGain();
+        g.gain.value = 0.7; src.buffer = audio; src.connect(g).connect(ctx.destination); src.start();
+        music.nodes.push(src); played = 'own';
+      }
+    } catch (e) { setMsg('#vMusicMsg', `Your file could not be played (${e.message}): the jingle plays instead.`, 'warn'); }
+  }
+  if (!played) played = playJingle(ctx);
+  $('#vSound').dataset.played = played;
+  return played;
+}
+async function showOwnMusic() {
+  let rec = null;
+  try { rec = await idbMusic('get'); } catch (e) { /* storage blocked */ }
+  setMsg('#vMusicMsg', rec ? `Your file: ${rec.name}. Kept in this browser only, never uploaded.` : 'Choose an audio file from this computer: it is kept in this browser only, never uploaded.');
+}
+function renderSound() {
+  const p = soundPrefs();
+  $('#vSound').setAttribute('aria-pressed', String(p.on));
+  $('#vSound').textContent = p.on ? 'Sound on' : 'Sound off';
+  for (const r of $$('input[name=vMusicSrc]')) r.checked = r.value === p.src;
+}
+function initMusic() {
+  $('#vSound').addEventListener('click', () => { setSound({ on: !soundPrefs().on }); if (!soundPrefs().on) stopMusic(); });
+  $('#vMusicBtn').addEventListener('click', () => {
+    const panel = $('#vMusic');
+    panel.hidden = !panel.hidden;
+    $('#vMusicBtn').setAttribute('aria-expanded', String(!panel.hidden));
+    if (!panel.hidden) void showOwnMusic();
+  });
+  for (const r of $$('input[name=vMusicSrc]')) r.addEventListener('change', () => setSound({ src: r.value }));
+  $('#vMusicFile').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    if (f.size > 25e6) { setMsg('#vMusicMsg', 'That file is over 25 MB: pick a shorter clip.', 'err'); return; }
+    try { await idbMusic('put', { name: f.name, blob: f }); }
+    catch (err) { setMsg('#vMusicMsg', 'This browser does not allow storing files here (private window?).', 'err'); return; }
+    setSound({ src: 'own' });
+    setMsg('#vMusicMsg', `${f.name} saved in this browser: it plays once at the start of each voyage.`, 'ok');
+  });
+  $('#vMusicPlay').addEventListener('click', () => void playVoyageMusic(true));
+  $('#vMusicStop').addEventListener('click', stopMusic);
+  renderSound();
+}
+
+/* ---- view switch ---- */
+function setView(view) {
+  const voyage = view === 'voyage';
+  document.body.classList.toggle('voyage-mode', voyage);
+  $('#voyage').hidden = !voyage;
+  $('#btnViewVoyage').setAttribute('aria-pressed', String(voyage));
+  $('#btnViewPro').setAttribute('aria-pressed', String(!voyage));
+  store.set(K_UI, Object.assign(store.get(K_UI, {}), { view }));
+  if (voyage) {
+    if (!vPassable(vStatus(VSTEPS[voy.step].key))) voy.step = vReachable();
+    vRender();
+  }
+}
+function initVoyage() {
+  initMusic();
+  $('#btnViewVoyage').addEventListener('click', () => setView('voyage'));
+  $('#btnViewPro').addEventListener('click', () => setView('pro'));
+  setView(store.get(K_UI, {}).view || 'voyage');      // new users start with the guided voyage
 }
 
 /* ---------- wiring ---------- */
@@ -5197,6 +6068,7 @@ function init() {
 
   setInterval(() => { if (ui.op) renderOp(); renderTime(); pollTick(); }, 1000);
   renderUnit(); renderSelftest(); renderCommission(); renderReport(); updateControls();
+  initVoyage();
   note(`Naiad commissioning tool v${TOOL_VERSION} ready. Choose Serial port or Simulator, then Connect.`);
 }
 
