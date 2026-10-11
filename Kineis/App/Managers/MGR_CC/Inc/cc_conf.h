@@ -89,6 +89,27 @@
 #define CC_MAC_READY_TIMEOUT_MS 30000UL
 #define CC_MAC_INIT_MAX_RETRIES 3
 
+/* ---- Self-test (boot + AT+SELFTEST; see cc_selftest.h) ---------------------
+ * Production-line fast: GPS proves NMEA arrives (no fix), TX passes on the
+ * MAC's TX_DONE (no satellite pass). Runs once per boot, after MAC ready; a
+ * boot run then continues straight into the first normal cycle. */
+#define CC_SELFTEST_AT_BOOT      1
+#define CC_SELFTEST_BOOT_ITEMS   0x1Fu     /**< GPS|WS85|ENV|ADC|TX (cc_selftest.h bits) */
+#define CC_SELFTEST_GPS_MS       5000UL    /**< first checksum-valid NMEA sentence */
+#define CC_SELFTEST_WS85_MS      35000UL   /**< one broadcast (~30 s period) */
+#define CC_SELFTEST_TX_MS        60000UL   /**< MAC TX_DONE */
+#define CC_SELFTEST_NIMH_MIN_MV  1800      /**< 2S NiMH: 0.9 V/cell floor */
+#define CC_SELFTEST_NIMH_MAX_MV  3300      /**< 2S NiMH: 1.65 V/cell (charging) ceiling */
+
+/* ---- Commissioning (deployment burst; see cc_commission.h) -----------------
+ * First GPS fix since power-up -> TX every minute for 30 min, then normal. */
+#define CC_COMM_BURST_MS         (30UL * 60UL * 1000UL)
+#define CC_COMM_BURST_PERIOD_MS  60000UL
+#define CC_COMM_BURST_JITTER_MS  5000UL    /**< 0..5 s added per burst cycle */
+#define CC_COMM_FAST_GPS_MS      (48UL * 3600UL * 1000UL) /**< GPS every cycle until then */
+#define CC_COMM_GPS_WINDOW_MS    120000UL  /**< fixed window per fast attempt */
+#define CC_COMM_DONE_MAGIC       0xC0331551UL /**< TAMP BKP12R value = commissioned */
+
 /* ---- Payload timestamp epoch --------------------------------------------- */
 #define CC_TS_EPOCH_UNIX        1735689600UL /**< 2025-01-01T00:00:00Z */
 #define CC_TZ_OFFSET_MIN        0            /**< 0 = UTC */

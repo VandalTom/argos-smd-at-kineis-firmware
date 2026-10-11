@@ -40,12 +40,16 @@ void MX_LPUART1_UART_Init(void)
 
   /* USER CODE END LPUART1_Init 1 */
   hlpuart1.Instance = LPUART1;
-#if defined(USE_SPI_DRIVER) || defined(USE_UW_DOPPLER_APP)
+#if defined(USE_SPI_DRIVER) || defined(USE_UW_DOPPLER_APP) || defined(USE_CC_TRACKER_APP)
   /* High-throughput console:
    *   - SPI mode      : SPI debug logs.
    *   - UW_DOPPLER    : heartbeat + AT command + crash replay traces are
    *                     verbose, and at 9600 baud a 120-byte heartbeat
    *                     takes 125 ms blocking → starves the main loop.
+   *   - CC_TRACKER    : sensor/cycle logs + self-test report; its DFU
+   *                     bootloader is built at 115200 (Makefile
+   *                     APP_CONSOLE_BAUD) and must match. SLEEP-only LPM,
+   *                     so HSI stays on.
    * Both use HSI 16 MHz (see HAL_UART_MspInit below) which can sustain
    * 115200 cleanly. Cost: HSI must be on during transmission (already the
    * case in MONITORING since LPM=NONE). */
@@ -100,7 +104,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
   /** Initializes the peripherals clocks
   */
     PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_LPUART1;
-#if defined(USE_SPI_DRIVER) || defined(USE_UW_DOPPLER_APP)
+#if defined(USE_SPI_DRIVER) || defined(USE_UW_DOPPLER_APP) || defined(USE_CC_TRACKER_APP)
     /* HSI 16 MHz: 115200-capable (SPI debug logs + UW_DOPPLER heartbeat/AT) */
     PeriphClkInitStruct.Lpuart1ClockSelection = RCC_LPUART1CLKSOURCE_HSI;
 #else

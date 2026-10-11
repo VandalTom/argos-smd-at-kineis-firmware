@@ -416,6 +416,9 @@ ifeq ($(APP),CC_TRACKER)
 	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_nmea.c \
 	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_i2c_sens.c \
 	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_hw.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_console.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_selftest.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_commission.c \
 	$(KINEIS_DIR)/App/kns_app_cc_tracker.c
 endif
 

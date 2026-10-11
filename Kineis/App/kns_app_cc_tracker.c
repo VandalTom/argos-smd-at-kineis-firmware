@@ -15,6 +15,18 @@
  *
  * DPL-001 note: like DOPPLER/UW_DOPPLER, this app owns KNS_Q_UL_MAC2APP and
  * must never call MGR_AT_CMD_macEvtProcess().
+ *
+ * Debug console (LPUART1, 115200): read-only queries, Kineis credential
+ * writes, AT+BOOT (UART DFU), AT+RESET, AT+SELFTEST, AT+STATE and
+ * AT+COMMISSION — everything else is refused (cc_console.c). Actions that
+ * would disturb a transmission wait until the radio is idle.
+ *
+ * Self-test (cc_selftest.c): once per boot right after MAC ready, and on
+ * demand. GPS = NMEA arrives, TX = MAC TX_DONE — line-test fast.
+ *
+ * Commissioning (cc_commission.c): the first GPS fix since power-up starts a
+ * 30-minute burst of one TX per minute so a freshly deployed unit is heard
+ * quickly; the "done" flag lives in TAMP BKP12R (cleared by power loss only).
  */
 
 /**
@@ -23,6 +35,7 @@
  */
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include "main.h"
 
@@ -41,8 +54,16 @@
 #include "mgr_err.h"
 #include "mgr_evtlog.h"
 #include "mgr_bat.h"
+#include "mgr_at_cmd.h"
+#include "mgr_at_cmd_common.h"
+#include "mcu_at_console.h"
+#include "mcu_aes.h"
+#include "mcu_misc.h"
 
 #include "cc_conf.h"
+#include "cc_console.h"
+#include "cc_selftest.h"
+#include "cc_commission.h"
 #include "cc_hw.h"
 #include "cc_payload.h"
 #include "cc_tier.h"
@@ -69,7 +90,15 @@ typedef enum {
 	CC_ST_TX_SEND,
 	CC_ST_WAIT_TX_DONE,
 	CC_ST_CYCLE_WAIT,
+	CC_ST_SELFTEST,      /**< appended: keeps the evtlog/err numbering stable */
 } cc_state_t;
+
+static const char *const cc_state_names[] = {
+	"BOOT", "INIT_MAC", "WAIT_MAC_READY", "SAMPLE_WS85", "SAMPLE_ENV",
+	"SAMPLE_GPS", "TX_SEND", "WAIT_TX_DONE", "CYCLE_WAIT", "SELFTEST",
+};
+_Static_assert(sizeof(cc_state_names) / sizeof(cc_state_names[0]) == CC_ST_SELFTEST + 1,
+	"cc_state_names must list every cc_state_t");
 
 static cc_state_t cc_state;
 
@@ -87,6 +116,36 @@ static uint8_t  mac_init_retries;
 static uint32_t tx_count;           /**< TX attempts since boot (GPS schedule) */
 
 static cc_tier_state_t tier;
+
+/* ---- Console requests, self-test, commissioning ---- */
+
+typedef enum {
+	CC_ACT_NONE = 0,
+	CC_ACT_RESET,
+	CC_ACT_DFU,
+} cc_act_t;
+
+static cc_act_t pending_act;        /**< AT+RESET / AT+BOOT waiting for radio idle */
+static bool mac_ready;              /**< MAC init OK at least once since boot */
+static bool boot_selftest_done;
+
+typedef enum {
+	STS_GPS, STS_WS85, STS_ENV, STS_ADC, STS_TX, STS_TX_WAIT, STS_DONE,
+} cc_st_step_t;
+
+static cc_selftest_t st;            /**< current / last self-test report */
+static uint8_t st_req_mask;         /**< AT+SELFTEST waiting for a safe point */
+static cc_st_step_t st_step;
+static bool st_entry;               /**< first call of the current step */
+static uint32_t st_step_tick;
+static uint32_t st_bytes;
+static int st_tx_evt;               /**< 0 waiting, 1 TX_DONE, -1 timeout, -2 abort, -3 MAC error */
+static int st_tx_status;
+
+static cc_comm_t comm;
+
+static void after_mac_ready(void);
+static void tx_finished(void);
 
 /* ---- Software clock (GPS-seeded Unix time; 0 until first fix) ---- */
 
@@ -162,6 +221,7 @@ static uint32_t gps_budget_ms;    /**< this acquisition's chained window budget 
 static uint8_t gps_durations = 1; /**< windows next acquisition chains (1..MAX) */
 static uint8_t gps_skip_cycles;   /**< backoff skips after a miss */
 static uint8_t gps_countdown;     /**< scheduled skips until next attempt */
+static bool    gps_fast;          /**< this acquisition is a commissioning probe */
 #endif
 
 /* ---- Helpers ---- */
@@ -211,15 +271,17 @@ static bool process_mac_events(void)
 				MGR_LOG_DEBUG("[CC] MAC init OK\r\n");
 				MGR_EVTLOG_log(EVT_MAC_READY, 0);
 				if (cc_state == CC_ST_WAIT_MAC_READY)
-					transition_to(CC_ST_SAMPLE_WS85);
+					after_mac_ready();
 			}
 			break;
 
 		case KNS_MAC_TX_DONE:
 			MGR_LOG_DEBUG("[CC] TX done (#%lu)\r\n", (unsigned long)tx_count);
 			MGR_EVTLOG_log(EVT_TX_DONE, (uint16_t)tx_count);
-			if (cc_state == CC_ST_WAIT_TX_DONE)
-				transition_to(CC_ST_CYCLE_WAIT);
+			if (cc_state == CC_ST_SELFTEST)
+				st_tx_evt = 1;
+			else if (cc_state == CC_ST_WAIT_TX_DONE)
+				tx_finished();
 			break;
 
 		case KNS_MAC_TX_TIMEOUT:
@@ -228,15 +290,20 @@ static bool process_mac_events(void)
 				(evt.id == KNS_MAC_TX_ABORT) ? "abort" : "timeout");
 			MGR_ERR_log(ERR_TX_TIMEOUT);
 			MGR_EVTLOG_log(EVT_TX_TIMEOUT, (uint16_t)tx_count);
-			if (cc_state == CC_ST_WAIT_TX_DONE)
-				transition_to(CC_ST_CYCLE_WAIT);
+			if (cc_state == CC_ST_SELFTEST)
+				st_tx_evt = (evt.id == KNS_MAC_TX_ABORT) ? -2 : -1;
+			else if (cc_state == CC_ST_WAIT_TX_DONE)
+				tx_finished();
 			break;
 
 		case KNS_MAC_ERROR:
 			MGR_LOG_DEBUG("[CC] MAC error: %d\r\n", evt.status);
 			MGR_EVTLOG_log(EVT_MAC_ERROR, (uint16_t)evt.status);
-			if (cc_state == CC_ST_WAIT_TX_DONE)
-				transition_to(CC_ST_CYCLE_WAIT);
+			if (cc_state == CC_ST_SELFTEST) {
+				st_tx_evt = -3;
+				st_tx_status = evt.status;
+			} else if (cc_state == CC_ST_WAIT_TX_DONE)
+				tx_finished();
 			else if (cc_state == CC_ST_WAIT_MAC_READY)
 				transition_to(CC_ST_INIT_MAC);
 			break;
@@ -251,7 +318,8 @@ static bool process_mac_events(void)
 /* ---- Sensor phases ---- */
 
 #if CC_ENABLE_WS85
-static void ws85_pump(void)
+/** Feed pending WS85 bytes to the parser; returns how many arrived. */
+static uint16_t ws85_pump(void)
 {
 	uint8_t buf[64];
 	uint16_t n = CC_HW_uartRead(buf, sizeof(buf));
@@ -273,40 +341,45 @@ static void ws85_pump(void)
 			ws_cache.dir_deg,
 			(int)ws_cache.rain_mm, (unsigned)((int)(ws_cache.rain_mm * 10) % 10));
 	}
+	return n;
 }
 #endif /* CC_ENABLE_WS85 */
+
+#if CC_ENABLE_ADC_SENSE
+/** Supply voltages (internal ADC): NiMH via MGR_BAT's gated divider, supercap
+ *  via ADC_IN3. Stamped only on a good NiMH read; raw values are returned for
+ *  the self-test report. */
+static void adc_sample(uint16_t *nimh_out, uint16_t *scap_out)
+{
+	uint16_t nimh = MGR_BAT_readVoltage_mV();
+	uint16_t scap = CC_HW_readSupercap_mV();
+
+	if (nimh > 0) {
+		adc_cache.nimh_mv = nimh;
+		adc_cache.scap_mv = scap;
+		cache_stamp(&adc_cache.meta);
+		MGR_LOG_DEBUG("[ADC] NiMH %umV  supercap %umV\r\n", nimh, scap);
+	} else {
+		MGR_LOG_DEBUG("[ADC] NiMH read failed\r\n");
+	}
+	if (nimh_out)
+		*nimh_out = nimh;
+	if (scap_out)
+		*scap_out = scap;
+}
+#endif
 
 #if CC_ENABLE_ENV_I2C
 /* One shared session: rail up, one I2C lifecycle, each enabled chip read and
  * stamped independently (a miss keeps that chip's previous reading and the
  * cache just ages out). SHT45 preempts: when present, BMP/BME + AHT20 are
  * skipped that cycle (temp priority SHT45 > BMP > AHT > fresh WS85). */
-static void env_sample(void)
+static void i2c_sample(void)
 {
 	if (!CC_HW_i2cSessionOpen())
 		return;
 
 	const cc_i2c_ops_t *bus = CC_HW_i2cOps();
-
-#if CC_ENABLE_ADC_SENSE
-	/* Supply voltages first (internal ADC — not on the I2C bus, but sampled
-	 * in the same phase as the original ADS1115 was). NiMH via MGR_BAT's
-	 * gated divider; supercap via ADC_IN3. */
-	{
-		uint16_t nimh = MGR_BAT_readVoltage_mV();
-		uint16_t scap = CC_HW_readSupercap_mV();
-
-		if (nimh > 0) {
-			adc_cache.nimh_mv = nimh;
-			adc_cache.scap_mv = scap;
-			cache_stamp(&adc_cache.meta);
-			MGR_LOG_DEBUG("[ADC] NiMH %umV  supercap %umV\r\n", nimh, scap);
-		} else {
-			MGR_LOG_DEBUG("[ADC] NiMH read failed\r\n");
-		}
-	}
-#endif
-
 	bool sht_found = false;
 
 	(void)sht_found;
@@ -381,7 +454,21 @@ static void env_sample(void)
 
 	CC_HW_i2cSessionClose();
 }
+#endif /* CC_ENABLE_ENV_I2C */
 
+/** The ENV phase: supply voltages (sampled even when the I2C bus is down —
+ *  the battery tier depends on them), then the I2C sensors. */
+static __attribute__((unused)) void env_sample(void)
+{
+#if CC_ENABLE_ADC_SENSE
+	adc_sample(NULL, NULL);
+#endif
+#if CC_ENABLE_ENV_I2C
+	i2c_sample();
+#endif
+}
+
+#if CC_ENABLE_ENV_I2C
 static bool env_stale(void)
 {
 	bool stale = false;
@@ -525,6 +612,538 @@ static bool push_tx(const uint8_t payload[CC_PAYLOAD_BYTES])
 	return true;
 }
 
+/* ---- Radio-safe points and session cleanup ---- */
+
+/** The MAC owns the radio from TX_SEND until TX_DONE/timeout (also for the
+ *  self-test frame). DFU, reset, credential writes and console-started
+ *  self-tests wait for that; every other state is safe — including a MAC
+ *  that never comes ready, so a bad build can still be replaced over UART. */
+static bool radio_busy(void)
+{
+	return cc_state == CC_ST_TX_SEND || cc_state == CC_ST_WAIT_TX_DONE ||
+	       (cc_state == CC_ST_SELFTEST && st_step == STS_TX_WAIT);
+}
+
+/** Close whatever USART1 session is pumping and drop the GPS rail. */
+static void quiesce_sessions(void)
+{
+#if CC_ENABLE_WS85
+	ws_session_open = false;
+#endif
+#if CC_ENABLE_GPS
+	gps_budget_ms = 0; /* an interrupted acquisition restarts next cycle */
+	CC_HW_gpsPowerOff();
+#endif
+	CC_HW_uartClose(); /* no-op when no session is open */
+}
+
+/* ---- Commissioning persistence (TAMP BKP12R: survives resets, not power loss) ---- */
+
+static bool comm_flag_read(void)
+{
+	return TAMP->BKP12R == CC_COMM_DONE_MAGIC;
+}
+
+static void comm_flag_write(bool done)
+{
+	HAL_PWR_EnableBkUpAccess();
+	TAMP->BKP12R = done ? CC_COMM_DONE_MAGIC : 0u;
+}
+
+/** The cycle's TX attempt ended (done, timeout, error or push failure). */
+static void tx_finished(void)
+{
+	if (cc_comm_on_tx(&comm, HAL_GetTick(), CC_COMM_BURST_MS)) {
+		comm_flag_write(true);
+		MGR_LOG_INFO("[COMM] burst complete (%u TX) - commissioned until power is removed\r\n",
+			(unsigned)comm.burst_tx);
+	}
+	transition_to(CC_ST_CYCLE_WAIT);
+}
+
+/* ---- Self-test ---- */
+
+static bool st_tx_pushed; /**< this run put a frame on the air (counts as the cycle's TX) */
+
+static uint32_t st_elapsed(void)
+{
+	return HAL_GetTick() - st_step_tick;
+}
+
+static void st_goto(cc_st_step_t s)
+{
+	st_step = s;
+	st_entry = true;
+}
+
+/** Record one item's verdict and print its "+ST=" line. */
+static void st_report(cc_st_item_t i, cc_st_verdict_t v, const char *detail)
+{
+	char line[96];
+
+	cc_selftest_set(&st, i, v, detail);
+	cc_selftest_format_item(line, sizeof(line), &st, i);
+	MCU_AT_CONSOLE_send("%s", line);
+}
+
+static bool st_wants(cc_st_item_t i)
+{
+	return (st.mask & CC_ST_BIT(i)) != 0;
+}
+
+static bool stamped_since(const cc_cache_meta_t *m, uint32_t t0)
+{
+	return m->valid && (int32_t)(m->at_ms - t0) >= 0;
+}
+
+/** "t=-3.25,p=1013.2[,rh=45]" without float printf (newlib-nano). */
+static void fmt_env(char *d, size_t n, float tc, float hpa, float rh)
+{
+	int t100 = (int)(tc * 100.0f + (tc < 0.0f ? -0.5f : 0.5f));
+	int p10 = (int)(hpa * 10.0f + 0.5f);
+	const char *sign = (t100 < 0) ? "-" : "";
+
+	if (t100 < 0)
+		t100 = -t100;
+	if (rh >= 0.0f)
+		snprintf(d, n, "t=%s%d.%02d,p=%d.%d,rh=%d", sign, t100 / 100, t100 % 100,
+			p10 / 10, p10 % 10, (int)(rh + 0.5f));
+	else
+		snprintf(d, n, "t=%s%d.%02d,p=%d.%d", sign, t100 / 100, t100 % 100,
+			p10 / 10, p10 % 10);
+}
+
+static void selftest_start(uint8_t mask, bool at_boot)
+{
+	quiesce_sessions();
+	cc_selftest_begin(&st, mask, at_boot);
+	st_tx_pushed = false;
+	st_goto(STS_GPS);
+	MGR_LOG_INFO("[ST] self-test start (items 0x%02X%s)\r\n", mask, at_boot ? ", boot" : "");
+	MCU_AT_CONSOLE_send("+SELFTEST=RUNNING\r\n");
+	transition_to(CC_ST_SELFTEST);
+}
+
+static void selftest_finish(void)
+{
+	char line[64];
+	bool transmitted = st_tx_pushed;
+
+	cc_selftest_end(&st);
+	cc_selftest_format_summary(line, sizeof(line), &st);
+	MCU_AT_CONSOLE_send("%s", line);
+	MGR_LOG_INFO("[ST] self-test %s\r\n", cc_selftest_passed(&st) ? "PASS" : "FAIL");
+
+	if (st.at_boot) {
+		/* Boot run: straight into the first cycle (its GPS step is the
+		 * commissioning probe). Sensor caches are fresh from the test. */
+		transition_to(CC_ST_SAMPLE_WS85);
+		return;
+	}
+	if (transmitted) {
+		/* The self-test frame was this cycle's transmission. */
+		cycle_start_tick = HAL_GetTick();
+		cycle_period_ms = 0;
+	}
+	transition_to(CC_ST_CYCLE_WAIT);
+}
+
+/** One self-test step per loop call; never blocks longer than the ENV read. */
+static void selftest_run(void)
+{
+	char d[CC_ST_DETAIL_LEN];
+
+	if (st_entry)
+		st_step_tick = HAL_GetTick();
+
+	switch (st_step) {
+	case STS_GPS:
+		if (!st_wants(CC_STI_GPS)) {
+			st_goto(STS_WS85);
+			return;
+		}
+#if CC_ENABLE_GPS
+		if (st_entry) {
+			st_entry = false;
+			st_bytes = 0;
+			cc_nmea_init(&nmea);
+			CC_HW_gpsPowerOn();
+			if (!CC_HW_uartOpen(CC_UART_GPS)) {
+				CC_HW_gpsPowerOff();
+				st_report(CC_STI_GPS, CC_STV_FAIL, "uart");
+				st_goto(STS_WS85);
+				return;
+			}
+		}
+		{
+			uint8_t buf[64];
+			uint16_t n = CC_HW_uartRead(buf, sizeof(buf));
+
+			st_bytes += n;
+			for (uint16_t k = 0; k < n; k++)
+				(void)cc_nmea_feed(&nmea, buf[k]);
+		}
+		if (nmea.sentences == 0 && st_elapsed() <= CC_SELFTEST_GPS_MS)
+			return;
+		CC_HW_uartClose();
+		CC_HW_gpsPowerOff();
+		snprintf(d, sizeof(d), "bytes=%lu,nmea=%lu,cs_err=%lu", (unsigned long)st_bytes,
+			(unsigned long)nmea.sentences, (unsigned long)nmea.cs_errors);
+		st_report(CC_STI_GPS, cc_selftest_eval_gps(st_bytes, nmea.sentences), d);
+#else
+		st_report(CC_STI_GPS, CC_STV_SKIP, "disabled");
+#endif
+		st_goto(STS_WS85);
+		return;
+
+	case STS_WS85:
+		if (!st_wants(CC_STI_WS85)) {
+			st_goto(STS_ENV);
+			return;
+		}
+#if CC_ENABLE_WS85
+		if (st_entry) {
+			st_entry = false;
+			st_bytes = 0;
+			cc_ws85_init(&ws_parser, CC_WS85_ADDR);
+			if (!CC_HW_uartOpen(CC_UART_WS85)) {
+				st_report(CC_STI_WS85, CC_STV_FAIL, "uart");
+				st_goto(STS_ENV);
+				return;
+			}
+		}
+		st_bytes += ws85_pump();
+		if (ws_parser.frames == 0 && st_elapsed() <= CC_SELFTEST_WS85_MS)
+			return;
+		CC_HW_uartClose();
+		if (ws_parser.frames > 0) {
+			snprintf(d, sizeof(d), "wind=%d.%u,dir=%u,frames=%lu",
+				(int)ws_cache.wind_ms, (unsigned)((int)(ws_cache.wind_ms * 10) % 10),
+				ws_cache.dir_deg, (unsigned long)ws_parser.frames);
+			st_report(CC_STI_WS85, CC_STV_PASS, d);
+		} else if (st_bytes) {
+			snprintf(d, sizeof(d), "bytes=%lu,crc_err=%lu", (unsigned long)st_bytes,
+				(unsigned long)ws_parser.crc_errors);
+			st_report(CC_STI_WS85, CC_STV_FAIL, d);
+		} else {
+			st_report(CC_STI_WS85, CC_STV_FAIL, "silent");
+		}
+#else
+		st_report(CC_STI_WS85, CC_STV_SKIP, "disabled");
+#endif
+		st_goto(STS_ENV);
+		return;
+
+	case STS_ENV:
+		if (!st_wants(CC_STI_ENV)) {
+			st_goto(STS_ADC);
+			return;
+		}
+#if CC_ENABLE_ENV_I2C && CC_ENABLE_BMP280
+		{
+			uint32_t t0 = HAL_GetTick();
+
+			i2c_sample();
+			if (stamped_since(&baro_cache.meta, t0)) {
+				float rh = stamped_since(&bmehum_cache.meta, t0) ? bmehum_cache.rh : -1.0f;
+
+				fmt_env(d, sizeof(d), baro_cache.tc, baro_cache.hpa, rh);
+				st_report(CC_STI_ENV, cc_selftest_eval_env(baro_cache.tc, baro_cache.hpa, rh), d);
+			} else {
+				st_report(CC_STI_ENV, CC_STV_FAIL, "no_response");
+			}
+		}
+#else
+		st_report(CC_STI_ENV, CC_STV_SKIP, "disabled");
+#endif
+		st_goto(STS_ADC);
+		return;
+
+	case STS_ADC:
+		if (!st_wants(CC_STI_ADC)) {
+			st_goto(STS_TX);
+			return;
+		}
+#if CC_ENABLE_ADC_SENSE
+		{
+			uint16_t nimh = 0, scap = 0;
+
+			adc_sample(&nimh, &scap);
+			snprintf(d, sizeof(d), "nimh=%u,scap=%u", nimh, scap);
+			st_report(CC_STI_ADC, cc_selftest_eval_adc(nimh, CC_SELFTEST_NIMH_MIN_MV,
+				CC_SELFTEST_NIMH_MAX_MV), d);
+		}
+#else
+		st_report(CC_STI_ADC, CC_STV_SKIP, "disabled");
+#endif
+		st_goto(STS_TX);
+		return;
+
+	case STS_TX:
+		if (!st_wants(CC_STI_TX)) {
+			st_goto(STS_DONE);
+			return;
+		}
+		{
+			cc_payload_fields_t f;
+			uint8_t payload[CC_PAYLOAD_BYTES];
+
+			build_fields(&f);
+			cc_payload_pack(payload, &f);
+			st_tx_evt = 0;
+			if (!mac_ready) {
+				st_report(CC_STI_TX, CC_STV_FAIL, "mac_not_ready");
+				st_goto(STS_DONE);
+				return;
+			}
+			if (!push_tx(payload)) {
+				st_report(CC_STI_TX, CC_STV_FAIL, "push");
+				st_goto(STS_DONE);
+				return;
+			}
+			tx_count++;
+			st_tx_pushed = true;
+			MGR_EVTLOG_log(EVT_TX_START, (uint16_t)tx_count);
+		}
+		st_goto(STS_TX_WAIT);
+		return;
+
+	case STS_TX_WAIT:
+		st_entry = false;
+		process_mac_events();
+		if (st_tx_evt == 0 && st_elapsed() <= CC_SELFTEST_TX_MS)
+			return;
+		if (st_tx_evt == 1) {
+			snprintf(d, sizeof(d), "ms=%lu", (unsigned long)st_elapsed());
+			st_report(CC_STI_TX, CC_STV_PASS, d);
+		} else if (st_tx_evt == -3) {
+			snprintf(d, sizeof(d), "mac_err=%d", st_tx_status);
+			st_report(CC_STI_TX, CC_STV_FAIL, d);
+		} else {
+			st_report(CC_STI_TX, CC_STV_FAIL, st_tx_evt == -1 ? "timeout" :
+				st_tx_evt == -2 ? "abort" : "no_tx_done");
+		}
+		st_goto(STS_DONE);
+		return;
+
+	case STS_DONE:
+	default:
+		selftest_finish();
+		return;
+	}
+}
+
+/** AT+SELFTEST=? — replay the last report (or its status). */
+static void selftest_replay(void)
+{
+	char line[96];
+
+	if (st.running) {
+		MCU_AT_CONSOLE_send("+SELFTEST=RUNNING\r\n");
+	} else if (!st.done) {
+		MCU_AT_CONSOLE_send("+SELFTEST=NONE\r\n");
+	} else {
+		for (int i = 0; i < CC_STI_COUNT; i++) {
+			if (!st_wants((cc_st_item_t)i))
+				continue;
+			cc_selftest_format_item(line, sizeof(line), &st, (cc_st_item_t)i);
+			MCU_AT_CONSOLE_send("%s", line);
+		}
+		cc_selftest_format_summary(line, sizeof(line), &st);
+		MCU_AT_CONSOLE_send("%s", line);
+	}
+	bMGR_AT_CMD_logSucceedMsg();
+}
+
+/** After MAC init: pending/boot self-test first, else the first cycle. */
+static void after_mac_ready(void)
+{
+	bool at_boot = CC_SELFTEST_AT_BOOT && !boot_selftest_done;
+	uint8_t mask = st_req_mask;
+
+	mac_ready = true;
+	st_req_mask = 0;
+	if (at_boot)
+		mask |= (uint8_t)CC_SELFTEST_BOOT_ITEMS;
+	boot_selftest_done = true;
+
+	if (mask)
+		selftest_start(mask, at_boot);
+	else
+		transition_to(CC_ST_SAMPLE_WS85);
+}
+
+/* ---- Debug console ---- */
+
+static void enter_dfu(void)
+{
+	quiesce_sessions();
+	MCU_MISC_turn_off_pa(); /* bootloader never drives PA_PSU_EN (upstream 9e0ef44) */
+	MGR_LOG_INFO("[CC] entering UART DFU bootloader\r\n");
+	MGR_EVTLOG_log(EVT_SHUTDOWN, 0xDFU);
+	MGR_LOG_flush_all();
+	MCU_AT_CONSOLE_send("+BOOT=OK\r\n");
+	HAL_Delay(50); /* let the response leave the UART */
+	request_dfu_mode(DFU_PROTO_UART);
+	/* Only returns when no valid bootloader is installed */
+	pending_act = CC_ACT_NONE;
+	MCU_AT_CONSOLE_send("+ERROR=NO_BOOTLOADER\r\n");
+}
+
+static void do_reset(void)
+{
+	quiesce_sessions();
+	MGR_LOG_INFO("[CC] reset requested from console\r\n");
+	MGR_EVTLOG_log(EVT_SHUTDOWN, 0x5EU);
+	MGR_LOG_flush_all();
+	MCU_AT_CONSOLE_send("+RESET=OK\r\n");
+	HAL_Delay(50);
+	NVIC_SystemReset();
+}
+
+static void send_state(void)
+{
+	const char *st_name = st.running ? "RUNNING" : !st.done ? "NONE" :
+	                      cc_selftest_passed(&st) ? "PASS" : "FAIL";
+
+	MCU_AT_CONSOLE_send("+STATE=%s,up=%lu,tx=%lu,mac=%u,comm=%s,st=%s\r\n",
+		cc_state_names[cc_state], (unsigned long)(HAL_GetTick() / 1000UL),
+		(unsigned long)tx_count, mac_ready ? 1u : 0u,
+		cc_comm_phase_name(comm.phase), st_name);
+	bMGR_AT_CMD_logSucceedMsg();
+}
+
+static void send_commission(void)
+{
+	char line[80];
+
+	cc_comm_format(line, sizeof(line), &comm, HAL_GetTick(), HAL_GetTick(),
+		CC_COMM_FAST_GPS_MS, CC_COMM_BURST_MS, CC_COMM_BURST_PERIOD_MS);
+	MCU_AT_CONSOLE_send("%s", line);
+	bMGR_AT_CMD_logSucceedMsg();
+}
+
+/** AT+COMMISSION=START|SKIP|ARM (bench / production overrides). */
+static void commission_cmd(const char *line)
+{
+	const char *p = cc_console_params(line);
+
+	if (strncmp(p, "START", 5) == 0) {
+		cc_comm_start(&comm, HAL_GetTick());
+		comm_flag_write(false);
+		if (cc_state == CC_ST_CYCLE_WAIT)
+			cycle_period_ms = 1; /* burst TX #1 now: end this wait */
+		MGR_LOG_INFO("[COMM] burst forced from console\r\n");
+	} else if (strncmp(p, "SKIP", 4) == 0) {
+		cc_comm_skip(&comm);
+		comm_flag_write(true);
+	} else {
+		cc_comm_init(&comm, false);
+		comm_flag_write(false);
+	}
+	send_commission();
+}
+
+/** AT+SECKEY=? — CRC-32 fingerprint only; the key is never echoed. */
+static void send_key_crc(void)
+{
+	uint8_t key[16];
+
+	if (MCU_AES_get_device_sec_key(key) != KNS_STATUS_OK) {
+		bMGR_AT_CMD_logFailedMsg(ERROR_UNKNOWN);
+		return;
+	}
+	unsigned long crc = cc_console_crc32(key, sizeof(key));
+
+	memset(key, 0, sizeof(key));
+	MCU_AT_CONSOLE_send("+SECKEYCRC=%08lX\r\n", crc);
+	bMGR_AT_CMD_logSucceedMsg();
+}
+
+static void console_poll(void)
+{
+	uint8_t *line;
+
+	while ((line = MGR_AT_CMD_popNextAt()) != NULL) {
+		const char *l = (const char *)line;
+
+		switch (cc_console_classify(l)) {
+		case CC_CON_BOOT:
+			pending_act = CC_ACT_DFU;
+			if (radio_busy())
+				MCU_AT_CONSOLE_send("+BOOT=PENDING\r\n");
+			break;
+		case CC_CON_RESET:
+			if (pending_act == CC_ACT_NONE)
+				pending_act = CC_ACT_RESET;
+			if (radio_busy())
+				MCU_AT_CONSOLE_send("+RESET=PENDING\r\n");
+			break;
+		case CC_CON_SELFTEST: {
+			uint8_t m = cc_selftest_parse_mask(cc_console_params(l));
+
+			if (!m) {
+				bMGR_AT_CMD_logFailedMsg(ERROR_UNKNOWN_AT_CMD);
+			} else if (cc_state == CC_ST_SELFTEST) {
+				MCU_AT_CONSOLE_send("+SELFTEST=RUNNING\r\n");
+			} else {
+				st_req_mask |= m; /* started by service_requests() */
+				if (!mac_ready || radio_busy())
+					MCU_AT_CONSOLE_send("+SELFTEST=PENDING\r\n");
+			}
+			break;
+		}
+		case CC_CON_SELFTEST_QUERY:
+			selftest_replay();
+			break;
+		case CC_CON_STATE:
+			send_state();
+			break;
+		case CC_CON_COMMISSION_QUERY:
+			send_commission();
+			break;
+		case CC_CON_COMMISSION:
+			commission_cmd(l);
+			break;
+		case CC_CON_CRED:
+			/* Flash write; takes effect at the next MAC init (AT+RESET) */
+			if (radio_busy())
+				MCU_AT_CONSOLE_send("+ERROR=BUSY\r\n");
+			else
+				MGR_AT_CMD_decodeAt(line);
+			break;
+		case CC_CON_KEYCRC:
+			send_key_crc();
+			break;
+		case CC_CON_DISPATCH:
+			MGR_AT_CMD_decodeAt(line);
+			break;
+		default:
+			bMGR_AT_CMD_logFailedMsg(ERROR_UNKNOWN_AT_CMD);
+			break;
+		}
+	}
+}
+
+/** Act on console requests that had to wait for a safe point. */
+static void service_requests(void)
+{
+	if (pending_act != CC_ACT_NONE && !radio_busy()) {
+		if (pending_act == CC_ACT_DFU)
+			enter_dfu();
+		else
+			do_reset();
+	}
+	if (st_req_mask && mac_ready && !radio_busy() && cc_state != CC_ST_SELFTEST &&
+	    cc_state != CC_ST_BOOT && cc_state != CC_ST_INIT_MAC &&
+	    cc_state != CC_ST_WAIT_MAC_READY) {
+		uint8_t m = st_req_mask;
+
+		st_req_mask = 0;
+		selftest_start(m, false);
+	}
+}
+
 /* ---- LPM client (scaffold: SLEEP only; STOP2+RTC deadline is the planned
  * production path once the tick-compensation wiring is ported) ---- */
 
@@ -571,6 +1190,8 @@ void KNS_APP_cc_tracker_init(void)
 
 	MGR_LPM_registerClient(cc_lpm_client);
 
+	cc_comm_init(&comm, comm_flag_read());
+
 	cycle_start_tick = HAL_GetTick();
 
 	MGR_LOG_INFO("[CC] CounterCurrent tracker init (payload v3, LDA2)\r\n");
@@ -579,6 +1200,9 @@ void KNS_APP_cc_tracker_init(void)
 		(unsigned long)(CC_TX_PERIOD_MID_MS / 1000),
 		(unsigned long)(CC_TX_PERIOD_LOW_MS / 1000),
 		(unsigned)CC_TX_JITTER_PCT, (unsigned)CC_GPS_FIX_EVERY_N_TX);
+	MGR_LOG_INFO("[COMM] %s\r\n", comm.phase == CC_COMM_DONE ?
+		"commissioned (flag kept since power-up)" :
+		"waiting for the first GPS fix to start the deployment burst");
 
 	transition_to(CC_ST_BOOT);
 }
@@ -586,8 +1210,14 @@ void KNS_APP_cc_tracker_init(void)
 void KNS_APP_cc_tracker_loop(void)
 {
 	MGR_WDG_refresh();
+	console_poll();
+	service_requests();
 
 	switch (cc_state) {
+
+	case CC_ST_SELFTEST:
+		selftest_run();
+		return;
 
 	case CC_ST_BOOT:
 		if (state_elapsed_ms() > TIMEOUT_BOOT_MS)
@@ -667,19 +1297,33 @@ void KNS_APP_cc_tracker_loop(void)
 #if CC_ENABLE_GPS
 		/* Schedule gates, evaluated once on entry (budget==0 marks entry) */
 		if (gps_budget_ms == 0) {
-			if (gps_countdown > 0) {
+			cc_comm_gps_t pol = cc_comm_gps_policy(&comm, HAL_GetTick(), CC_COMM_FAST_GPS_MS);
+
+			if (pol == CC_COMM_GPS_SKIP) {
+				MGR_LOG_DEBUG("[GPS] skipped (deployment burst)\r\n");
+				transition_to(CC_ST_TX_SEND);
+				return;
+			}
+			gps_fast = (pol == CC_COMM_GPS_FAST);
+			if (!gps_fast && gps_countdown > 0) {
 				gps_countdown--;
 				MGR_LOG_DEBUG("[GPS] scheduled skip (%u left)\r\n", gps_countdown);
 				transition_to(CC_ST_TX_SEND);
 				return;
 			}
-			if (gps_skip_cycles > 0) {
+			if (!gps_fast && gps_skip_cycles > 0) {
 				gps_skip_cycles--;
 				MGR_LOG_DEBUG("[GPS] backoff skip (%u left)\r\n", gps_skip_cycles);
 				transition_to(CC_ST_TX_SEND);
 				return;
 			}
-			gps_budget_ms = (uint32_t)gps_durations * CC_GPS_TTFF_BUDGET_MS;
+			if (gps_fast) {
+				/* Waiting to be deployed: every cycle, one fixed window */
+				comm.gps_tries++;
+				gps_budget_ms = CC_COMM_GPS_WINDOW_MS;
+			} else {
+				gps_budget_ms = (uint32_t)gps_durations * CC_GPS_TTFF_BUDGET_MS;
+			}
 			cc_nmea_init(&nmea);
 			CC_HW_gpsPowerOn();
 			if (!CC_HW_uartOpen(CC_UART_GPS)) {
@@ -720,7 +1364,12 @@ void KNS_APP_cc_tracker_loop(void)
 				gps_skip_cycles = 0;
 				gps_countdown = CC_GPS_FIX_EVERY_N_TX - 1;
 				gps_budget_ms = 0;
-				transition_to(CC_ST_TX_SEND);
+				if (cc_comm_on_fix(&comm, HAL_GetTick()))
+					MGR_LOG_INFO("[COMM] first fix since power-up: deployment burst, "
+						"TX every %lus for %lu min\r\n",
+						(unsigned long)(CC_COMM_BURST_PERIOD_MS / 1000UL),
+						(unsigned long)(CC_COMM_BURST_MS / 60000UL));
+				transition_to(CC_ST_TX_SEND); /* burst TX #1 right now */
 				return;
 			}
 		}
@@ -731,9 +1380,11 @@ void KNS_APP_cc_tracker_loop(void)
 				(unsigned long)nmea.cs_errors, gps_durations);
 			CC_HW_uartClose();
 			CC_HW_gpsPowerOff();
-			gps_skip_cycles = gps_durations;
-			if (gps_durations < CC_GPS_MAX_DURATIONS)
-				gps_durations++;
+			if (!gps_fast) {
+				gps_skip_cycles = gps_durations;
+				if (gps_durations < CC_GPS_MAX_DURATIONS)
+					gps_durations++;
+			}
 			gps_budget_ms = 0;
 			transition_to(CC_ST_TX_SEND);
 		}
@@ -757,7 +1408,7 @@ void KNS_APP_cc_tracker_loop(void)
 			tx_count++;
 			transition_to(CC_ST_WAIT_TX_DONE);
 		} else {
-			transition_to(CC_ST_CYCLE_WAIT);
+			tx_finished();
 		}
 		return;
 	}
@@ -770,7 +1421,7 @@ void KNS_APP_cc_tracker_loop(void)
 			MGR_LOG_DEBUG("[CC] TX result timeout\r\n");
 			MGR_ERR_log(ERR_TX_TIMEOUT);
 			MGR_EVTLOG_log(EVT_TIMEOUT, (uint16_t)CC_ST_WAIT_TX_DONE);
-			transition_to(CC_ST_CYCLE_WAIT);
+			tx_finished();
 		}
 		return;
 
@@ -782,11 +1433,13 @@ void KNS_APP_cc_tracker_loop(void)
 			uint16_t batt = battery_for_tier(&nimh);
 			uint32_t base = cc_tier_update(&tier, batt, nimh);
 
-			cycle_period_ms = cc_tier_jittered_period_ms(base,
-				CC_TX_JITTER_PCT, CC_HW_rand32());
-			MGR_LOG_INFO("[SLP] batt %umV -> base %lus, period %lus\r\n",
+			cycle_period_ms = cc_comm_period_ms(&comm,
+				cc_tier_jittered_period_ms(base, CC_TX_JITTER_PCT, CC_HW_rand32()),
+				CC_COMM_BURST_PERIOD_MS, CC_COMM_BURST_JITTER_MS, CC_HW_rand32());
+			MGR_LOG_INFO("[SLP] batt %umV -> base %lus, period %lus%s\r\n",
 				batt, (unsigned long)(base / 1000),
-				(unsigned long)(cycle_period_ms / 1000));
+				(unsigned long)(cycle_period_ms / 1000),
+				comm.phase == CC_COMM_BURST ? " (deployment burst)" : "");
 		}
 
 		process_mac_events(); /* drain strays */

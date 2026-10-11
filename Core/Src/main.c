@@ -113,6 +113,7 @@
 #include "kns_app_cc_tracker.h"
 #include "adc.h"
 #include "mgr_err.h"
+#include "mgr_at_cmd.h" /* console: MGR_AT_CMD_start() + pending check before LPM */
 #endif
 #if defined(USE_GUI_APP) || defined(USE_UW_DOPPLER_APP) || defined(USE_DOPPLER_APP)
 #ifdef USE_BAREMETAL
@@ -398,8 +399,8 @@ static void IDLE_task(void)
   __disable_irq();
   __disable_fault_irq();
   /* No LPM while a sensor session is pumping (UART ring would overrun in
-   * anything deeper than SLEEP) or an event is pending. */
-  if (KNS_Q_isEvtInSomeQ() || KNS_APP_cc_tracker_isBusy()) {
+   * anything deeper than SLEEP), an event or a console line is pending. */
+  if (KNS_Q_isEvtInSomeQ() || MGR_AT_CMD_isPendingAt() || KNS_APP_cc_tracker_isBusy()) {
     if (!prim){
       __enable_fault_irq();
       __enable_irq();
@@ -701,6 +702,15 @@ void request_dfu_mode(uint32_t protocol)
     SRAM_DFU_PROTO_PTR = protocol;
     __DSB();
 
+    /* The bootloader starts whatever app it flashes with a direct jump, no
+     * reset in between. Make that start look like a power-on so a different
+     * build never adopts this build's retained state: clear the LPM wake
+     * marker (TAMP-backed .lpmSection, which also holds mcu_tim callback
+     * pointers) and the reset flags, sending the next main() down the cold
+     * path where Sram2_Init re-initialises retention RAM. */
+    LPM_forceMode(LOW_POWER_MODE_NONE);
+    __HAL_RCC_CLEAR_RESET_FLAGS();
+
     /* Disable all interrupts */
     __disable_irq();
 
@@ -754,6 +764,16 @@ int main(void)
 {
   /* USER CODE BEGIN 1 */
   bool bIsWakeUpFromReset = false;
+
+  /* A reset leaves PRIMASK/FAULTMASK clear; a jump does not. The DFU
+   * bootloader (bl_jump_to_app) and ST's ROM bootloader GO both enter here
+   * with interrupts masked, and nothing below unmasks them: SysTick never
+   * ticks (HAL_GetTick frozen, every timeout/state timer stuck) and the
+   * console never receives a byte — the app looks dead until a power cycle.
+   * Safe to unmask now: the bootloader cleared every NVIC enable and stopped
+   * SysTick before jumping, and HAL_Init re-arms SysTick below. */
+  __enable_fault_irq();
+  __enable_irq();
 
   /* Ensure SRAM is preserved across reset (fix option bytes if needed) */
   ensure_sram_preserved_on_reset();
@@ -1122,6 +1142,9 @@ int main(void)
   assert_param(KNS_OS_registerTask(KNS_OS_TASK_APP, KNS_APP_doppler_loop) == KNS_STATUS_OK);
 #endif
 #if defined(USE_CC_TRACKER_APP)
+  /* Debug console: read-only AT queries + AT+BOOT (UART DFU entry), filtered
+   * in the app (cc_console.c) */
+  MGR_AT_CMD_start(&hlpuart1);
   KNS_APP_cc_tracker_init();
   MGR_LOG_DEBUG("Build: CC_TRACKER\r\n");
   assert_param(KNS_OS_registerTask(KNS_OS_TASK_APP, KNS_APP_cc_tracker_loop) == KNS_STATUS_OK);
