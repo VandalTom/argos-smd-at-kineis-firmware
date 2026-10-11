@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Naiad Commissioning Tool</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f5fcc'/%3E%3Cpath d='M5 20q5.5-6 11 0t11 0' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='10' r='3' fill='%23fff'/%3E%3C/svg%3E">
 <style>
 :root {
   color-scheme: light dark;
@@ -155,7 +156,7 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
   </div>
 </header>
 <noscript><div class="banner">This tool needs JavaScript.</div></noscript>
-<div id="noSerial" class="banner" hidden>Web Serial is not available in this browser. Use Chrome or Edge on a desktop computer, and open this file from file:// or http://localhost (for example <code>python -m http.server</code>). The Simulator still works here.</div>
+<div id="noSerial" class="banner" hidden>Web Serial is not available in this browser. Use Chrome or Edge on a desktop computer, at <a href="https://naiad-tool.seb-f80.workers.dev">naiad-tool.seb-f80.workers.dev</a> (or this file opened from file:// or http://localhost). The Simulator still works here.</div>
 <div id="rescueBanner" class="banner act" hidden role="alert">
   <span id="rescueText">Unit is in rescue mode: reflash the firmware.</span>
   <button class="btn small" id="btnGoFlash">Go to Flash</button>
@@ -237,7 +238,7 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
     <details class="help">
       <summary>Help: browser, adapter, wiring, recovery</summary>
       <ul>
-        <li><b>Browser:</b> Chrome or Edge on a desktop computer (Web Serial). Open this file directly (file://) or serve it with <code>python -m http.server</code> and use http://localhost. Firefox and Safari don't support Web Serial.</li>
+        <li><b>Browser:</b> Chrome or Edge on a desktop computer (Web Serial), at <a href="https://naiad-tool.seb-f80.workers.dev">naiad-tool.seb-f80.workers.dev</a>. Offline, open this file directly (file://) or serve it with <code>python -m http.server</code> and use http://localhost. Firefox and Safari don't support Web Serial.</li>
         <li><b>Adapter:</b> a 3.3 V USB-UART adapter (CP2102, CH340 or FT232). Prolific PL2303TA/HXA clone adapters don't work on Windows 11, because the driver blocks them.</li>
         <li><b>Wiring:</b> adapter TX → module P4 (PA3), adapter RX ← module P5 (PA2), GND ↔ GND. Never use 5 V signalling.</li>
         <li><b>Baud:</b> the app console runs at 115200 (older builds 9600). The bootloader may run at 9600 or 115200. Auto mode tries both.</li>
@@ -3354,7 +3355,12 @@ function renderReport() {
   $('#repSum').innerHTML = ''; $('#repSum').append(badge(r.verdict));
   $('#repCount').textContent = String(store.get(K_ROWS, []).length);
 }
-function reportFileStem(r) { return `naiad_${(r.unit.id && r.unit.id !== '4294967295' ? r.unit.id : r.unit.addr || 'unit')}_${stamp()}`; }
+/* With no credentials stored, the Kineis library answers AT+ID/AT+ADDR with its
+ * built-in test identity: every blank unit reports the same pair. */
+const TEST_ID = '123456', TEST_ADDR = '11223344';
+function isTestIdentity(u) { return !!u && u.id === TEST_ID && String(u.addr || '').toUpperCase() === TEST_ADDR; }
+function realId(u) { return u && typeof u.id === 'string' && u.id !== '4294967295' && !isTestIdentity(u) ? u.id : null; }
+function reportFileStem(r) { return `naiad_${realId(r.unit) || r.unit.sn || r.unit.addr || 'unit'}_${stamp()}`; }
 
 /* ---------- rendering: header, unit, controls ---------- */
 
@@ -3380,8 +3386,11 @@ function renderUnit() {
   const u = ui.unit;
   $('#uFw').textContent = valText(u.fw);
   $('#uVer').textContent = valText(u.atVersion);
-  $('#uId').textContent = u.id === '4294967295' ? '4294967295 (unset)' : valText(u.id);
-  $('#uAddr').textContent = u.addr === 'FFFFFFFF' ? 'FFFFFFFF (unset)' : valText(u.addr);
+  const testId = isTestIdentity(u);
+  $('#uId').textContent = u.id === '4294967295' ? '4294967295 (unset)'
+    : testId ? `${u.id} (Kineis test identity: no credentials stored)` : valText(u.id);
+  $('#uAddr').textContent = u.addr === 'FFFFFFFF' ? 'FFFFFFFF (unset)'
+    : testId ? `${u.addr} (test identity)` : valText(u.addr);
   $('#uSn').textContent = valText(u.sn);
   $('#uRconf').textContent = valText(u.rconf);
   $('#uCrc').textContent = u.seckeyCrc === UNSET_KEY_CRC ? `${UNSET_KEY_CRC} (all-FF key: unset)` : valText(u.seckeyCrc);
@@ -3409,7 +3418,7 @@ function renderUnit() {
     : `${(duty * 100).toFixed(1)} % awake (slp ${s.slp} s of up ${s.up} s)${$('#autoState').checked ? ' · polling keeps the console awake' : ''}`;
   $('#batPill').hidden = !(hasState && s.tier === 'CRIT');
   renderTime();
-  $('#unitSum').textContent = typeof u.id === 'string' && u.id !== '4294967295' ? `ID ${u.id}` : '';
+  $('#unitSum').textContent = realId(u) ? `ID ${u.id}` : testId ? 'no credentials' : '';
   $('#unitSum').className = 'sumstat mono small muted';
   renderConn();
 }
