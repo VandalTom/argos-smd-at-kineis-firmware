@@ -248,8 +248,9 @@ written and verified) → first signal (TX test) → deployment orders (arm the
 burst or not) → home port (verdict, production-log line, report). Each sea
 shows one plain-language status with what to do next, and how to fix it
 when something fails; seas unlock in order and the chart tracks progress.
-An original jingle plays once when a voyage starts (Sound on/off; "Music…"
-can use an audio file of your own, kept in that browser only).
+The traditional shanty "Drunken Sailor" plays once when a voyage starts,
+synthesised in the page (Sound on/off; "Music…" switches to a short jingle or
+an audio file of your own, kept in that browser only).
 
 *Debug probe (SWD)*: for modules the serial update cannot reach (factory
 firmware without the update bootloader, or a silent module), the Flash panel

@@ -159,7 +159,7 @@ async function verifyAccess(request, env) {
 	if (!team || !aud || !domain) throw new HttpError(503, 'The team vault is not set up yet (Cloudflare Access)', { code: 'not_configured' });
 	const login = msg => new HttpError(401, msg, { code: 'login' });
 	const token = request.headers.get('cf-access-jwt-assertion');
-	if (!token) throw login(`Sign in with your @${domain} Google account`);
+	if (!token) throw login(`Sign in with your @${domain} account`);
 	const parts = token.split('.');
 	if (parts.length !== 3) throw login('Malformed login token');
 	let header, payload;

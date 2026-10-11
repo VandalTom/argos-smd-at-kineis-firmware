@@ -275,7 +275,8 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
     <div class="vmusic" id="vMusic" hidden>
       <div>Voyage music plays once, when you hail the module at the start of a voyage.</div>
       <div class="row">
-        <label class="chk"><input type="radio" name="vMusicSrc" value="jingle" checked> Original sea jingle</label>
+        <label class="chk"><input type="radio" name="vMusicSrc" value="shanty" checked> Sea shanty (traditional: Drunken Sailor)</label>
+        <label class="chk"><input type="radio" name="vMusicSrc" value="jingle"> Short sea jingle</label>
         <label class="chk"><input type="radio" name="vMusicSrc" value="own"> My own audio file</label>
         <label class="chipbtn" id="vMusicPick">Choose a file…<input type="file" id="vMusicFile" accept="audio/*" hidden></label>
         <button type="button" class="chipbtn" id="vMusicPlay">Play</button>
@@ -6691,12 +6692,12 @@ async function vSwdFlash(kind) {
 }
 
 /* ---- voyage music ----
- * Plays once when a voyage starts (the "Hail the module" click). Either an original jingle
- * synthesised here (no audio file ships with the tool), or an audio file the user picked, kept in
- * this browser's IndexedDB and never uploaded. */
+ * Plays once when a voyage starts (the "Hail the module" click): the traditional shanty "Drunken
+ * Sailor" or a short sea jingle, both synthesised here (no audio file ships with the tool), or an
+ * audio file the user picked, kept in this browser's IndexedDB and never uploaded. */
 const K_SOUND = 'naiadTool.sound.v1';
 const music = { ctx: null, nodes: [] };
-const soundPrefs = () => Object.assign({ on: true, src: 'jingle' }, store.get(K_SOUND, {}));
+const soundPrefs = () => Object.assign({ on: true, src: 'shanty' }, store.get(K_SOUND, {}));
 function setSound(patch) { store.set(K_SOUND, Object.assign(soundPrefs(), patch)); renderSound(); }
 function audioCtx() {
   const AC = window.AudioContext || window.webkitAudioContext;
@@ -6720,6 +6721,35 @@ function idbMusic(op, value) {
   });
 }
 function stopMusic() { for (const n of music.nodes) { try { n.stop(); } catch (e) { /* already stopped */ } } music.nodes = []; }
+/** The traditional shanty "Drunken Sailor" (19th century, public domain): melody in D Dorian, notes only,
+ *  with an oom-pah bass. [midi, eighths] per note; bass is one root per bar. */
+function playShanty(ctx) {
+  const t0 = ctx.currentTime + 0.05, out = ctx.createGain();
+  out.gain.value = 0.16; out.connect(ctx.destination);
+  const note = (midi, at, dur, type = 'square', vol = 0.32) => {
+    const o = ctx.createOscillator(), g = ctx.createGain(), f = ctx.createBiquadFilter();
+    o.type = type; o.frequency.value = 440 * 2 ** ((midi - 69) / 12);
+    f.type = 'lowpass'; f.frequency.value = type === 'square' ? 2200 : 900;
+    g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(vol, at + 0.015); g.gain.exponentialRampToValueAtTime(0.001, at + Math.max(dur, 0.1) * 0.92);
+    o.connect(f).connect(g).connect(out); o.start(at); o.stop(at + dur + 0.05); music.nodes.push(o);
+  };
+  const A = 69, D = 62, F = 65, G = 67, C = 60, E = 64, B = 71, c = 72, d = 74;
+  const tune = [
+    [A, 2], [A, 1], [A, 1], [A, 2], [A, 1], [A, 1], [A, 2], [D, 2], [F, 2], [A, 2],
+    [G, 2], [G, 1], [G, 1], [G, 2], [G, 1], [G, 1], [G, 2], [C, 2], [E, 2], [G, 2],
+    [A, 2], [A, 1], [A, 1], [A, 2], [A, 1], [A, 1], [A, 2], [B, 2], [c, 2], [d, 2],
+    [c, 2], [A, 2], [G, 2], [E, 2], [D, 4], [D, 4],
+  ];
+  const bass = [50, 50, 48, 48, 50, 50, 48, 50];                 // D3 D3 C3 C3 D3 D3 C3 D3, one per bar of 8 eighths
+  const beat = 0.13;
+  let t = t0 + 0.1;
+  for (const [n, l] of tune) { note(n, t, l * beat); t += l * beat; }
+  bass.forEach((n, bar) => {
+    const at = t0 + 0.1 + bar * 8 * beat;
+    for (let k = 0; k < 4; k++) note(k % 2 ? n + 7 : n, at + k * 2 * beat, 1.6 * beat, 'triangle', 0.5);   // oom-pah: root, fifth
+  });
+  return 'shanty';
+}
 function playJingle(ctx) {
   const t0 = ctx.currentTime + 0.05, out = ctx.createGain();
   out.gain.value = 0.18; out.connect(ctx.destination);
@@ -6760,9 +6790,9 @@ async function playVoyageMusic(force = false) {
         g.gain.value = 0.7; src.buffer = audio; src.connect(g).connect(ctx.destination); src.start();
         music.nodes.push(src); played = 'own';
       }
-    } catch (e) { setMsg('#vMusicMsg', `Your file could not be played (${e.message}): the jingle plays instead.`, 'warn'); }
+    } catch (e) { setMsg('#vMusicMsg', `Your file could not be played (${e.message}): the shanty plays instead.`, 'warn'); }
   }
-  if (!played) played = playJingle(ctx);
+  if (!played) played = soundPrefs().src === 'jingle' ? playJingle(ctx) : playShanty(ctx);
   $('#vSound').dataset.played = played;
   return played;
 }
