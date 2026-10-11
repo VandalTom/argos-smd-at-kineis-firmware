@@ -1,0 +1,16 @@
+{
+    // Cloudflare Workers config — static-assets-only deployment of the Naiad
+    // commissioning tool (Tools/naiad_tool.html, one self-contained page).
+    // Same pattern as the Samara / Floodmate dashboards: deployed by Workers
+    // Builds on push to naiad. Build settings in the Cloudflare dashboard:
+    //   root directory  web/naiad-tool
+    //   build command   npm run build
+    //   deploy command  npx wrangler deploy
+    // Web Serial needs a secure context: the workers.dev URL (or a custom
+    // domain) is HTTPS, so the tool can open serial ports from there.
+    "name": "naiad-tool",
+    "compatibility_date": "2026-07-01",
+    "assets": {
+        "directory": "./dist"
+    }
+}

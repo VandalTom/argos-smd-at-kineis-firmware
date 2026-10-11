@@ -60,6 +60,8 @@ jobs:
           node-version: '22'
       - name: Naiad web tool protocol layer (simulated unit)
         run: node Tools/naiad_tool_selftest.mjs
+      - name: Naiad web tool static site (what Cloudflare deploys)
+        run: cd web/naiad-tool && npm run build && test -s dist/index.html && test -s dist/_headers
 
   # ----------------------------------------------------------------------------
   # 2) Build every allowed board/app variant (firmware images as artifacts).

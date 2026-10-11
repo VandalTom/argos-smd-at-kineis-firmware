@@ -234,6 +234,9 @@ by CRC), commissioning controls, console, JSON/CSV reports, and a guided
 "Commission unit" wizard. A built-in simulator runs everything without
 hardware; `node Tools/naiad_tool_selftest.mjs` tests the protocol layer
 against it. Windows blocks PL2303 clones: use a CP2102/CH340/FTDI adapter.
+Hosted on Cloudflare Workers (static assets, `web/naiad-tool/`): Workers
+Builds deploys every push to `naiad` (root `web/naiad-tool`, build
+`npm run build`, deploy `npx wrangler deploy`).
 
 **Production line** — `Tools/naiad_station.py` does one unit per command:
 flash (optional), firmware check, provisioning with read-back and key CRC,
