@@ -943,6 +943,11 @@ static void selftest_finish(void)
 		transition_to(CC_ST_NO_CREDS); /* still waiting for provisioning */
 		return;
 	}
+	if (!mac_ready) {
+		/* Provisioned while this (NO_CREDS boot) self-test ran: start the radio */
+		transition_to(CC_ST_INIT_MAC);
+		return;
+	}
 
 	if (st.at_boot) {
 		/* Boot run: straight into the first cycle (its GPS step is the
@@ -1491,11 +1496,34 @@ void KNS_APP_cc_tracker_init(void)
 	transition_to(CC_ST_BOOT);
 }
 
+/** Unprovisioned: re-check ~1 Hz whether console writes completed ID, ADDR
+ *  and SECKEY — also during the boot self-test that NO_CREDS boots run (it
+ *  waits up to ~40 s on the WS85), so +PROV=OK answers the operator at once.
+ *  The radio starts from NO_CREDS here, or when the self-test ends. */
+static void poll_provisioning(void)
+{
+	static uint32_t recheck_tick;
+
+	if (creds_ok || rescue || (cc_state != CC_ST_NO_CREDS && cc_state != CC_ST_SELFTEST))
+		return;
+	if (HAL_GetTick() - recheck_tick < 1000u)
+		return;
+	recheck_tick = HAL_GetTick();
+	if (MGR_CRED_syncAndRestore() == MGR_CRED_FAIL_LOUD)
+		return;
+	creds_ok = true;
+	MGR_LOG_INFO("[CC] credentials provisioned - starting the radio\r\n");
+	MCU_AT_CONSOLE_send("+PROV=OK\r\n");
+	if (cc_state == CC_ST_NO_CREDS)
+		transition_to(CC_ST_INIT_MAC);
+}
+
 void KNS_APP_cc_tracker_loop(void)
 {
 	MGR_WDG_refresh();
 	console_poll();
 	service_requests();
+	poll_provisioning();
 
 	if (!boot_stable && HAL_GetTick() >= CC_BOOT_STABLE_MS) {
 		boot_stable = true;
@@ -1539,21 +1567,9 @@ void KNS_APP_cc_tracker_loop(void)
 		transition_to(CC_ST_WAIT_MAC_READY);
 		return;
 
-	case CC_ST_NO_CREDS: {
-		/* Re-check ~1 Hz; console credential writes complete the set */
-		static uint32_t recheck_tick;
-
-		if (HAL_GetTick() - recheck_tick < 1000u)
-			return;
-		recheck_tick = HAL_GetTick();
-		if (MGR_CRED_syncAndRestore() != MGR_CRED_FAIL_LOUD) {
-			creds_ok = true;
-			MGR_LOG_INFO("[CC] credentials provisioned - starting the radio\r\n");
-			MCU_AT_CONSOLE_send("+PROV=OK\r\n");
-			transition_to(CC_ST_INIT_MAC);
-		}
+	case CC_ST_NO_CREDS:
+		/* poll_provisioning() moves on to INIT_MAC once the set is complete */
 		return;
-	}
 
 	case CC_ST_WAIT_MAC_READY:
 		process_mac_events();

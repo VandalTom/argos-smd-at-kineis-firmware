@@ -1304,7 +1304,9 @@ async function provisionCredentials(link, input, opts = {}) {
         if (provOk) return '+PROV=OK';
         if (s && s.prov === '1') return 'prov=1';
         if (s && s.prov == null && s.state !== 'NO_CREDS') return 'firmware reports no prov field';
-        if (Clock.now() - t0 > Clock.ms(5000)) throw new ProtocolError('No +PROV=OK (and STATE still prov=0) 5 s after writing ID, ADDR and SECKEY');
+        // v1.0.0 firmware only re-checks outside its boot self-test (up to ~45 s after a reboot)
+        const limit = s && s.state === 'SELFTEST' ? 90000 : 5000;
+        if (Clock.now() - t0 > Clock.ms(limit)) throw new ProtocolError(`No +PROV=OK (and STATE still prov=0) ${limit / 1000} s after writing ID, ADDR and SECKEY`);
         await sleep(1000, signal);
       }
     });
