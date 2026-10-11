@@ -23,6 +23,7 @@ Tools/*
 !Tools/dfu_tool.py
 !Tools/uart_dfu_check.py
 !Tools/rom_uart_flash.py
+!Tools/naiad_power_model.py
 Bootloader/build/*
 Tests/report/
 .cache/
