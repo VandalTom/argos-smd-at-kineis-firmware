@@ -2,7 +2,7 @@
  * Naiad tool Worker: the static page (dist/, served before this code runs) plus a small API.
  *
  *   GET  /api/releases                    Naiad firmware releases on GitHub (cached 5 min)
- *   GET  /api/firmware/<tag>/<file>       one release image, proxied same-origin (cached 1 day)
+ *   GET  /api/firmware/<tag>/<file>       one release image, proxied same-origin (cached 1 hour)
  *   /api/vault/...                        the team's shared credentials vault (D1)
  *
  * The vault takes two keys. Cloudflare Access (Google, @siliconvandals.com) decides who reaches
@@ -131,7 +131,7 @@ async function releases(env, ctx) {
 
 async function firmware(env, ctx, tag, name) {
 	if (!TAG.test(tag) || !RELEASE_ASSET.test(name)) throw new HttpError(404, 'Not a Naiad release image');
-	return cached(ctx, `fw/${tag}/${name}`, 86400, async () => {
+	return cached(ctx, `fw2/${tag}/${name}`, 3600, async () => {     // 1 h: a re-published release reaches the tool quickly
 		const res = await fetch(`https://github.com/${env.GITHUB_REPO}/releases/download/${tag}/${name}`, { redirect: 'follow', headers: { 'user-agent': 'naiad-tool' } });
 		if (!res.ok) throw new HttpError(res.status === 404 ? 404 : 502, `Release image not available (GitHub ${res.status})`);
 		return new Response(res.body, {
