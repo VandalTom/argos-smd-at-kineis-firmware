@@ -139,6 +139,20 @@ dialog h3 { margin: 0 0 8px; font-size: 15px; }
 .help > summary { cursor: pointer; color: var(--accent); }
 .help ul { margin: 6px 0; padding-left: 20px; }
 .help li { margin: 2px 0; }
+.vaultwrap { max-height: 440px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+table.vault { font-size: 12.5px; min-width: 980px; }
+table.vault th { position: sticky; top: 0; z-index: 1; background: var(--panel2); border: 1px solid var(--border); padding: 4px 6px; cursor: pointer; user-select: none; white-space: nowrap; }
+table.vault th[data-sort=asc]::after { content: " \25B2"; } table.vault th[data-sort=desc]::after { content: " \25BC"; }
+table.vault td { padding: 0; border: 1px solid var(--border); }
+table.vault td.num { padding: 0 6px; color: var(--muted); text-align: right; width: 1%; }
+table.vault td.act { padding: 2px 4px; white-space: nowrap; width: 1%; }
+table.vault td.act .btn { margin-right: 2px; }
+table.vault input, table.vault select { width: 100%; min-width: 60px; border: 0; border-radius: 0; background: transparent; padding: 4px 6px; font-family: var(--mono); font-size: 12.5px; }
+table.vault input:focus, table.vault select:focus { outline: 2px solid var(--focus); outline-offset: -2px; background: var(--panel); }
+table.vault td.bad input, table.vault td.bad select { background: var(--fail-bg); color: var(--fail); }
+table.vault tr.st-inuse > td.num { box-shadow: inset 3px 0 var(--pass); }
+table.vault tr.st-retired input, table.vault tr.st-retired select { color: var(--muted); text-decoration: line-through; }
+table.vault tr.hist td { padding: 4px 10px; font: 12px/1.4 var(--mono); white-space: pre-wrap; background: var(--panel2); color: var(--muted); }
 pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
 </head>
@@ -372,6 +386,10 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
         <button id="btnCredParse" class="btn">Parse</button>
       </div>
     </label>
+    <div class="row">
+      <button id="btnCredPick" class="btn" title="Fill the fields with the first free set in the credentials vault">Use next free set from the vault</button>
+      <span id="credVault" class="muted small"></span>
+    </div>
     <div class="grid2">
       <label class="field"><span class="lbl">Device ID (decimal)</span>
         <input type="text" id="credId" class="mono" inputmode="numeric" autocomplete="off" spellcheck="false">
@@ -402,6 +420,63 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
     </div>
     <div id="credMsg" class="msg"></div>
     <p class="muted small" style="margin:0">The key is never shown in the console or the report. The unit reports only its CRC-32 (<code>+SECKEYCRC=</code>), which is compared with the CRC computed here. New credentials take effect after a reset, so this tool resets the unit and reads everything back again.</p>
+  </div>
+</details>
+
+<!-- ======================= Credentials vault ======================= -->
+<details class="card" id="cardVault">
+  <summary><h2>Credentials vault</h2><span class="sumstat" id="vaultSum"></span></summary>
+  <div class="body">
+    <div id="vaultLocked">
+      <p class="muted small" style="margin:0">CLS credential sets (ID, ADDR, KEY, RCONF) with their use: which unit has which ID, and which are still free. The vault is encrypted in this browser with your passphrase (AES-256-GCM, key from PBKDF2-SHA256 with 600,000 iterations) and is only decrypted in memory while unlocked. It locks after 15 minutes without use. Nothing is sent anywhere: this page makes no network requests. A lost passphrase cannot be recovered, so keep the CLS originals or an encrypted export.</p>
+      <div class="row" id="vaultCreateRow" hidden>
+        <input type="password" id="vaultNewPass" autocomplete="new-password" placeholder="New passphrase (10+ characters)" aria-label="New vault passphrase">
+        <input type="password" id="vaultNewPass2" autocomplete="new-password" placeholder="Repeat it" aria-label="Repeat the passphrase">
+        <button id="btnVaultCreate" class="btn primary">Create vault</button>
+      </div>
+      <div class="row" id="vaultUnlockRow" hidden>
+        <input type="password" id="vaultPass" autocomplete="current-password" placeholder="Vault passphrase" aria-label="Vault passphrase">
+        <button id="btnVaultUnlock" class="btn primary">Unlock</button>
+        <span class="spacer"></span>
+        <button id="btnVaultForget" class="btn small">Delete this vault…</button>
+      </div>
+      <div class="row">
+        <button id="btnVaultLoad" class="btn small">Load an encrypted vault file…</button>
+        <input type="file" id="vaultLoadFile" accept=".json,application/json" hidden>
+        <span id="vaultMsg" class="msg" aria-live="polite"></span>
+      </div>
+    </div>
+    <div id="vaultOpen" hidden>
+      <div class="row">
+        <button id="btnVaultImport" class="btn primary">Import CLS file…</button>
+        <input type="file" id="vaultFile" accept=".csv,.tsv,.txt,.xlsx,.json" hidden>
+        <button id="btnVaultAdd" class="btn">Add row</button>
+        <input type="search" id="vaultSearch" placeholder="Search ID, ADDR, SN, notes" aria-label="Search the vault">
+        <select id="vaultFilter" aria-label="Filter by status"><option value="">All</option><option>free</option><option>in use</option><option>retired</option></select>
+        <span class="spacer"></span>
+        <button id="btnVaultLock" class="btn">Lock</button>
+      </div>
+      <div id="vaultPreview" class="callout" hidden></div>
+      <div class="vaultwrap">
+        <table class="vault"><thead><tr id="vaultHead"><th>#</th><th data-f="id">ID</th><th data-f="addr">ADDR</th><th data-f="key">Key</th><th data-f="rconf">RCONF</th><th data-f="status">Status</th><th data-f="sn">Device SN</th><th data-f="assigned">Assigned</th><th data-f="note">Notes</th><th></th></tr></thead>
+        <tbody id="vaultBody"></tbody></table>
+      </div>
+      <div class="row small">
+        <span id="vaultCounts" class="muted"></span>
+        <span id="vaultSaved" class="msg" aria-live="polite"></span>
+        <span class="spacer"></span>
+        <button id="btnVaultExport" class="btn small" title="The whole vault, encrypted with the current passphrase: backup, or move it to another station">Export encrypted</button>
+        <button id="btnVaultCsv" class="btn small" title="IDs, ADDRs and their use; no keys">Export CSV (no keys)</button>
+        <button id="btnVaultCsvKeys" class="btn small warnfill">Export CSV with keys…</button>
+        <button id="btnVaultPass" class="btn small">Change passphrase…</button>
+      </div>
+      <div class="row" id="vaultChRow" hidden>
+        <input type="password" id="vaultChPass" autocomplete="new-password" placeholder="New passphrase (10+ characters)" aria-label="New passphrase">
+        <input type="password" id="vaultChPass2" autocomplete="new-password" placeholder="Repeat it" aria-label="Repeat new passphrase">
+        <button id="btnVaultChPass" class="btn">Re-encrypt</button>
+      </div>
+      <p class="muted small" style="margin:0">Spreadsheet keys: Enter = next row, Shift+Enter = previous, Esc = undo the cell. Edits save automatically, encrypted. Import accepts the CLS CSV (comma, semicolon or tab) or .xlsx, with or without a header row; existing IDs are skipped, conflicting ones are listed. "Use" fills the Kineis credentials panel; after "Write, reset &amp; verify" (or the guided run) succeeds, the set is marked in use with the unit's serial number, and "Erase credentials" frees it again.</p>
+    </div>
   </div>
 </details>
 
@@ -2440,6 +2515,287 @@ class SimTransport {
   async write(bytes) { if (!this.isOpen) throw new Error('Port not open'); this.sim.hostWrite(bytes); }
 }
 
+/* ---------- credentials vault: CLS file parsing, records, tracking, encryption (pure) ---------- */
+
+const VAULT_STATUSES = ['free', 'in use', 'retired'];
+const VAULT_KDF_ITER = 600000;
+const VAULT_FORMAT = 'naiad-vault';
+
+/** Split delimited text (CSV / semicolon / tab), honouring "quoted, fields" and "" escapes. */
+function parseDelimited(text) {
+  const t = String(text).replace(/^﻿/, '');
+  const first = t.split(/\r?\n/).find(l => l.trim()) || '';
+  const counts = [',', ';', '\t'].map(d => [d, first.split(d).length]);
+  const delim = counts.sort((a, b) => b[1] - a[1])[0][0];
+  const rows = [];
+  let row = [], cell = '', q = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (q) {
+      if (c === '"') { if (t[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += c;
+    } else if (c === '"' && cell === '') q = true;
+    else if (c === delim) { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && t[i + 1] === '\n') i++;
+      row.push(cell); cell = '';
+      if (row.some(x => x.trim() !== '')) rows.push(row);
+      row = [];
+    } else cell += c;
+  }
+  row.push(cell);
+  if (row.some(x => x.trim() !== '')) rows.push(row);
+  return rows.map(r => r.map(x => x.trim()));
+}
+
+async function inflateRaw(data) {
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/** Minimal zip reader (stored + deflate) for .xlsx: { name: Uint8Array } for names passing `want`. */
+async function unzipEntries(bytes, want) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 65535); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new ProtocolError('Not a zip / .xlsx file');
+  const count = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const out = {};
+  for (let n = 0; n < count; n++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) throw new ProtocolError('Damaged .xlsx (central directory)');
+    const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commLen = dv.getUint16(p + 32, true);
+    const lho = dv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + nameLen));
+    p += 46 + nameLen + extraLen + commLen;
+    if (!want(name)) continue;
+    const start = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
+    const data = bytes.subarray(start, start + csize);
+    if (method === 0) out[name] = data;
+    else if (method === 8) out[name] = await inflateRaw(data);
+    else throw new ProtocolError(`Unsupported .xlsx compression (method ${method})`);
+  }
+  return out;
+}
+
+function xmlText(s) {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (m, e) => {
+    const k = e.toLowerCase();
+    if (k[0] === '#') return String.fromCodePoint(k[1] === 'x' ? parseInt(k.slice(2), 16) : parseInt(k.slice(1), 10));
+    return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[k];
+  });
+}
+
+/** First worksheet of an .xlsx as rows of strings (shared + inline strings, numbers as written). */
+async function xlsxRows(bytes) {
+  const files = await unzipEntries(bytes, n => n === 'xl/sharedStrings.xml' || /^xl\/worksheets\/sheet\d+\.xml$/.test(n));
+  const dec = b => new TextDecoder().decode(b);
+  const shared = [];
+  if (files['xl/sharedStrings.xml']) {
+    for (const si of dec(files['xl/sharedStrings.xml']).match(/<si\b[\s\S]*?<\/si>/g) || []) {
+      shared.push(xmlText((si.match(/<t\b[^>]*>[\s\S]*?<\/t>/g) || []).map(t => t.replace(/^<t\b[^>]*>|<\/t>$/g, '')).join('')));
+    }
+  }
+  const sheetName = Object.keys(files).filter(n => n.startsWith('xl/worksheets/')).sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10))[0];
+  if (!sheetName) throw new ProtocolError('No worksheet in this .xlsx');
+  const colIndex = ref => { let n = 0; for (const ch of ref.replace(/\d+$/, '')) n = n * 26 + (ch.charCodeAt(0) - 64); return n - 1; };
+  const rows = [];
+  for (const rowXml of dec(files[sheetName]).match(/<row\b[\s\S]*?<\/row>/g) || []) {
+    const row = [];
+    for (const c of rowXml.match(/<c\b[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g) || []) {
+      const attrs = c.match(/^<c\b([^>]*?)\/?>/)[1];
+      const ref = (attrs.match(/\br="([A-Z]+\d+)"/) || [])[1];
+      const type = (attrs.match(/\bt="([^"]+)"/) || [])[1];
+      const v = (c.match(/<v>([\s\S]*?)<\/v>/) || [])[1];
+      let val = '';
+      if (type === 's' && v != null) val = shared[parseInt(v, 10)] || '';
+      else if (type === 'inlineStr') val = xmlText(((c.match(/<t\b[^>]*>([\s\S]*?)<\/t>/) || [])[1]) || '');
+      else if (v != null) val = xmlText(v);
+      const idx = ref ? colIndex(ref) : row.length;
+      while (row.length < idx) row.push('');
+      row[idx] = { val: val.trim(), num: type !== 's' && type !== 'inlineStr' && type !== 'str' };
+    }
+    if (row.some(x => x && x.val !== '')) rows.push(row.map(x => (x ? x : { val: '', num: false })));
+  }
+  return rows;
+}
+
+const VAULT_HEADERS = {
+  id: ['id', 'deviceid', 'platformid', 'argosid', 'kineisid', 'ptt', 'pttid', 'identifiant', 'iddec', 'beaconid'],
+  addr: ['addr', 'address', 'deviceaddress', 'adresse', 'addrhex', 'hexaddr', 'hexid'],
+  key: ['key', 'seckey', 'secretkey', 'aeskey', 'devicekey', 'cle', 'clef', 'securitykey', 'secret'],
+  rconf: ['rconf', 'radioconf', 'radioconfig', 'radioconfiguration'],
+  sn: ['sn', 'serial', 'serialnumber', 'devicesn', 'modulesn'],
+  status: ['status', 'state', 'statut'],
+  note: ['note', 'notes', 'comment', 'comments', 'remark'],
+};
+function headerField(h) {
+  const k = String(h).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+  for (const [f, names] of Object.entries(VAULT_HEADERS)) if (names.includes(k)) return f;
+  return null;
+}
+
+/** Normalise one credential set; returns { rec, errors{} } (empty strings for missing optional fields). */
+function vaultNormalize(src) {
+  const clean = s => String(s == null ? '' : s).trim().replace(/[\s:-]+/g, '').replace(/^0x/i, '');
+  const r = {
+    id: String(src.id == null ? '' : src.id).trim(), addr: clean(src.addr).toUpperCase(), key: clean(src.key).toUpperCase(),
+    rconf: clean(src.rconf).toUpperCase(), sn: String(src.sn || '').trim(), note: String(src.note || '').trim(),
+    status: VAULT_STATUSES.includes(String(src.status || '').toLowerCase()) ? String(src.status).toLowerCase() : 'free',
+  };
+  const errors = {};
+  if (!/^\d+$/.test(r.id) || Number(r.id) < 1 || Number(r.id) > 2 ** 31) errors.id = 'decimal 1..2147483648';
+  else r.id = String(Number(r.id));
+  if (!isHex(r.addr, 8)) errors.addr = '8 hex';
+  if (!isHex(r.key, 32)) errors.key = '32 hex';
+  if (r.rconf && !isHex(r.rconf, 32)) errors.rconf = '32 hex or empty';
+  return { rec: r, errors };
+}
+
+/** Rows (strings, or xlsx {val,num} cells) -> { records, invalid:[{line, errors, id}], notes[] }. */
+function credentialRowsToRecords(rows) {
+  const val = c => (c && typeof c === 'object' ? c.val : String(c == null ? '' : c));
+  const notes = [];
+  let map = null, start = 0;
+  if (rows.length) {
+    const fields = rows[0].map(c => headerField(val(c)));
+    if (fields.includes('id') && fields.filter(Boolean).length >= 2) { map = fields; start = 1; }
+  }
+  if (!map) { map = ['id', 'addr', 'key', 'rconf']; notes.push('No header row: columns read as ID, ADDR, KEY, RCONF'); }
+  const records = [], invalid = [];
+  for (let i = start; i < rows.length; i++) {
+    const o = {};
+    rows[i].forEach((c, j) => {
+      const f = map[j];
+      if (!f) return;
+      let v = val(c);
+      // A spreadsheet may store an all-digit ADDR as a number and drop its leading zeros
+      if (f === 'addr' && c && typeof c === 'object' && c.num && /^\d{1,7}$/.test(v)) { v = v.padStart(8, '0'); notes.push(`Row ${i + 1}: ADDR read as a number, padded to ${v}`); }
+      o[f] = v;
+    });
+    const { rec, errors } = vaultNormalize(o);
+    if (Object.keys(errors).length) invalid.push({ line: i + 1, id: rec.id, errors });
+    else records.push(rec);
+  }
+  return { records, invalid, notes };
+}
+
+/** A CLS credentials file (CSV / TSV / semicolon text, or .xlsx) -> credentialRowsToRecords() */
+async function readCredentialFile(name, bytes) {
+  const isZip = bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+  if (/\.xlsx$/i.test(name) || isZip) return credentialRowsToRecords(await xlsxRows(bytes));
+  if (/\.xls$/i.test(name)) throw new ProtocolError('Old .xls files are not supported: save as .xlsx or CSV');
+  return credentialRowsToRecords(parseDelimited(new TextDecoder().decode(bytes)));
+}
+
+function vaultUid() { return 'r' + Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, '0')).join(''); }
+function vaultNewData() { return { format: VAULT_FORMAT, v: 1, records: [] }; }
+function vaultFind(data, id) { return data.records.find(r => r.id === String(id)) || null; }
+
+/** Preview (commit=false) or apply an import. Same ID + same ADDR/KEY = identical (skipped);
+ *  same ID with different values, or an ADDR already used by another ID = conflict (skipped). */
+function vaultMerge(data, records, { commit = false, source = '', by = '' } = {}) {
+  const res = { added: [], identical: [], conflicts: [] };
+  const seen = new Map(data.records.map(r => [r.id, r]));
+  const byAddr = new Map(data.records.map(r => [r.addr, r]));
+  for (const rec of records) {
+    const cur = seen.get(rec.id);
+    if (cur) {
+      if (cur.addr === rec.addr && cur.key === rec.key) res.identical.push(rec.id);
+      else res.conflicts.push({ id: rec.id, why: cur.addr !== rec.addr ? 'ADDR differs from the vault' : 'KEY differs from the vault' });
+      continue;
+    }
+    const other = byAddr.get(rec.addr);
+    if (other) { res.conflicts.push({ id: rec.id, why: `ADDR ${rec.addr} already belongs to ID ${other.id}` }); continue; }
+    const now = new Date().toISOString();
+    // CLS rows carry no tracking; sets merged from another vault keep their status and history
+    const full = {
+      fw: '', assigned: '', ...rec, uid: vaultUid(), source: rec.source || source, added: rec.added || now,
+      history: [...(rec.history || []), { t: now, ev: rec.history ? 'merged' : 'imported', by, note: source }],
+    };
+    seen.set(full.id, full); byAddr.set(full.addr, full);
+    res.added.push(full.id);
+    if (commit) data.records.push(full);
+  }
+  return res;
+}
+
+function vaultEvent(rec, ev, by, note) { rec.history = rec.history || []; rec.history.push({ t: new Date().toISOString(), ev, by: by || '', note: note || '' }); }
+
+/** Next free set (import order). */
+function vaultNextFree(data) { return data.records.find(r => r.status === 'free' && !Object.keys(vaultNormalize(r).errors).length) || null; }
+
+/** Provisioned and verified on a unit. Returns the record, or null when the ID is not in the vault. */
+function vaultMarkInUse(data, id, { sn = '', fw = '', by = '' } = {}) {
+  const r = vaultFind(data, id);
+  if (!r) return null;
+  const prev = r.status === 'in use' && r.sn && r.sn !== sn ? ` (was on ${r.sn})` : '';
+  Object.assign(r, { status: 'in use', sn, fw, assigned: new Date().toISOString().slice(0, 10) });
+  vaultEvent(r, 'provisioned', by, `${sn || 'unit'}${prev}`);
+  return r;
+}
+
+/** Erased from a unit (AT+PROV=ERASE): back to free; the SN stays in the history. */
+function vaultMarkFreed(data, id, { sn = '', by = '' } = {}) {
+  const r = vaultFind(data, id);
+  if (!r) return null;
+  const was = r.sn || sn;
+  Object.assign(r, { status: 'free', sn: '', fw: '', assigned: '' });
+  vaultEvent(r, 'erased', by, was ? `from ${was}` : '');
+  return r;
+}
+
+function vaultCounts(data) {
+  const c = { total: data.records.length, free: 0, 'in use': 0, retired: 0 };
+  for (const r of data.records) c[r.status] = (c[r.status] || 0) + 1;
+  return c;
+}
+
+/** CSV of the vault; keys only when asked for (plaintext secret material). */
+function vaultCsv(data, { keys = false } = {}) {
+  const cols = ['id', 'addr', ...(keys ? ['key'] : []), 'rconf', 'status', 'sn', 'fw', 'assigned', 'note', 'source'];
+  const esc = v => { const s = String(v == null ? '' : v); return /[",\r\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  return [cols.join(','), ...data.records.map(r => cols.map(c => esc(r[c])).join(','))].join('\r\n') + '\r\n';
+}
+
+function b64enc(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); }
+function b64dec(s) { const bin = atob(s); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
+
+async function vaultDeriveKey(pass, salt, iter = VAULT_KDF_ITER) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+/** Encrypt with an already-derived key: AES-256-GCM, fresh 96-bit IV every save. */
+async function vaultSeal(data, key, salt, iter = VAULT_KDF_ITER) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(data))));
+  return { format: VAULT_FORMAT, v: 1, kdf: { alg: 'PBKDF2-SHA256', iter, salt: b64enc(salt) }, cipher: 'AES-256-GCM', iv: b64enc(iv), ct: b64enc(ct), saved: new Date().toISOString() };
+}
+
+/** Passphrase -> { data, key, salt, iter }. Wrong passphrase or tampered file -> ProtocolError. */
+async function vaultOpen(blob, pass) {
+  if (!blob || blob.format !== VAULT_FORMAT || !blob.kdf || !blob.ct) throw new ProtocolError('Not a Naiad vault file');
+  const salt = b64dec(blob.kdf.salt), iter = blob.kdf.iter || VAULT_KDF_ITER;
+  const key = await vaultDeriveKey(pass, salt, iter);
+  let pt;
+  try { pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64dec(blob.iv) }, key, b64dec(blob.ct)); }
+  catch (e) { throw new ProtocolError('Wrong passphrase, or the vault file was altered'); }
+  const data = JSON.parse(new TextDecoder().decode(pt));
+  if (data.format !== VAULT_FORMAT || !Array.isArray(data.records)) throw new ProtocolError('Vault content not recognised');
+  return { data, key, salt, iter };
+}
+
+/** New vault (or new passphrase): fresh salt, derived key, sealed blob. */
+async function vaultCreate(data, pass) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await vaultDeriveKey(pass, salt);
+  return { key, salt, iter: VAULT_KDF_ITER, blob: await vaultSeal(data, key, salt) };
+}
+
 const NaiadProtocol = {
   TOOL_VERSION, APP_BASE, APP_MAX_SIZE, RAM_START, RAM_END, DFU_CHUNK, DFU_MAX_PAYLOAD, BAUDS, ST_ITEMS, CSV_COLUMNS, AT_ERROR_TEXT, ROM_RECOVERY_CMD,
   Clock, sleep, CancelledError, TimeoutError, ProtocolError,
@@ -2453,6 +2809,9 @@ const NaiadProtocol = {
   analyzeImage, writeOrder, sendOrderCrc, buildWriteLine, parseDfuInfo, dfuCmd, blPing, requestBoot, flashFirmware, bootloaderCheck, exitBootloader,
   buildReport, reportToCsvRow, csvRecord, csvEscape, buildCsv,
   NaiadSimulator, SimTransport, makeSimImage, mulberry32,
+  VAULT_STATUSES, VAULT_KDF_ITER, parseDelimited, unzipEntries, xlsxRows, credentialRowsToRecords, readCredentialFile,
+  vaultNormalize, vaultNewData, vaultFind, vaultMerge, vaultNextFree, vaultMarkInUse, vaultMarkFreed, vaultCounts, vaultCsv,
+  vaultDeriveKey, vaultSeal, vaultOpen, vaultCreate, b64enc, b64dec,
 };
 // ==== PROTOCOL END ====
 
@@ -3154,6 +3513,7 @@ async function doProvision() {
     Object.assign(ui.unit, { id: p.id, addr: p.addr, seckeyCrc: p.seckeyCrc, rconf: p.rconf, fw: res.fw || ui.unit.fw });
     ui.mode = 'app';
     setMsg('#credMsg', res.ok ? 'Credentials written and verified after the reset.' : 'Written, but the readback does not match: see the table.', res.ok ? 'ok' : 'err');
+    if (res.ok) vaultTrack('provisioned', p.id || x.id, { sn: ui.unit.sn, fw: ui.unit.fw });
     if (res.ok && $('#credClearKey').checked) { $('#credKey').value = ''; credValidateUi(false); }
     renderUnit(); renderReport(); renderConn();
     if ($('#stAuto').checked) await doBootPoll();
@@ -3182,6 +3542,392 @@ async function doCredRead() {
   setMsg('#credMsg', bad ? 'The unit differs from the fields above.' : 'Read back. Fields left empty were not compared.', bad ? 'err' : 'ok');
 }
 
+/* ---------- credentials vault (UI) ----------
+ * Encrypted at rest in this browser (localStorage) with the operator's passphrase; plaintext lives
+ * only in memory while unlocked and is dropped on Lock or after 15 min without vault activity.
+ * Tracking events (ID + unit SN, no keys) that happen while the vault is locked are queued in clear
+ * and applied at the next unlock. */
+
+const VAULT_STORE = 'naiad.vault.v1', VAULT_PENDING = 'naiad.vault.pending.v1', VAULT_IDLE_MS = 15 * 60000;
+const vault = { open: false, data: null, key: null, salt: null, iter: 0, saveTimer: null, idleTimer: null, preview: null, sort: { col: null, dir: 1 }, shown: new Set(), hist: new Set() };
+const VAULT_COLS = [['id', 'ID'], ['addr', 'ADDR'], ['key', 'Key'], ['rconf', 'RCONF'], ['status', 'Status'], ['sn', 'Device SN'], ['assigned', 'Assigned'], ['note', 'Notes']];
+
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } }
+function storeDel(k) { try { localStorage.removeItem(k); } catch (e) { /* storage blocked */ } }
+function vaultStored() { try { return JSON.parse(storeGet(VAULT_STORE) || 'null'); } catch (e) { return null; } }
+function vaultBy() { const o = $('#repOperator'); return (o && o.value.trim()) || ''; }
+function vaultRecValid(r) { return Object.keys(vaultNormalize(r).errors).length === 0; }
+
+function vaultTouch() {
+  clearTimeout(vault.idleTimer);
+  if (vault.open) vault.idleTimer = setTimeout(() => void vaultLock('Locked after 15 minutes without vault activity.'), VAULT_IDLE_MS);
+}
+
+async function vaultSaveNow() {
+  if (!vault.open) return;
+  clearTimeout(vault.saveTimer); vault.saveTimer = null;
+  const blob = await vaultSeal(vault.data, vault.key, vault.salt, vault.iter);
+  if (storeSet(VAULT_STORE, JSON.stringify(blob))) setMsg('#vaultSaved', `Saved, encrypted · ${new Date().toLocaleTimeString()}`, 'ok');
+  else setMsg('#vaultSaved', 'This browser blocks storage: export the encrypted vault before closing the page.', 'err');
+}
+function vaultDirty() { clearTimeout(vault.saveTimer); vault.saveTimer = setTimeout(() => void vaultSaveNow(), 400); setMsg('#vaultSaved', 'Saving…'); renderVaultCounts(); renderCredVault(); }
+
+async function vaultLock(msg) {
+  if (vault.saveTimer) await vaultSaveNow();
+  clearTimeout(vault.idleTimer);
+  Object.assign(vault, { open: false, data: null, key: null, salt: null, preview: null });
+  vault.shown.clear(); vault.hist.clear();
+  $('#vaultBody').innerHTML = '';
+  renderVault();
+  setMsg('#vaultMsg', msg || 'Locked.', '');
+}
+
+async function vaultDoCreate() {
+  const p1 = $('#vaultNewPass').value, p2 = $('#vaultNewPass2').value;
+  if (p1.length < 10) { setMsg('#vaultMsg', 'Use at least 10 characters: a few random words works well.', 'err'); return; }
+  if (p1 !== p2) { setMsg('#vaultMsg', 'The two passphrases differ.', 'err'); return; }
+  setMsg('#vaultMsg', 'Creating…');
+  const data = vaultNewData();
+  const c = await vaultCreate(data, p1);
+  $('#vaultNewPass').value = ''; $('#vaultNewPass2').value = '';
+  if (!storeSet(VAULT_STORE, JSON.stringify(c.blob))) setMsg('#vaultMsg', 'Created, but this browser blocks storage: export the vault to keep it.', 'warn');
+  Object.assign(vault, { open: true, data, key: c.key, salt: c.salt, iter: c.iter });
+  vaultApplyPending(); renderVault(); vaultTouch();
+  setMsg('#vaultMsg', 'Vault created. Import a CLS file to add credential sets.', 'ok');
+}
+
+async function vaultDoUnlock() {
+  const pass = $('#vaultPass').value;
+  setMsg('#vaultMsg', 'Unlocking…');
+  try {
+    const o = await vaultOpen(vaultStored(), pass);
+    Object.assign(vault, { open: true, data: o.data, key: o.key, salt: o.salt, iter: o.iter });
+  } catch (e) { setMsg('#vaultMsg', e.message, 'err'); return; }
+  finally { $('#vaultPass').value = ''; }
+  vaultApplyPending(); renderVault(); vaultTouch();
+  setMsg('#vaultMsg', '');
+}
+
+async function vaultDoForget() {
+  if (!(await confirmDialog('Delete the vault in this browser?', 'The encrypted vault stored in this browser is deleted. Without the passphrase it cannot be opened anyway; keep an encrypted export or the CLS originals if you still need the credentials.', 'Delete vault', { focusCancel: true }))) return;
+  storeDel(VAULT_STORE); await vaultLock('Vault deleted from this browser.');
+}
+
+async function vaultDoChangePass() {
+  const p1 = $('#vaultChPass').value, p2 = $('#vaultChPass2').value;
+  if (p1.length < 10) { setMsg('#vaultSaved', 'New passphrase: at least 10 characters.', 'err'); return; }
+  if (p1 !== p2) { setMsg('#vaultSaved', 'The two new passphrases differ.', 'err'); return; }
+  const c = await vaultCreate(vault.data, p1);
+  Object.assign(vault, { key: c.key, salt: c.salt, iter: c.iter });
+  storeSet(VAULT_STORE, JSON.stringify(c.blob));
+  $('#vaultChPass').value = ''; $('#vaultChPass2').value = ''; $('#vaultChRow').hidden = true;
+  setMsg('#vaultSaved', 'Passphrase changed: the vault was re-encrypted with a new salt.', 'ok');
+}
+
+/* -- tracking (provisioning / erase on a unit) -- */
+function vaultApplyEvent(ev) {
+  const r = ev.kind === 'provisioned' ? vaultMarkInUse(vault.data, ev.id, ev) : vaultMarkFreed(vault.data, ev.id, ev);
+  note(r ? `Vault: ID ${ev.id} marked ${r.status}${r.sn ? ' on ' + r.sn : ''}` : `Vault: ID ${ev.id} is not in the vault (not tracked)`, r ? 'info' : 'warn');
+}
+function vaultTrack(kind, id, info = {}) {
+  if (!id) return;
+  const ev = { kind, id: String(id), sn: info.sn || '', fw: info.fw || '', by: vaultBy(), t: new Date().toISOString() };
+  if (vault.open) { vaultApplyEvent(ev); vaultDirty(); renderVault(); vaultTouch(); return; }
+  let q = [];
+  try { q = JSON.parse(storeGet(VAULT_PENDING) || '[]'); } catch (e) { q = []; }
+  q.push(ev); storeSet(VAULT_PENDING, JSON.stringify(q));
+  note(`Vault locked: ID ${id} ${kind} recorded, applied at the next unlock`, 'warn');
+}
+function vaultApplyPending() {
+  let q = [];
+  try { q = JSON.parse(storeGet(VAULT_PENDING) || '[]'); } catch (e) { q = []; }
+  if (!q.length) return;
+  for (const ev of q) vaultApplyEvent(ev);
+  storeDel(VAULT_PENDING); vaultDirty();
+  setMsg('#vaultSaved', `Applied ${q.length} tracking event(s) recorded while the vault was locked.`, 'ok');
+}
+
+/* -- import -- */
+async function vaultImportFile(file) {
+  if (!file) return;
+  vaultTouch();
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (/\.json$/i.test(file.name)) { vaultPreviewVaultFile(file.name, JSON.parse(new TextDecoder().decode(bytes))); return; }
+    const parsed = await readCredentialFile(file.name, bytes);
+    const merge = vaultMerge(vault.data, parsed.records, { commit: false });
+    vault.preview = { kind: 'cls', name: file.name, parsed, merge };
+  } catch (e) { setMsg('#vaultSaved', `${file.name}: ${e.message}`, 'err'); return; }
+  renderVaultPreview();
+}
+function vaultPreviewVaultFile(name, blob) {
+  vault.preview = { kind: 'vault', name, blob };
+  renderVaultPreview();
+}
+async function vaultCommitPreview() {
+  const p = vault.preview;
+  if (!p) return;
+  if (p.kind === 'vault') {
+    try {
+      const o = await vaultOpen(p.blob, $('#vaultMergePass').value);
+      const res = vaultMerge(vault.data, o.data.records, { commit: true, source: p.name, by: vaultBy() });
+      setMsg('#vaultSaved', `Merged ${p.name}: ${res.added.length} added, ${res.identical.length} already here, ${res.conflicts.length} conflicts skipped.`, res.conflicts.length ? 'warn' : 'ok');
+    } catch (e) { setMsg('#vaultPreviewMsg', e.message, 'err'); return; }
+    finally { const f = $('#vaultMergePass'); if (f) f.value = ''; }
+  } else {
+    const res = vaultMerge(vault.data, p.parsed.records, { commit: true, source: p.name, by: vaultBy() });
+    setMsg('#vaultSaved', `Imported ${res.added.length} credential set(s) from ${p.name}.`, 'ok');
+  }
+  vault.preview = null; vaultDirty(); renderVault();
+}
+
+/* -- rendering -- */
+function renderVaultPreview() {
+  const box = $('#vaultPreview'), p = vault.preview;
+  box.innerHTML = ''; box.hidden = !p;
+  if (!p) return;
+  const h = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+  if (p.kind === 'vault') {
+    box.append(h('div', `${p.name}: an encrypted Naiad vault. Enter its passphrase to merge its credential sets into this vault.`));
+    const row = h('div', null, 'row');
+    const inp = h('input'); inp.type = 'password'; inp.id = 'vaultMergePass'; inp.autocomplete = 'off'; inp.placeholder = 'Passphrase of that file';
+    const ok = h('button', 'Merge', 'btn primary'); ok.addEventListener('click', vaultCommitPreview);
+    const no = h('button', 'Cancel', 'btn'); no.addEventListener('click', () => { vault.preview = null; renderVaultPreview(); });
+    row.append(inp, ok, no); box.append(row, h('div', '', 'msg small'));
+    box.lastChild.id = 'vaultPreviewMsg';
+    inp.focus();
+    return;
+  }
+  const m = p.merge, inv = p.parsed.invalid;
+  box.append(h('div', `${p.name}: ${p.parsed.records.length + inv.length} row(s) read · ${m.added.length} new · ${m.identical.length} already in the vault · ${m.conflicts.length} conflict(s) · ${inv.length} invalid`));
+  const ul = h('ul', null, 'small');
+  for (const n of p.parsed.notes) ul.append(h('li', n));
+  for (const c of m.conflicts) ul.append(h('li', `Skipped ID ${c.id}: ${c.why}`));
+  for (const x of inv) ul.append(h('li', `Row ${x.line}${x.id ? ` (ID ${x.id})` : ''}: ${Object.entries(x.errors).map(([k, v]) => `${k.toUpperCase()} ${v}`).join(', ')}`));
+  if (ul.children.length) box.append(ul);
+  const row = h('div', null, 'row');
+  const ok = h('button', `Import ${m.added.length} new set(s)`, 'btn primary'); ok.disabled = !m.added.length; ok.addEventListener('click', vaultCommitPreview);
+  const no = h('button', 'Cancel', 'btn'); no.addEventListener('click', () => { vault.preview = null; renderVaultPreview(); });
+  row.append(ok, no); box.append(row);
+}
+
+function renderVaultCounts() {
+  if (!vault.open) return;
+  const c = vaultCounts(vault.data);
+  $('#vaultCounts').textContent = `${c.total} set(s): ${c.free} free · ${c['in use']} in use · ${c.retired} retired`;
+  $('#vaultSum').innerHTML = ''; $('#vaultSum').append(badge(`${c.free} FREE`, c.free ? 'pass' : 'warn'));
+}
+
+function vaultRows() {
+  const q = $('#vaultSearch').value.trim().toLowerCase(), f = $('#vaultFilter').value;
+  let rows = vault.data.records.filter(r => (!f || r.status === f) &&
+    (!q || [r.id, r.addr, r.sn, r.note, r.source, r.status].some(x => String(x || '').toLowerCase().includes(q))));
+  const { col, dir } = vault.sort;
+  if (col) rows = rows.slice().sort((a, b) => {
+    const x = a[col] || '', y = b[col] || '';
+    return (col === 'id' ? Number(x) - Number(y) : String(x).localeCompare(String(y))) * dir;
+  });
+  return rows;
+}
+
+function renderVault() {
+  const stored = !!vaultStored();
+  $('#vaultLocked').hidden = vault.open; $('#vaultOpen').hidden = !vault.open;
+  $('#vaultCreateRow').hidden = vault.open || stored; $('#vaultUnlockRow').hidden = vault.open || !stored;
+  if (!vault.open) { $('#vaultSum').innerHTML = ''; $('#vaultSum').append(badge(stored ? 'LOCKED' : 'NO VAULT', 'idle')); renderCredVault(); return; }
+  renderVaultPreview(); renderVaultCounts(); renderCredVault();
+  const body = $('#vaultBody');
+  const focusId = document.activeElement && document.activeElement.dataset ? [document.activeElement.dataset.uid, document.activeElement.dataset.f] : null;
+  body.innerHTML = '';
+  const rows = vaultRows();
+  rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    tr.dataset.uid = r.uid; tr.className = 'st-' + r.status.replace(' ', '');
+    const num = document.createElement('td'); num.className = 'num'; num.textContent = String(i + 1); tr.append(num);
+    for (const [f] of VAULT_COLS) {
+      const td = document.createElement('td');
+      let el;
+      if (f === 'status') {
+        el = document.createElement('select');
+        for (const s of VAULT_STATUSES) { const o = document.createElement('option'); o.value = s; o.textContent = s; el.append(o); }
+        el.value = r.status;
+      } else {
+        el = document.createElement('input');
+        el.type = f === 'key' && !vault.shown.has(r.uid) ? 'password' : 'text';
+        el.value = r[f] || ''; el.autocomplete = 'off'; el.spellcheck = false;
+        if (f === 'assigned') el.placeholder = 'YYYY-MM-DD';
+      }
+      el.dataset.uid = r.uid; el.dataset.f = f; el.setAttribute('aria-label', `${f} of row ${i + 1}`);
+      const errs = vaultNormalize(r).errors;
+      if (errs[f]) { td.classList.add('bad'); el.title = errs[f]; }
+      td.append(el); tr.append(td);
+    }
+    const act = document.createElement('td'); act.className = 'act';
+    const mk = (txt, title, fn, dis) => { const b = document.createElement('button'); b.className = 'btn small'; b.type = 'button'; b.textContent = txt; b.title = title; b.disabled = !!dis; b.addEventListener('click', fn); return b; };
+    act.append(
+      mk('Use', 'Fill the Kineis credentials fields with this set', () => void vaultUse(r.uid), !vaultRecValid(r)),
+      mk(vault.shown.has(r.uid) ? 'Hide' : 'Key', 'Show or hide this key (hidden again after 30 s)', () => vaultToggleKey(r.uid)),
+      mk('Log', 'History of this set', () => { vault.hist.has(r.uid) ? vault.hist.delete(r.uid) : vault.hist.add(r.uid); renderVault(); }),
+      mk('✕', 'Delete this set', () => void vaultDelete(r.uid)));
+    tr.append(act);
+    body.append(tr);
+    if (vault.hist.has(r.uid)) {
+      const hr = document.createElement('tr'); hr.className = 'hist';
+      const td = document.createElement('td'); td.colSpan = VAULT_COLS.length + 2;
+      td.textContent = (r.history || []).map(h => `${h.t.slice(0, 16).replace('T', ' ')}  ${h.ev}${h.note ? ': ' + h.note : ''}${h.by ? '  (' + h.by + ')' : ''}`).join('\n') || 'No history';
+      hr.append(td); body.append(hr);
+    }
+  });
+  if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = VAULT_COLS.length + 2; td.className = 'muted'; td.textContent = vault.data.records.length ? 'No set matches the filter.' : 'Empty: import a CLS file, or add a row.'; tr.append(td); body.append(tr); }
+  for (const th of $$('#vaultHead th[data-f]')) th.dataset.sort = vault.sort.col === th.dataset.f ? (vault.sort.dir > 0 ? 'asc' : 'desc') : '';
+  if (focusId && focusId[0]) { const el = body.querySelector(`[data-uid="${focusId[0]}"][data-f="${focusId[1]}"]`); if (el) el.focus(); }
+}
+
+function vaultToggleKey(uid) {
+  vaultTouch();
+  if (vault.shown.has(uid)) vault.shown.delete(uid);
+  else { vault.shown.add(uid); setTimeout(() => { if (vault.shown.delete(uid) && vault.open) renderVault(); }, 30000); }
+  renderVault();
+}
+
+function vaultCellChanged(el) {
+  vaultTouch();
+  const r = vault.data.records.find(x => x.uid === el.dataset.uid), f = el.dataset.f;
+  if (!r) return;
+  const before = r[f] || '';
+  const trial = vaultNormalize({ ...r, [f]: el.value });
+  let val = f === 'status' ? el.value : (['id', 'addr', 'key', 'rconf'].includes(f) ? trial.rec[f] : el.value.trim());
+  let err = ['id', 'addr', 'key', 'rconf'].includes(f) ? trial.errors[f] : null;
+  if (f === 'assigned' && val && !/^\d{4}-\d{2}-\d{2}$/.test(val)) err = 'YYYY-MM-DD or empty';
+  if (!err && (f === 'id' || f === 'addr') && val && vault.data.records.some(x => x !== r && x[f] === val)) err = `another set already has this ${f.toUpperCase()}`;
+  const td = el.closest('td');
+  if (err) { td.classList.add('bad'); el.title = err; setMsg('#vaultSaved', `${f.toUpperCase()}: ${err}. Not saved.`, 'err'); return; }
+  td.classList.remove('bad'); el.title = '';
+  if (val === before) return;
+  r[f] = val;
+  vaultEvent(r, f === 'status' ? `status: ${before} → ${val}` : 'edited', vaultBy(), f === 'key' ? `key (CRC-32 ${seckeyCrc(val)})` : f === 'status' ? '' : f);
+  vaultDirty();
+  if (f === 'status' || f === 'id') renderVault();
+}
+
+async function vaultUse(uid) {
+  vaultTouch();
+  const r = vault.data.records.find(x => x.uid === uid);
+  if (!r) return;
+  if (r.status !== 'free' && !(await confirmDialog(`ID ${r.id} is ${r.status}`, `${r.sn ? `The vault has it on ${r.sn}. ` : ''}Use it for this unit anyway?`, 'Use it', { focusCancel: true }))) return;
+  $('#credId').value = r.id; $('#credAddr').value = r.addr; $('#credKey').value = r.key; $('#credRconf').value = r.rconf || '';
+  credValidateUi(false);
+  ui.vaultPick = r.id;
+  setMsg('#credMsg', `Filled from the vault: ID ${r.id}. "Write, reset & verify" provisions it; the vault marks it in use once verified.`, 'ok');
+  goTo('#cardCred', '#btnProvision');
+}
+
+async function vaultPickNext() {
+  if (!vault.open) { setMsg('#credMsg', 'Unlock the credentials vault first.', 'warn'); goTo('#cardVault', vaultStored() ? '#vaultPass' : '#vaultNewPass'); return; }
+  const r = vault.data.records.find(x => x.status === 'free' && vaultRecValid(x));
+  if (!r) { setMsg('#credMsg', 'The vault has no free credential set: import a CLS file.', 'warn'); return; }
+  await vaultUse(r.uid);
+}
+
+async function vaultDelete(uid) {
+  vaultTouch();
+  const r = vault.data.records.find(x => x.uid === uid);
+  if (!r) return;
+  if (!(await confirmDialog(`Delete ID ${r.id || '(new row)'}?`, `${r.status === 'in use' ? `It is in use${r.sn ? ' on ' + r.sn : ''}. ` : ''}The set and its history are removed from this vault (CLS still has it).`, 'Delete', { focusCancel: true }))) return;
+  vault.data.records = vault.data.records.filter(x => x !== r);
+  vaultDirty(); renderVault();
+}
+
+function vaultAddRow() {
+  vaultTouch();
+  const now = new Date().toISOString();
+  const r = { uid: vaultUid(), id: '', addr: '', key: '', rconf: '', status: 'free', sn: '', fw: '', assigned: '', note: '', source: 'manual', added: now, history: [{ t: now, ev: 'added by hand', by: vaultBy(), note: '' }] };
+  vault.data.records.push(r);
+  vault.shown.add(r.uid);
+  vault.sort.col = null; $('#vaultSearch').value = ''; $('#vaultFilter').value = '';
+  vaultDirty(); renderVault();
+  const el = $(`#vaultBody [data-uid="${r.uid}"][data-f="id"]`); if (el) el.focus();
+}
+
+async function vaultExport(kind) {
+  vaultTouch();
+  if (kind === 'vault') { await vaultSaveNow(); download(`naiad-vault_${stamp()}.json`, storeGet(VAULT_STORE) || JSON.stringify(await vaultSeal(vault.data, vault.key, vault.salt, vault.iter)), 'application/json'); return; }
+  if (kind === 'keys' && !(await confirmDialog('Export the keys in clear?', 'The CSV file contains every SECKEY in plain text. Anyone with the file can impersonate these units. Store it encrypted and delete it after use.', 'Export with keys', { focusCancel: true }))) return;
+  download(`naiad-credentials${kind === 'keys' ? '_WITH-KEYS' : ''}_${stamp()}.csv`, vaultCsv(vault.data, { keys: kind === 'keys' }), 'text/csv');
+}
+
+/** Credentials card: what the vault knows about the connected unit's ID. */
+function renderCredVault() {
+  const box = $('#credVault');
+  if (!box) return;
+  const id = realId(ui.unit);
+  if (!vault.open) { box.textContent = vaultStored() ? 'Vault locked.' : ''; box.className = 'muted small'; return; }
+  if (!id) { box.textContent = ''; return; }
+  const r = vaultFind(vault.data, id);
+  let text = `Vault: ID ${id} is not in the vault.`, cls = 'msg warn small';
+  if (r) {
+    const snOk = !r.sn || !ui.unit.sn || r.sn === ui.unit.sn;
+    text = `Vault: ID ${id} is ${r.status}${r.sn ? ` on ${r.sn}` : ''}.${r.status !== 'in use' ? ' Not marked in use.' : ''}${!snOk ? ' This unit is ' + ui.unit.sn + '!' : ''}`;
+    cls = r.status === 'in use' && snOk ? 'msg ok small' : 'msg warn small';
+  }
+  box.textContent = text; box.className = cls;
+}
+
+function initVault() {
+  $('#btnVaultCreate').addEventListener('click', () => void vaultDoCreate());
+  $('#btnVaultUnlock').addEventListener('click', () => void vaultDoUnlock());
+  $('#vaultPass').addEventListener('keydown', e => { if (e.key === 'Enter') void vaultDoUnlock(); });
+  $('#vaultNewPass2').addEventListener('keydown', e => { if (e.key === 'Enter') void vaultDoCreate(); });
+  $('#btnVaultForget').addEventListener('click', () => void vaultDoForget());
+  $('#btnVaultLoad').addEventListener('click', () => $('#vaultLoadFile').click());
+  $('#vaultLoadFile').addEventListener('change', async e => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    try {
+      const blob = JSON.parse(await f.text());
+      if (blob.format !== 'naiad-vault') throw new Error('not a Naiad vault file');
+      if (vaultStored() && !(await confirmDialog('Replace the vault in this browser?', `The vault stored here is replaced by ${f.name}. Unlock it with that file's passphrase.`, 'Replace', { focusCancel: true }))) return;
+      storeSet(VAULT_STORE, JSON.stringify(blob)); renderVault(); setMsg('#vaultMsg', `Loaded ${f.name}: unlock it with its passphrase.`, 'ok');
+    } catch (err) { setMsg('#vaultMsg', `${f.name}: ${err.message}`, 'err'); }
+  });
+  $('#btnVaultImport').addEventListener('click', () => $('#vaultFile').click());
+  $('#vaultFile').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; void vaultImportFile(f); });
+  const drop = $('#vaultOpen');
+  drop.addEventListener('dragover', e => { e.preventDefault(); });
+  drop.addEventListener('drop', e => { e.preventDefault(); if (vault.open && e.dataTransfer.files[0]) void vaultImportFile(e.dataTransfer.files[0]); });
+  $('#btnVaultAdd').addEventListener('click', vaultAddRow);
+  $('#btnVaultLock').addEventListener('click', () => void vaultLock('Locked.'));
+  $('#btnVaultExport').addEventListener('click', () => void vaultExport('vault'));
+  $('#btnVaultCsv').addEventListener('click', () => void vaultExport('csv'));
+  $('#btnVaultCsvKeys').addEventListener('click', () => void vaultExport('keys'));
+  $('#btnVaultPass').addEventListener('click', () => { $('#vaultChRow').hidden = !$('#vaultChRow').hidden; });
+  $('#btnVaultChPass').addEventListener('click', () => void vaultDoChangePass());
+  $('#vaultSearch').addEventListener('input', () => { vaultTouch(); renderVault(); });
+  $('#vaultFilter').addEventListener('change', () => { vaultTouch(); renderVault(); });
+  for (const th of $$('#vaultHead th[data-f]')) th.addEventListener('click', () => {
+    const f = th.dataset.f;
+    vault.sort = vault.sort.col === f ? { col: f, dir: -vault.sort.dir } : { col: f, dir: 1 };
+    renderVault();
+  });
+  const body = $('#vaultBody');
+  body.addEventListener('change', e => { if (e.target.dataset && e.target.dataset.f) vaultCellChanged(e.target); });
+  body.addEventListener('keydown', e => {
+    const el = e.target;
+    if (!el.dataset || !el.dataset.f) return;
+    if (e.key === 'Escape') { const r = vault.data.records.find(x => x.uid === el.dataset.uid); if (r) { el.value = r[el.dataset.f] || ''; el.closest('td').classList.remove('bad'); } return; }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    vaultCellChanged(el);
+    const tr = el.closest('tr'); let next = e.shiftKey ? tr.previousElementSibling : tr.nextElementSibling;
+    while (next && !next.dataset.uid) next = e.shiftKey ? next.previousElementSibling : next.nextElementSibling;
+    const t = next && next.querySelector(`[data-f="${el.dataset.f}"]`);
+    if (t) t.focus();
+  });
+  $('#btnCredPick').addEventListener('click', () => void vaultPickNext());
+  renderVault();
+}
+
 async function doCredErase() {
   const id = realId(ui.unit);
   if (!(await confirmDialog('Erase the credentials?',
@@ -3195,6 +3941,7 @@ async function doCredErase() {
     await refreshUnit();
     const prov = ui.unit.state && ui.unit.state.prov;
     setMsg('#credMsg', prov === '0' ? 'Credentials erased: the unit rebooted into NO_CREDS (radio off).' : 'Erase sent, but the unit does not report prov=0: check the unit info.', prov === '0' ? 'ok' : 'err');
+    if (prov === '0') vaultTrack('erased', id, { sn: ui.unit.sn });
   } else setMsg('#credMsg', r.error ? r.error.message : 'Cancelled', 'err');
 }
 
@@ -3310,6 +4057,7 @@ async function doWizard() {
       const p = w.creds.post || {};
       Object.assign(ui.unit, { id: p.id, addr: p.addr, seckeyCrc: p.seckeyCrc, rconf: p.rconf });
       if (w.creds.ok && $('#credClearKey').checked) { $('#credKey').value = ''; credValidateUi(false); }
+      if (w.creds.ok) vaultTrack('provisioned', p.id, { sn: ui.unit.sn, fw: ui.unit.fw });
     }
     if (w.selftest || w.st1) ui.selftest = w.selftest || w.st1;
     if (w.commission) { ui.commission = w.commission; ui.commUpdated = new Date(); }
@@ -3469,6 +4217,7 @@ function renderUnit() {
   $('#unitSum').textContent = realId(u) ? `ID ${u.id}` : testId ? 'no credentials' : '';
   $('#unitSum').className = 'sumstat mono small muted';
   renderConn();
+  renderCredVault();
 }
 function fmtOffset(s) {
   if (s < 120) return `${s} s`;
@@ -3623,6 +4372,7 @@ function init() {
   $('#btnProvision').addEventListener('click', doProvision);
   $('#btnCredRead').addEventListener('click', doCredRead);
   $('#btnCredErase').addEventListener('click', doCredErase);
+  initVault();
 
   $('#btnCommRefresh').addEventListener('click', () => doComm(null));
   $('#btnCommStart').addEventListener('click', () => doComm('START'));

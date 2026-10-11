@@ -16,13 +16,27 @@ mkdirSync(dist, { recursive: true });
 copyFileSync(src, join(dist, 'index.html'));
 
 // Workers static assets honour a _headers file. Serial access stays limited
-// to this origin; the page needs no other powerful features.
+// to this origin; the page needs no other powerful features. The CSP lets
+// the single-file page run but forbids every network request (connect-src
+// 'none', no forms, no framing): the credentials vault and anything typed
+// into the page cannot be sent anywhere, even by injected content.
+const csp = [
+	"default-src 'none'",
+	"script-src 'self' 'unsafe-inline'",
+	"style-src 'self' 'unsafe-inline'",
+	"img-src 'self' data:",
+	"connect-src 'none'",
+	"form-action 'none'",
+	"base-uri 'none'",
+	"frame-ancestors 'none'",
+].join('; ');
 writeFileSync(join(dist, '_headers'), [
 	'/*',
 	'  X-Content-Type-Options: nosniff',
 	'  Referrer-Policy: no-referrer',
 	'  Permissions-Policy: serial=(self), camera=(), microphone=(), geolocation=()',
 	'  X-Frame-Options: DENY',
+	`  Content-Security-Policy: ${csp}`,
 	'',
 ].join('\n'));
 

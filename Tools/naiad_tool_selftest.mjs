@@ -16,6 +16,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { deflateRawSync } from 'node:zlib';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(path.join(here, 'naiad_tool.html'), 'utf8');
@@ -708,6 +709,145 @@ await test('Device clock: utc field (0 = no GPS time yet), offset vs PC, survive
     await P.sleep(4000);
     eq((await P.getState(r.link)).utc, '0', 'cleared by a power-cycle');
   } finally { r.done(); }
+});
+
+/* ---------- credentials vault ---------- */
+
+/** Minimal .xlsx writer for the tests: sharedStrings + sheet1, deflated or stored. */
+function makeXlsx(rows, { deflate = true, numericCols = [] } = {}) {
+  const shared = [], idx = new Map();
+  const si = s => { if (!idx.has(s)) { idx.set(s, shared.length); shared.push(s); } return idx.get(s); };
+  const col = i => String.fromCharCode(65 + i);
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const sheet = '<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+    rows.map((r, ri) => `<row r="${ri + 1}">` + r.map((v, ci) => {
+      const ref = `${col(ci)}${ri + 1}`;
+      if (v === '') return '';
+      return ri > 0 && numericCols.includes(ci) ? `<c r="${ref}"><v>${v}</v></c>` : `<c r="${ref}" t="s"><v>${si(String(v))}</v></c>`;
+    }).join('') + '</row>').join('') + '</sheetData></worksheet>';
+  const sst = `<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${shared.map(s => `<si><t>${esc(s)}</t></si>`).join('')}</sst>`;
+  const files = [['[Content_Types].xml', '<Types/>'], ['xl/workbook.xml', '<workbook/>'], ['xl/sharedStrings.xml', sst], ['xl/worksheets/sheet1.xml', sheet]];
+  const local = [], central = [];
+  let off = 0;
+  for (const [name, text] of files) {
+    const raw = Buffer.from(text, 'utf8'), data = deflate ? deflateRawSync(raw) : raw, nm = Buffer.from(name);
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(deflate ? 8 : 0, 8);
+    lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(raw.length, 22); lh.writeUInt16LE(nm.length, 26);
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(deflate ? 8 : 0, 10);
+    ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(raw.length, 24); ch.writeUInt16LE(nm.length, 28); ch.writeUInt32LE(off, 42);
+    local.push(lh, nm, data); central.push(ch, nm);
+    off += 30 + nm.length + data.length;
+  }
+  const cd = Buffer.concat(central), eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(off, 16);
+  return new Uint8Array(Buffer.concat([...local, cd, eocd]));
+}
+
+function fakeSets(rnd, n, base = 294938) {
+  return Array.from({ length: n }, (_, i) => ({ id: String(base + i), addr: randomHex(rnd, 8), key: randomHex(rnd, 32) }));
+}
+
+await test('Vault: CLS CSV dialects (header names, semicolons, quotes, BOM, no header) and invalid rows', async () => {
+  const rnd = P.mulberry32(77);
+  const s = fakeSets(rnd, 3);
+  const enc = t => new TextEncoder().encode(t);
+  let r = await P.readCredentialFile('cls.csv', enc(`ID,ADDR,KEY\r\n${s.map(x => `${x.id},${x.addr},${x.key}`).join('\r\n')}\r\n`));
+  eq(r.records.length, 3, 'comma CSV with header'); eq(r.invalid.length, 0, 'no invalid');
+  eq(r.records[1].addr, s[1].addr.toUpperCase(), 'ADDR upper-cased');
+  r = await P.readCredentialFile('cls.csv', enc(`﻿Identifiant;Adresse;Clé;Notes\n${s.map(x => `${x.id};"${x.addr.toLowerCase()}";${x.key};"lot A; box 2"`).join('\n')}`));
+  eq(r.records.length, 3, 'semicolon, French headers, BOM, quoted values');
+  eq(r.records[0].note, 'lot A; box 2', 'quoted delimiter kept inside a field');
+  r = await P.readCredentialFile('cls.txt', enc(s.map(x => `${x.id}\t${x.addr}\t${x.key}`).join('\n')));
+  eq(r.records.length, 3, 'tab separated without a header (positional)');
+  assert(r.notes.some(n => /No header/.test(n)), 'positional mode noted');
+  r = await P.readCredentialFile('bad.csv', enc(`ID,ADDR,KEY\n12x,${s[0].addr},${s[0].key}\n${s[1].id},123,${s[1].key}\n${s[2].id},${s[2].addr},ABC\n`));
+  eq(r.records.length, 0, 'all three rows rejected');
+  eq(r.invalid.map(x => Object.keys(x.errors)[0]).join(','), 'id,addr,key', 'field-level errors');
+});
+
+await test('Vault: .xlsx import (deflated and stored entries, ADDR stored as a number)', async () => {
+  const rnd = P.mulberry32(78);
+  const s = fakeSets(rnd, 4);
+  s[2].addr = '00123456';                                  // all-digit ADDR: a spreadsheet keeps it as 123456
+  const rows = [['ID', 'ADDR', 'KEY'], ...s.map(x => [x.id, x.addr === '00123456' ? '123456' : x.addr, x.key])];
+  for (const deflate of [true, false]) {
+    const r = await P.readCredentialFile('8631_ids.xlsx', makeXlsx(rows, { deflate, numericCols: [0, 1] }));
+    eq(r.records.length, 4, `4 sets read (${deflate ? 'deflate' : 'stored'})`);
+    eq(r.records.map(x => x.id).join(), s.map(x => x.id).join(), 'IDs in order');
+    eq(r.records[2].addr, '00123456', 'numeric ADDR padded back to 8 hex');
+    assert(r.notes.some(n => /padded/.test(n)), 'padding reported');
+    eq(r.records[3].key, s[3].key.toUpperCase(), 'key intact');
+  }
+  await rejects(P.readCredentialFile('x.xlsx', new Uint8Array([0x50, 0x4b, 3, 4, 0, 0])), e => /zip|xlsx/i.test(e.message), 'damaged xlsx refused');
+});
+
+await test('Vault: merge (new / identical / conflicting), tracking, next free, CSV with and without keys', async () => {
+  const rnd = P.mulberry32(79);
+  const s = fakeSets(rnd, 5).map(x => P.vaultNormalize(x).rec);
+  const data = P.vaultNewData();
+  let m = P.vaultMerge(data, s.slice(0, 3), { commit: false });
+  eq(m.added.length, 3, 'preview counts'); eq(data.records.length, 0, 'preview does not change the vault');
+  m = P.vaultMerge(data, s.slice(0, 3), { commit: true, source: 'a.csv', by: 'tom' });
+  eq(data.records.length, 3, 'committed'); eq(data.records[0].history[0].ev, 'imported', 'import logged');
+  const clash = { ...s[0], key: randomHex(rnd, 32).toUpperCase() };
+  const stolenAddr = { ...s[3], addr: s[1].addr };
+  m = P.vaultMerge(data, [s[1], clash, stolenAddr, s[4]], { commit: true });
+  eq(m.identical.join(), s[1].id, 'identical set skipped');
+  eq(m.conflicts.length, 2, 'different key and reused ADDR both refused');
+  eq(m.added.join(), s[4].id, 'only the genuinely new set added');
+  eq(P.vaultNextFree(data).id, s[0].id, 'next free = first imported');
+  const used = P.vaultMarkInUse(data, s[0].id, { sn: 'SMD7130029002F', fw: '5a54854', by: 'tom' });
+  eq(used.status, 'in use', 'marked in use'); eq(used.sn, 'SMD7130029002F', 'unit SN recorded');
+  eq(P.vaultNextFree(data).id, s[1].id, 'next free moves on');
+  eq(P.vaultMarkInUse(data, '999', {}), null, 'unknown ID not tracked');
+  const freed = P.vaultMarkFreed(data, s[0].id, { sn: 'SMD7130029002F' });
+  eq(freed.status, 'free', 'freed'); eq(freed.sn, '', 'SN cleared');
+  assert(freed.history.some(h => h.ev === 'erased' && /SMD7130029002F/.test(h.note)), 'erase keeps the SN in the history');
+  data.records.push({ ...P.vaultNormalize({ id: '', addr: '', key: '' }).rec, uid: 'rx', history: [] });
+  eq(P.vaultCounts(data).free, 5, 'counts by status');
+  P.vaultMarkInUse(data, s[0].id, { sn: 'A' }); P.vaultMarkInUse(data, s[1].id, { sn: 'B' }); P.vaultMarkInUse(data, s[2].id, { sn: 'C' }); P.vaultMarkInUse(data, s[4].id, { sn: 'D' });
+  eq(P.vaultNextFree(data), null, 'an incomplete row is never offered as the next free set');
+  const plain = P.vaultCsv(data), withKeys = P.vaultCsv(data, { keys: true });
+  assert(!s.some(x => plain.includes(x.key)), 'default CSV carries no key');
+  assert(s.slice(0, 3).every(x => withKeys.includes(x.key)), 'keys only in the explicit export');
+});
+
+await test('Vault: AES-GCM encryption (round trip, wrong passphrase, tampering, fresh IV, re-key)', async () => {
+  const rnd = P.mulberry32(80);
+  const data = P.vaultNewData();
+  P.vaultMerge(data, fakeSets(rnd, 6).map(x => P.vaultNormalize(x).rec), { commit: true });
+  const c = await P.vaultCreate(data, 'correct horse battery staple');
+  const text = JSON.stringify(c.blob);
+  assert(!data.records.some(r => text.includes(r.key) || text.includes(r.addr) || text.includes(r.id)), 'no ID, ADDR or key in the stored blob');
+  eq(c.blob.kdf.iter, 600000, 'PBKDF2 iterations'); eq(c.blob.cipher, 'AES-256-GCM', 'cipher');
+  const o = await P.vaultOpen(JSON.parse(text), 'correct horse battery staple');
+  eq(JSON.stringify(o.data), JSON.stringify(data), 'round trip');
+  await rejects(P.vaultOpen(JSON.parse(text), 'correct horse battery stapler'), e => /passphrase/.test(e.message), 'wrong passphrase refused');
+  const t = JSON.parse(text); const ct = P.b64dec(t.ct); ct[5] ^= 1; t.ct = P.b64enc(ct);
+  await rejects(P.vaultOpen(t, 'correct horse battery staple'), e => /altered|passphrase/.test(e.message), 'tampered ciphertext refused');
+  const b2 = await P.vaultSeal(data, o.key, o.salt, o.iter);
+  assert(b2.iv !== c.blob.iv && b2.ct !== c.blob.ct, 'every save uses a fresh IV');
+  const re = await P.vaultCreate(o.data, 'a different long passphrase');
+  assert(re.blob.kdf.salt !== c.blob.kdf.salt, 'new passphrase -> new salt');
+  await rejects(P.vaultOpen(re.blob, 'correct horse battery staple'), () => true, 'old passphrase no longer opens it');
+  await rejects(P.vaultOpen({ format: 'nope' }, 'x'), e => /Not a Naiad vault/.test(e.message), 'foreign JSON refused');
+});
+
+await test('Vault: merging another vault keeps status and history', async () => {
+  const rnd = P.mulberry32(81);
+  const a = P.vaultNewData(), b = P.vaultNewData();
+  const s = fakeSets(rnd, 3).map(x => P.vaultNormalize(x).rec);
+  P.vaultMerge(a, s.slice(0, 2), { commit: true, source: 'station-a' });
+  P.vaultMarkInUse(a, s[0].id, { sn: 'SN-A' });
+  P.vaultMerge(b, [s[1], s[2]], { commit: true, source: 'station-b' });
+  const m = P.vaultMerge(b, a.records, { commit: true, source: 'naiad-vault_a.json' });
+  eq(m.added.join(), s[0].id, 'only the set station B lacked'); eq(m.identical.join(), s[1].id, 'shared set skipped');
+  const got = P.vaultFind(b, s[0].id);
+  eq(got.status, 'in use', 'status kept'); eq(got.sn, 'SN-A', 'SN kept');
+  assert(got.history.some(h => h.ev === 'provisioned') && got.history.some(h => h.ev === 'merged'), 'history kept and the merge logged');
 });
 
 const realBin = path.join(here, '..', 'build', 'argos-smd-at-kineis-firmware.bin');

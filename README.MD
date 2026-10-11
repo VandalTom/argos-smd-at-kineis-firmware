@@ -235,6 +235,18 @@ by CRC), commissioning controls, console, JSON/CSV reports, and a guided
 "Commission unit" wizard. A built-in simulator runs everything without
 hardware; `node Tools/naiad_tool_selftest.mjs` tests the protocol layer
 against it. Windows blocks PL2303 clones: use a CP2102/CH340/FTDI adapter.
+**Credentials vault** (panel in the web tool): import the CLS credential
+file (CSV with comma/semicolon/tab, or .xlsx; header row optional), edit the
+sets in a spreadsheet-style table and track their use — free / in use (with
+the unit's serial number, firmware and date) / retired, plus a per-set
+history. "Use" or "Use next free set" fills the credentials panel; a verified
+provisioning marks the set in use, `AT+PROV=ERASE` frees it. The vault is
+encrypted in the browser (AES-256-GCM, key from PBKDF2-SHA256 with 600,000
+iterations, fresh IV per save), decrypted only in memory while unlocked,
+locked after 15 min idle; exports: encrypted vault file (move between
+stations / backup), CSV without keys, CSV with keys (confirmed). The hosted
+page's Content-Security-Policy forbids all network requests
+(`connect-src 'none'`), so nothing typed or imported can leave the browser.
 Hosted on Cloudflare Workers (static assets, `web/naiad-tool/`): Workers
 Builds deploys every push to `naiad` (root `web/naiad-tool`, build
 `npm run build`, deploy `npx wrangler deploy`).
