@@ -224,7 +224,7 @@ static void LPM_SystemClock_Config_RestoreFromStop(void)
  *
  * @note So far, it is coded to exit standby or shutdown only.
  * @note So far, the wakeup pin is directly hardcoded in the core fo this function:
- *       * WKUP2 (PC13, blue user button) falling edge.
+ *       * WKUP3 (PB3, module pad P23, shared with SWO) rising edge.
  *
  * @todo Need to add input parameter to make it generic regarding the wakeup pins configuration.
  */
@@ -239,8 +239,8 @@ static void LPM_configWakeUpPins(void)
 	__HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
 
 	/* But enable wakeup with:
-	 * * falling edge on wakeup pin 2, i.e. PC13,  user blue button
-	 * Pressing the user button will exit from shutdown mode.
+	 * * rising edge on wakeup pin 3, i.e. PB3 (module pad P23)
+	 * Driving PB3 HIGH exits from standby or shutdown mode (cold boot).
 	 */
 	HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN3_HIGH);
 }
@@ -412,8 +412,11 @@ static void LPM_stop_exit() {
 	MCU_SPI_DRIVER_read();
 	/* Arm the STOP-over-SPI grace window so the idle loop won't re-enter STOP
 	 * before the host can complete its retried transaction (the frame that
-	 * triggered this NSS-EXTI wake was lost). */
+	 * triggered this NSS-EXTI wake was lost). 0 = disarmed sentinel: nudge
+	 * to 1 if now+grace lands exactly on the 49.7-day tick wrap. */
 	spi_stop_grace_until_tick = HAL_GetTick() + SPI_STOP_GRACE_MS;
+	if (spi_stop_grace_until_tick == 0u)
+		spi_stop_grace_until_tick = 1u;
 #endif
 
 	HAL_UARTEx_DisableStopMode(&hlpuart1);
@@ -829,8 +832,17 @@ enum MgrLpm_LPM_t LPM_getForcedMode(void)
 #if defined(USE_SPI_DRIVER)
 bool LPM_spiStopGraceActive(void)
 {
-	/* Wrap-safe tick compare: true while now precedes the armed deadline. */
-	return (int32_t)(spi_stop_grace_until_tick - HAL_GetTick()) > 0;
+	/* Wrap-safe tick compare with clear-on-expiry (fix 2026-07): a stale
+	 * deadline left armed re-engages 2^31 ms (24.8 days) after the last
+	 * STOP exit and then blocks STOP for ~24.8 days. Clearing on expiry
+	 * (0 = disarmed) removes the periodic re-trigger — same pattern as
+	 * the reed/SWS blank windows. */
+	if (spi_stop_grace_until_tick == 0u)
+		return false;
+	if ((int32_t)(spi_stop_grace_until_tick - HAL_GetTick()) > 0)
+		return true;
+	spi_stop_grace_until_tick = 0u;
+	return false;
 }
 #endif
 
