@@ -169,7 +169,8 @@
 /* ---- Robustness ----------------------------------------------------------- */
 /* Graceful self-reboot after 14 days, end-of-cycle only: keeps every
  * HAL_GetTick()-based age and the software clock far from the 49.7-day wrap.
- * Costs one cold cycle (caches + GPS-seeded clock lost; first packet ts=0). */
+ * Costs one cold cycle (sensor caches lost); the GPS time survives in the
+ * RTC-anchored clock (cc_clock.h), so timestamps stay valid. */
 #define CC_REBOOT_UPTIME_MS     (14UL * 24UL * 3600UL * 1000UL)
 
 #endif /* CC_CONF_H */

@@ -172,7 +172,7 @@ console can drive the radio behind the tracker's back:
 | `AT+FW=?` `AT+VERSION=?` `AT+PING=?` `AT+ID=?` `AT+ADDR=?` `AT+SN=?` `AT+RCONF=?` | standard `+X=...` then `+OK` |
 | `AT+ID=<dec>` `AT+ADDR=<8hex>` `AT+SECKEY=<32hex>` `AT+RCONF=<32hex>` `AT+SAVE_RCONF=` | `+OK`; `+ERROR=BUSY` while transmitting; effective after `AT+RESET` |
 | `AT+SECKEY=?` | `+SECKEYCRC=<8hex>` — CRC-32 of the key; the key is never echoed |
-| `AT+STATE=?` | `+STATE=<state>,up=<s>,tx=<n>,mac=<0/1>,comm=<phase>,st=<NONE/RUNNING/PASS/FAIL>,slp=<s in STOP2>,prov=<0/1>,bat=<mV>,tier=<HIGH/MID/LOW/CRIT>` |
+| `AT+STATE=?` | `+STATE=<state>,up=<s>,tx=<n>,mac=<0/1>,comm=<phase>,st=<NONE/RUNNING/PASS/FAIL>,slp=<s in STOP2>,prov=<0/1>,bat=<mV>,tier=<HIGH/MID/LOW/CRIT>,utc=<unix, 0 = no fix yet>` |
 | `AT+SELFTEST=[GPS,WS85,ENV,ADC,TX]` / `AT+SELFTEST=?` | run (all items by default) / replay the last report |
 | `AT+COMMISSION=?` / `=START` / `=SKIP` / `=ARM` | deployment-burst status / force / mark done / re-arm |
 | `AT+RESET=` | `+RESET=OK` (or `+RESET=PENDING` until a TX finishes), reboot |
@@ -195,6 +195,12 @@ ends after 45 s if the receiver tracks fewer than two satellites above
 20 dBHz (indoors). The "done" flag lives in a TAMP backup register: it
 survives watchdog/soft resets and updates and is cleared only by real power
 loss.
+
+**Clock** — GPS time is anchored to the RTC calendar (anchor in TAMP
+BKP8R/BKP9R). The calendar and the anchor survive every reset — watchdog,
+`AT+RESET`, an update, the 14-day reboot — so packet timestamps stay valid
+until the next fix instead of dropping to 0; power loss clears both. GPS
+dates before 2025 (week-rollover receivers) are ignored.
 
 **Provisioning** — credentials (ID, ADDR, SECKEY from CLS; RCONF optional)
 are written over the console. A CRC-protected mirror (`MGR_CRED`, page

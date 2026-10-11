@@ -420,6 +420,7 @@ ifeq ($(APP),CC_TRACKER)
 	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_selftest.c \
 	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_commission.c \
 	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_sleep.c \
+	$(KINEIS_DIR)/App/Managers/MGR_CC/Src/cc_clock.c \
 	$(KINEIS_DIR)/App/Managers/MGR_CRED/Src/mgr_cred.c \
 	$(KINEIS_DIR)/App/kns_app_cc_tracker.c
 endif

@@ -65,6 +65,8 @@
 #include "cc_selftest.h"
 #include "cc_commission.h"
 #include "cc_sleep.h"
+#include "cc_clock.h"
+#include "rtc.h"
 #include "mgr_cred.h"
 #include "cc_hw.h"
 #include "cc_payload.h"
@@ -162,24 +164,53 @@ static cc_comm_t comm;
 static void after_mac_ready(void);
 static void tx_finished(void);
 
-/* ---- Software clock (GPS-seeded Unix time; 0 until first fix) ---- */
+/* ---- Wall clock (GPS time anchored to the RTC calendar; see cc_clock.h) ----
+ * Unix = anchor + RTC seconds. The anchor and its complement live in TAMP
+ * BKP8R/BKP9R, so resets keep it; power loss clears it with the calendar.
+ * 0 until the first fix since power-up. */
 
-static uint32_t clk_epoch;   /**< Unix seconds at seed; 0 = never seeded */
-static uint32_t clk_at_ms;   /**< HAL tick at seed */
+static uint32_t clk_anchor;
+static bool     clk_valid;
+
+static uint32_t rtc_seconds(void)
+{
+	RTC_TimeTypeDef t;
+	RTC_DateTypeDef d;
+
+	if (HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN) != HAL_OK)
+		return 0;
+	/* The date read also unlocks the shadow registers (RM: time, then date) */
+	if (HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN) != HAL_OK)
+		return 0;
+	return cc_clock_rtc_seconds(d.Year, d.Month, d.Date, t.Hours, t.Minutes, t.Seconds);
+}
 
 static uint32_t clock_now(void)
 {
-	if (!clk_epoch)
-		return 0;
-	return clk_epoch + (HAL_GetTick() - clk_at_ms) / 1000UL;
+	return clk_valid ? clk_anchor + rtc_seconds() : 0;
 }
 
 static void clock_seed(uint32_t epoch)
 {
-	if (!epoch)
+	if (!cc_clock_epoch_plausible(epoch, CC_TS_EPOCH_UNIX))
 		return;
-	clk_epoch = epoch;
-	clk_at_ms = HAL_GetTick();
+	clk_anchor = epoch - rtc_seconds();
+	clk_valid = true;
+	TAMP->BKP9R = 0;            /* invalid while the pair is half-written */
+	TAMP->BKP8R = clk_anchor;
+	TAMP->BKP9R = ~clk_anchor;
+}
+
+/** Boot: adopt the anchor a previous run (same power-up) stored. */
+static void clock_restore(void)
+{
+	uint32_t a = TAMP->BKP8R;
+
+	if (!cc_clock_anchor_valid(a, TAMP->BKP9R))
+		return;
+	clk_anchor = a;
+	clk_valid = true;
+	MGR_LOG_INFO("[CLK] kept across reset: unix %lu\r\n", (unsigned long)clock_now());
 }
 
 /* ---- Freshness-gated caches (WS85-Tracker Cached<T> pattern) ---- */
@@ -1056,12 +1087,12 @@ static void send_state(void)
 	                      cc_selftest_passed(&st) ? "PASS" : "FAIL";
 
 	MCU_AT_CONSOLE_send("+STATE=%s,up=%lu,tx=%lu,mac=%u,comm=%s,st=%s,slp=%lu,prov=%u,"
-		"bat=%u,tier=%s\r\n",
+		"bat=%u,tier=%s,utc=%lu\r\n",
 		cc_state_names[cc_state], (unsigned long)(HAL_GetTick() / 1000UL),
 		(unsigned long)tx_count, mac_ready ? 1u : 0u,
 		cc_comm_phase_name(comm.phase), st_name,
 		(unsigned long)(CC_SLEEP_totalMs() / 1000UL), creds_ok ? 1u : 0u,
-		cycle_fields.batt_mv, cc_tier_name(tier.tier));
+		cycle_fields.batt_mv, cc_tier_name(tier.tier), (unsigned long)clock_now());
 	bMGR_AT_CMD_logSucceedMsg();
 }
 
@@ -1284,6 +1315,7 @@ void KNS_APP_cc_tracker_init(void)
 	MGR_LPM_registerClient(cc_lpm_client);
 
 	cc_comm_init(&comm, comm_flag_read());
+	clock_restore();
 
 	cycle_start_tick = HAL_GetTick();
 
