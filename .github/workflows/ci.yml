@@ -54,6 +54,11 @@ jobs:
         run: python Tools/rom_uart_flash_selftest.py > rom.log && tail -1 rom.log
       - name: Naiad line station (console + DFU simulation)
         run: python Tools/naiad_station_selftest.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Naiad web tool protocol layer (simulated unit)
+        run: node Tools/naiad_tool_selftest.mjs
 
   # ----------------------------------------------------------------------------
   # 2) Build every allowed board/app variant (firmware images as artifacts).

@@ -212,6 +212,15 @@ by itself (`+PROV=OK`) once ID, ADDR and SECKEY are present. Build with
 `CC_ALLOW_TEST_CREDS=1` (cc_conf.h) to transmit under the test identity on a
 bench.
 
+**Commissioning web tool** — `Tools/naiad_tool.html` (open the file in Chrome
+or Edge; Web Serial, no install, no network): connect, unit info (FW, ID,
+state, battery tier, device UTC), flash with progress and the vector-table-
+last order, self-test, credential entry from a CLS paste (key masked, checked
+by CRC), commissioning controls, console, JSON/CSV reports, and a guided
+"Commission unit" wizard. A built-in simulator runs everything without
+hardware; `node Tools/naiad_tool_selftest.mjs` tests the protocol layer
+against it. Windows blocks PL2303 clones: use a CP2102/CH340/FTDI adapter.
+
 **Production line** — `Tools/naiad_station.py` does one unit per command:
 flash (optional), firmware check, provisioning with read-back and key CRC,
 self-test, commissioning flag, and a JSON report; exit code 0 = PASS. Sensor
