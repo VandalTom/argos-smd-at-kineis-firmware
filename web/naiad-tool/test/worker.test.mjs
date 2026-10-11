@@ -59,18 +59,25 @@ const GH_RELEASES = [
 	{ tag_name: 'v0.9.0', draft: false, assets: [{ name: 'gui-pa-uart__argos-smd-at-kineis-firmware.bin', size: 1 }] },
 	{ tag_name: 'v1.0.0', draft: false, prerelease: false, published_at: '2026-10-11T09:00:00Z', assets: [asset('release'), asset('bench')] },
 ];
-const ATOM = `<?xml version="1.0"?><feed><entry><id>tag:github.com,2008:Repository/1/v1.0.1</id><updated>2026-10-12T09:00:00Z</updated>
-<link rel="alternate" type="text/html" href="https://github.com/${REPO}/releases/tag/v1.0.1"/><title>v1.0.1</title></entry>
-<entry><updated>2026-10-01T00:00:00Z</updated><link rel="alternate" type="text/html" href="https://github.com/${REPO}/releases/tag/nightly"/></entry></feed>`;
+// The feed also carries plain tags (the fork inherits upstream's v3.x): only tags with Naiad images count
+const feedEntry = (tag, date) => `<entry><id>tag:github.com,2008:Repository/1/${tag}</id><updated>${date}</updated>
+<link rel="alternate" type="text/html" href="https://github.com/${REPO}/releases/tag/${tag}"/><title>${tag}</title></entry>`;
+const ATOM = `<?xml version="1.0"?><feed>${feedEntry('v3.9.1', '2025-01-01T00:00:00Z')}${feedEntry('v1.0.1', '2026-10-12T09:00:00Z')}
+${feedEntry('v3.10.0', '2025-02-01T00:00:00Z')}${feedEntry('nightly', '2026-10-01T00:00:00Z')}${feedEntry('v1.0.0', '2026-10-11T09:00:00Z')}</feed>`;
+const ATTACHED = { 'v1.0.1': ['release', 'bench'], 'v1.0.0': ['release'] };
 const IMAGE = new Uint8Array(4096).map((_, i) => i & 0xFF);
 const net = { apiStatus: 200, certFetches: 0, log: [] };
-globalThis.fetch = async (input) => {
+globalThis.fetch = async (input, init = {}) => {
 	const u = String(input instanceof Request ? input.url : input);
 	net.log.push(u);
 	if (u === `https://${TEAM}/cdn-cgi/access/certs`) { net.certFetches++; return Response.json({ keys: [teamJwk], public_cert: {}, public_certs: [] }); }
 	if (u.startsWith(`https://api.github.com/repos/${REPO}/releases`)) return net.apiStatus === 200 ? Response.json(GH_RELEASES) : new Response('rate limited', { status: net.apiStatus });
 	if (u === `https://github.com/${REPO}/releases.atom`) return new Response(ATOM);
 	const dl = u.match(new RegExp(`^https://github.com/${REPO}/releases/download/(v[\\d.]+)/(.+)$`));
+	if (dl && init.method === 'HEAD') {                // GitHub redirects an attached asset to its storage
+		const variant = (dl[2].match(/^naiad-carrier-(\w+)__/) || [])[1];
+		return (ATTACHED[dl[1]] || []).includes(variant) ? new Response(null, { status: 302, headers: { location: 'https://objects.example/x' } }) : new Response(null, { status: 404 });
+	}
 	if (dl) return dl[1] === 'v9.9.9' ? new Response('Not Found', { status: 404 }) : new Response(IMAGE);
 	throw new Error('unexpected fetch ' + u);
 };
@@ -158,8 +165,9 @@ await test('releases: falls back to the Atom feed when the API is rate-limited',
 	const r = await call(mkEnv(), 'GET', '/api/releases', { token: null });
 	net.apiStatus = 200;
 	eq(r.status, 200, 'status');
-	eq(r.data.releases.map(x => x.tag), ['v1.0.1'], 'tags from feed');
-	eq(r.data.releases[0].assets.map(a => a.name), ['naiad-carrier-release__argos-smd-at-kineis-firmware.bin', 'naiad-carrier-bench__argos-smd-at-kineis-firmware.bin'], 'assumed assets');
+	eq(r.data.releases.map(x => x.tag), ['v1.0.1', 'v1.0.0'], 'only tags with Naiad images, newest first');
+	eq(r.data.releases.map(x => x.assets.map(a => a.variant).join('+')), ['release+bench', 'release'], 'images found');
+	ok(/Do not deploy/.test(r.data.releases[1].warn), 'notes applied');
 });
 
 await test('firmware proxy: serves release images, refuses anything else', async () => {

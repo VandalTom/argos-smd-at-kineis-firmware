@@ -84,8 +84,13 @@ function releaseEntry(env, tag, { name, date, prerelease = false, url, assets })
 	};
 }
 
-/** The REST API (sizes, drafts, prereleases); when GitHub rate-limits the shared Worker IPs, the
- *  public Atom feed and the fixed asset names stand in. */
+const semver = t => t.slice(1).split('.').map(Number);
+const newestFirst = (a, b) => { const x = semver(a.tag), y = semver(b.tag); return y[0] - x[0] || y[1] - x[1] || y[2] - x[2]; };
+const FEED_MAX = 10;
+
+/** The REST API (sizes, drafts, prereleases); when GitHub rate-limits the shared Worker IPs (usual on
+ *  Cloudflare without a GITHUB_TOKEN), the public Atom feed stands in. The feed also lists plain tags
+ *  (the fork inherits upstream's), so each tag counts only if its Naiad images are really attached. */
 async function listReleases(env) {
 	const gh = { 'user-agent': 'naiad-tool', ...(env.GITHUB_TOKEN ? { authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}) };
 	const api = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/releases?per_page=30`, { headers: { ...gh, accept: 'application/vnd.github+json' } });
@@ -93,24 +98,31 @@ async function listReleases(env) {
 		return (await api.json()).filter(r => !r.draft && TAG.test(r.tag_name)).map(r => releaseEntry(env, r.tag_name, {
 			name: r.name, date: r.published_at, prerelease: !!r.prerelease, url: r.html_url,
 			assets: r.assets.filter(a => RELEASE_ASSET.test(a.name)).map(a => ({ name: a.name, size: a.size, variant: RELEASE_ASSET.exec(a.name)[1] })),
-		})).filter(r => r.assets.length);
+		})).filter(r => r.assets.length).sort(newestFirst);
 	}
-	const feed = await fetch(`https://github.com/${env.GITHUB_REPO}/releases.atom`, { headers: gh });
+	console.log(`GitHub API ${api.status}: listing releases from the Atom feed`);
+	const feed = await fetch(`https://github.com/${env.GITHUB_REPO}/releases.atom`, { headers: { 'user-agent': 'naiad-tool' } });
 	if (!feed.ok) throw new HttpError(502, `GitHub answered ${api.status} (API) and ${feed.status} (feed)`);
-	const out = [];
+	const tags = [];
 	for (const entry of (await feed.text()).match(/<entry>[\s\S]*?<\/entry>/g) || []) {
 		const tag = decodeURIComponent((entry.match(/\/releases\/tag\/([^"<]+)"/) || [])[1] || '');
-		if (!TAG.test(tag)) continue;
-		out.push(releaseEntry(env, tag, {
-			date: (entry.match(/<updated>([^<]+)<\/updated>/) || [])[1],
-			assets: VARIANTS.map(v => ({ name: `naiad-carrier-${v}__argos-smd-at-kineis-firmware.bin`, size: null, variant: v })),
-		}));
+		if (TAG.test(tag) && !tags.some(t => t.tag === tag)) tags.push({ tag, date: (entry.match(/<updated>([^<]+)<\/updated>/) || [])[1] });
 	}
-	return out;
+	tags.sort(newestFirst);
+	const found = await Promise.all(tags.slice(0, FEED_MAX).map(async t => {
+		const assets = [];
+		for (const variant of VARIANTS) {
+			const name = `naiad-carrier-${variant}__argos-smd-at-kineis-firmware.bin`;
+			const head = await fetch(`https://github.com/${env.GITHUB_REPO}/releases/download/${t.tag}/${name}`, { method: 'HEAD', redirect: 'manual', headers: { 'user-agent': 'naiad-tool' } });
+			if (head.status === 302 || head.status === 200) assets.push({ name, size: null, variant });
+		}
+		return assets.length ? releaseEntry(env, t.tag, { date: t.date, assets }) : null;
+	}));
+	return found.filter(Boolean);
 }
 
 async function releases(env, ctx) {
-	const res = await cached(ctx, 'releases-v1', 300, async () => json({ repo: env.GITHUB_REPO, releases: await listReleases(env) }));
+	const res = await cached(ctx, 'releases-v2', 300, async () => json({ repo: env.GITHUB_REPO, releases: await listReleases(env) }));
 	return new Response(res.body, { status: res.status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=120', 'x-content-type-options': 'nosniff' } });
 }
 
