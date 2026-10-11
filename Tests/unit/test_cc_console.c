@@ -62,6 +62,19 @@ void test_credentials(void)
 	TEST_PASS();
 }
 
+/** Erasing the credentials takes the exact, explicit form only. */
+void test_prov_erase(void)
+{
+	ASSERT_EQ(CC_CON_PROV_ERASE, cc_console_classify("AT+PROV=ERASE\r\n"));
+	ASSERT_EQ(CC_CON_PROV_ERASE, cc_console_classify("AT+PROV=ERASE"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+PROV\r\n"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+PROV=\r\n"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+PROV=?\r\n"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+PROV=erase\r\n"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+PROV=ERASEX\r\n"));
+	TEST_PASS();
+}
+
 /** Anything that could drive the MAC directly is refused. */
 void test_actions_rejected(void)
 {
@@ -105,6 +118,7 @@ int main(void)
 	RUN_TEST(test_queries_dispatched);
 	RUN_TEST(test_control_commands);
 	RUN_TEST(test_credentials);
+	RUN_TEST(test_prov_erase);
 	RUN_TEST(test_actions_rejected);
 	RUN_TEST(test_near_misses_rejected);
 	RUN_TEST(test_params_and_crc);

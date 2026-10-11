@@ -185,6 +185,7 @@ console can drive the radio behind the tracker's back:
 | `AT+FW=?` `AT+VERSION=?` `AT+PING=?` `AT+ID=?` `AT+ADDR=?` `AT+SN=?` `AT+RCONF=?` | standard `+X=...` then `+OK` |
 | `AT+ID=<dec>` `AT+ADDR=<8hex>` `AT+SECKEY=<32hex>` `AT+RCONF=<32hex>` `AT+SAVE_RCONF=` | `+OK`; `+ERROR=BUSY` while transmitting; effective after `AT+RESET` |
 | `AT+SECKEY=?` | `+SECKEYCRC=<8hex>` — CRC-32 of the key; the key is never echoed |
+| `AT+PROV=ERASE` | `+PROV=ERASED` then `+RESET=OK`: ID, ADDR, SECKEY and the credential mirror blanked (RCONF kept), unit reboots into `NO_CREDS`; `+ERROR=BUSY` while transmitting |
 | `AT+STATE=?` | `+STATE=<state>,up=<s>,tx=<n>,mac=<0/1>,comm=<phase>,st=<NONE/RUNNING/PASS/FAIL>,slp=<s in STOP2>,prov=<0/1>,bat=<mV>,tier=<HIGH/MID/LOW/CRIT>,utc=<unix, 0 = no fix yet>` |
 | `AT+SELFTEST=[GPS,WS85,ENV,ADC,TX]` / `AT+SELFTEST=?` | run (all items by default) / replay the last report |
 | `AT+COMMISSION=?` / `=START` / `=SKIP` / `=ARM` | deployment-burst status / force / mark done / re-arm |

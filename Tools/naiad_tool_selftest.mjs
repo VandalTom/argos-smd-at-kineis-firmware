@@ -402,6 +402,30 @@ await test('PENDING handling: AT+RESET= and AT+BOOT= wait for the TX to end', as
   } finally { r.done(); }
 });
 
+await test('Erase credentials (AT+PROV=ERASE): BUSY retry, reboot into NO_CREDS, re-provision', async () => {
+  const r = await rig({ pendingChance: 0, provisioned: true, seed: 21 });
+  try {
+    eq((await P.getState(r.link)).prov, '1', 'starts provisioned');
+    const rconfBefore = r.sim.nvm.rconfSaved;
+    r.sim._startTx('test', 4000);                      // erase lands on a busy radio first
+    let busy = 0;
+    const back = await P.eraseCredentials(r.link, { onBusy: () => busy++, retryMs: 500 });
+    assert(busy >= 1, 'BUSY retry exercised');
+    assert(back && back.fw, 'app came back after the reboot');
+    eq(r.sim.nvm.id, 0xFFFFFFFF, 'ID blank'); eq(r.sim.nvm.addr, 'ffffffff', 'ADDR blank');
+    assert(r.sim.nvm.seckey.every(b => b === 0xFF), 'SECKEY blank');
+    eq(r.sim.nvm.rconfSaved, rconfBefore, 'RCONF kept');
+    eq((await P.getState(r.link)).prov, '0', 'NO_CREDS after the reboot');
+    assert(r.log.some(l => l === '< +PROV=ERASED') && r.log.some(l => l === '< +RESET=OK'), 'ERASED then RESET=OK seen');
+    const rnd = P.mulberry32(4242);
+    const creds = { id: String(1000000 + Math.floor(rnd() * 8999999)), addr: randomHex(rnd, 8), seckey: randomHex(rnd, 32) };
+    const res = await P.provisionCredentials(r.link, creds, {});
+    assert(res.ok, 're-provisioned after the erase');
+    // Wrong forms are refused like any unknown command
+    await rejects(P.atCmd(r.link, 'AT+PROV=erase'), e => e.code === '1203', 'lower-case form refused');
+  } finally { r.done(); }
+});
+
 await test('Provision credentials (BUSY retries, SAVE_RCONF, reset, readbacks, SECKEYCRC)', async () => {
   const r = await rig({ pendingChance: 0.3, seed: 7 });
   try {

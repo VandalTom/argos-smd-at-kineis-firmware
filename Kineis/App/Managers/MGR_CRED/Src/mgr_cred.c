@@ -185,3 +185,28 @@ MGR_CRED_Result_t MGR_CRED_syncAndRestore(void)
 	 * blank-creds condition ONCE on the INIT_MAC -> CRED_FAIL transition. */
 	return MGR_CRED_FAIL_LOUD;
 }
+
+bool MGR_CRED_erase(void)
+{
+	/* ID + ADDR + SECKEY are contiguous at the start of page 0 */
+	enum { IDENTITY_BYTES = FLASH_ID_BYTE_SIZE + FLASH_ADDR_BYTE_SIZE + FLASH_SECKEY_BYTE_SIZE };
+	_Static_assert(FLASH_ID_OFFSET == 0 && FLASH_SECKEY_OFFSET + FLASH_SECKEY_BYTE_SIZE == IDENTITY_BYTES,
+		"ID/ADDR/SECKEY must be one contiguous block at the start of page 0");
+	uint8_t blank[IDENTITY_BYTES];
+	MGR_CRED_Mirror_t m;
+
+	/* Mirror first (see mgr_cred.h): a valid mirror must never outlive a
+	 * blanked page 0, or the next boot would restore what was just erased */
+	if (!mirror_erase())
+		return false;
+	memset(blank, 0xFF, sizeof(blank));
+	if (MCU_FLASH_write(FLASH_USER_START_ADDR + FLASH_ID_OFFSET, blank, sizeof(blank)) != KNS_STATUS_OK) {
+		MGR_LOG_ERR("[CRED] page-0 erase write failed\r\n");
+		return false;
+	}
+	MCU_FLASH_read(FLASH_USER_START_ADDR + FLASH_ID_OFFSET, blank, sizeof(blank));
+	if (!all_ff(blank, sizeof(blank)) || mirror_load_valid(&m))
+		return false;
+	MGR_LOG_WARN("[CRED] credentials erased (ID, ADDR, SECKEY and mirror)\r\n");
+	return true;
+}

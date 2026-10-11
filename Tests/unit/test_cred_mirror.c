@@ -126,8 +126,22 @@ static result_t sync_and_restore(void)
 	return R_FAIL_LOUD;
 }
 
+/* deliberate erase (mirror of MGR_CRED_erase): mirror FIRST, then ID+ADDR+
+ * SECKEY (the first 32 bytes) in one page-0 rewrite; RADIOCONF kept. */
+static int tear_after_mirror_erase = 0;
+static bool cred_erase(void)
+{
+	memset(&fake_mirror, 0xFF, sizeof(fake_mirror));
+	erase_count++;
+	if (tear_after_mirror_erase)
+		return false;                                 /* brownout between the steps */
+	memset(fake_p0, 0xFF, 32);
+	page0_write_count++;
+	return all_ff(fake_p0, 32) && !mirror_valid(&fake_mirror);
+}
+
 /* ---- helpers ---- */
-static void reset_counts(void) { erase_count = mirror_prog_count = page0_write_count = 0; tear_before_magic = 0; }
+static void reset_counts(void) { erase_count = mirror_prog_count = page0_write_count = 0; tear_before_magic = 0; tear_after_mirror_erase = 0; }
 static void fill(uint8_t *p, int off, int n, uint8_t v) { for (int i=0;i<n;i++) p[off+i]=v; }
 static void provision_p0(void) { memset(fake_p0,0xFF,PAYLOAD);
 	fill(fake_p0,ID_OFF,8,0xA1); fill(fake_p0,ADDR_OFF,8,0xB2);
@@ -137,6 +151,36 @@ static void blank_mirror(void) { memset(&fake_mirror, 0xFF, sizeof(fake_mirror))
 static void seed_mirror_from_p0(void) { mirror_t nm; mirror_build(&nm, fake_p0); fake_mirror = nm; }
 
 /* ============================ tests ============================ */
+
+/** A deliberate erase is not undone by the next boot (the mirror went first),
+ *  and the radio configuration survives it. */
+static void test_erase_stays_erased(void)
+{
+	provision_p0(); seed_mirror_from_p0(); reset_counts();
+	ASSERT_TRUE(cred_erase());
+	ASSERT_EQ(R_FAIL_LOUD, sync_and_restore());      /* boot after erase: NO_CREDS */
+	ASSERT_TRUE(all_ff(fake_p0, 32));
+	ASSERT_EQ(0xD4, fake_p0[RADIO_OFF]);             /* RADIOCONF kept */
+	ASSERT_EQ(0xD4, fake_p0[RADIO_OFF + 15]);
+	TEST_PASS();
+}
+
+/** Power lost between the two erase steps: the unit stays provisioned (page 0
+ *  intact, mirror re-seeded) and a retry completes — it can never end up with
+ *  a blank page 0 next to a valid mirror (which would silently restore). */
+static void test_erase_torn_never_restores(void)
+{
+	provision_p0(); seed_mirror_from_p0(); reset_counts();
+	uint8_t saved[PAYLOAD]; memcpy(saved, fake_p0, PAYLOAD);
+	tear_after_mirror_erase = 1;
+	ASSERT_FALSE(cred_erase());
+	tear_after_mirror_erase = 0;
+	ASSERT_EQ(R_MIRROR_WRITTEN, sync_and_restore()); /* still provisioned */
+	ASSERT_MEM_EQ(saved, fake_p0, PAYLOAD);
+	ASSERT_TRUE(cred_erase());                       /* retry */
+	ASSERT_EQ(R_FAIL_LOUD, sync_and_restore());
+	TEST_PASS();
+}
 
 static void test_crc32_known_vector(void)
 {
@@ -271,6 +315,8 @@ static void test_radioconf_blank_no_rewrite(void)
 int main(void)
 {
 	TEST_SUITE_START("MGR_CRED credential durability");
+	RUN_TEST(test_erase_stays_erased);
+	RUN_TEST(test_erase_torn_never_restores);
 	RUN_TEST(test_crc32_known_vector);
 	RUN_TEST(test_first_boot_seeds_mirror);
 	RUN_TEST(test_steady_state_noop_no_write);

@@ -1345,6 +1345,20 @@ static void console_poll(void)
 		case CC_CON_KEYCRC:
 			send_key_crc();
 			break;
+		case CC_CON_PROV_ERASE:
+			/* Blank ID/ADDR/SECKEY + mirror, then reboot: the MAC still
+			 * holds the old identity in RAM. Comes back in NO_CREDS. */
+			if (radio_busy()) {
+				MCU_AT_CONSOLE_send("+ERROR=BUSY\r\n");
+			} else if (MGR_CRED_erase()) {
+				creds_ok = CC_ALLOW_TEST_CREDS;
+				MCU_AT_CONSOLE_send("+PROV=ERASED\r\n");
+				if (pending_act == CC_ACT_NONE)
+					pending_act = CC_ACT_RESET;
+			} else {
+				MCU_AT_CONSOLE_send("+PROV=ERASE_FAILED\r\n");
+			}
+			break;
 		case CC_CON_DISPATCH:
 			MGR_AT_CMD_decodeAt(line);
 			break;

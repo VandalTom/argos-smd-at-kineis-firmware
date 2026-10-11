@@ -18,6 +18,9 @@
  *                                               refused while transmitting)
  *   - AT+SECKEY=?                            -> CC_CON_KEYCRC (CRC-32 of the key;
  *                                               the key itself is never echoed)
+ *   - AT+PROV=ERASE                          -> CC_CON_PROV_ERASE (blank ID/ADDR/
+ *                                               SECKEY + mirror, then reboot;
+ *                                               refused while transmitting)
  *   - read-only status queries (=?) below    -> CC_CON_DISPATCH (standard handler)
  *   - anything else                          -> CC_CON_REJECT (+ERROR)
  *
@@ -42,6 +45,7 @@ typedef enum {
 	CC_CON_COMMISSION_QUERY,
 	CC_CON_CRED,
 	CC_CON_KEYCRC,
+	CC_CON_PROV_ERASE,
 } cc_con_action_t;
 
 /**

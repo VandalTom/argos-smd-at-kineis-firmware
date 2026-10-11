@@ -32,6 +32,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "mcu_flash.h"   /* FLASH_*_OFFSET / FLASH_*_BYTE_SIZE / FLASH_USER_START_ADDR */
 
 /* Dedicated mirror page — outside FLASH_USER, reserved by the linker (the
@@ -89,6 +90,21 @@ typedef enum {
  * @return the action taken (see MGR_CRED_Result_t).
  */
 MGR_CRED_Result_t MGR_CRED_syncAndRestore(void);
+
+/**
+ * @brief Deliberately blank the credentials (decommission / re-provision).
+ *
+ * Erases the mirror page FIRST, then sets ID, ADDR and SECKEY on page 0 to
+ * 0xFF in one page-0 rewrite. In that order a brownout between the steps can
+ * only leave page 0 intact with no mirror (the next boot re-seeds the mirror:
+ * still provisioned, retry the erase) — never a blank page 0 next to a valid
+ * mirror, which the next boot would silently restore. RADIOCONF is kept: it is
+ * not an identity and has a compiled-in fallback. The MAC still holds the old
+ * identity in RAM, so the caller must reset afterwards.
+ *
+ * @return true when the mirror is gone and the three fields read back blank.
+ */
+bool MGR_CRED_erase(void);
 
 /** @brief Software CRC32 (poly 0xEDB88320, reflected) — exposed for unit tests. */
 uint32_t MGR_CRED_crc32(const void *buf, size_t len);

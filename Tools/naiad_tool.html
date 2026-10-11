@@ -392,6 +392,7 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
     <div class="row">
       <button id="btnProvision" class="btn primary" disabled>Write, reset &amp; verify</button>
       <button id="btnCredRead" class="btn" disabled>Read back only</button>
+      <button id="btnCredErase" class="btn warnfill" disabled title="AT+PROV=ERASE: blank ID, ADDR and SECKEY on the unit, which reboots and stops transmitting">Erase credentials…</button>
       <button id="btnCredCancel" class="btn" data-cancel disabled>Cancel</button>
       <label class="chk small"><input type="checkbox" id="credClearKey" checked> Clear the key field after success</label>
     </div>
@@ -1242,6 +1243,27 @@ async function writeWithBusyRetry(link, cmd, what, { signal, onBusy, maxBusyMs =
       throw e;
     }
   }
+}
+
+/** AT+PROV=ERASE: the unit blanks ID, ADDR and SECKEY (and its backup copy; RCONF is kept), answers
+ *  +PROV=ERASED, reboots (+RESET=OK) and comes back in NO_CREDS. +ERROR=BUSY while a frame is in
+ *  flight is retried; firmware without the command answers 1203. Resolves with waitForApp's result. */
+async function eraseCredentials(link, { signal, onBusy, maxBusyMs = 240000, retryMs = 3000, bauds } = {}) {
+  const start = Clock.now();
+  for (;;) {
+    const busy = await link.exchange('AT+PROV=ERASE', (l, c) => {
+      if (l === '+PROV=ERASED') { c.state.erased = true; return; }
+      if (l === '+RESET=OK' && c.state.erased) { link.markAsleep(); c.finish(false); return; }
+      if (l === '+PROV=ERASE_FAILED') { c.fail(new ProtocolError('The unit could not erase its credentials (flash write failed): nothing changed, try again')); return; }
+      if (l === '+ERROR=BUSY') { c.finish(true); return; }
+      if (l.startsWith('+ERROR')) c.fail(/1203$/.test(l) ? new ProtocolError('This firmware has no AT+PROV=ERASE: flash a current build first') : atError(l, 'AT+PROV=ERASE'));
+    }, { timeout: 5000, signal, what: 'AT+PROV=ERASE' });
+    if (!busy) break;
+    if (Clock.now() - start > Clock.ms(maxBusyMs)) throw new ProtocolError('The radio stayed busy: try again after the transmission');
+    if (onBusy) onBusy();
+    await sleep(retryMs, signal);
+  }
+  return waitForApp(link, { bauds: uniq([link.baud, ...(bauds || BAUDS)]), signal, settle: 2000 });
 }
 
 /** Full provisioning: write -> (save rconf) -> read back -> reset -> wait for app -> read back -> compare. */
@@ -2164,7 +2186,7 @@ class NaiadSimulator {
     if (!h) { this._err('1203'); return; }
     if (this.rescue) {
       // Rescue mode: only AT+BOOT, AT+RESET, the =? queries (not SELFTEST) and credential writes.
-      const credWrite = !q && ['ID', 'ADDR', 'SECKEY', 'RCONF', 'SAVE_RCONF'].includes(name);
+      const credWrite = !q && ['ID', 'ADDR', 'SECKEY', 'RCONF', 'SAVE_RCONF', 'PROV'].includes(name);
       if (!(name === 'BOOT' || name === 'RESET' || credWrite || (q && name !== 'SELFTEST'))) { this._err('1203'); return; }
     }
     h.call(this, { q, hasEq, arg });
@@ -2205,6 +2227,14 @@ class NaiadSimulator {
     if (q || !hasEq) return this._err('1203');
     if (this._maybeBusy()) return this._err('BUSY');
     this.nvm.rconfSaved = this.rconfRam; this._log('[I] cred: RCONF saved'); this._ok();
+  }
+  _cmd_PROV({ q, arg }) {
+    if (q || arg !== 'ERASE') return this._err('1203');
+    if (this._maybeBusy()) return this._err('BUSY');
+    this.nvm.id = 0xFFFFFFFF; this.nvm.addr = 'ffffffff'; this.nvm.seckey = new Uint8Array(16).fill(0xFF);
+    this._log('[W] [CRED] credentials erased (ID, ADDR, SECKEY and mirror)');
+    this._out('+PROV=ERASED');
+    this._after(20, () => { this._out('+RESET=OK'); this._after(50, () => this._sysReset(false)); });
   }
   _cmd_RESET({ q }) {
     if (q) return this._err('1203');
@@ -2417,7 +2447,7 @@ const NaiadProtocol = {
   parseKv, parseState, awakeDuty, deviceClock, parseRescueLine, UnitMonitor, parseCommission, getState, commissionCmd,
   parseStLine, parseSelftestStatus, newRun, txDeferral, isTxDeferred, evaluateSelftest, runSelftest, querySelftest, pollBootSelftest,
   WIZARD_STEPS, commissionUnit, lastOrBootSelftest,
-  validateCredentials, parseCredentialText, seckeyCrc, readCredentials, compareCredentials, provisionCredentials,
+  validateCredentials, parseCredentialText, seckeyCrc, readCredentials, compareCredentials, provisionCredentials, eraseCredentials,
   analyzeImage, writeOrder, sendOrderCrc, buildWriteLine, parseDfuInfo, dfuCmd, blPing, requestBoot, flashFirmware, bootloaderCheck, exitBootloader,
   buildReport, reportToCsvRow, csvRecord, csvEscape, buildCsv,
   NaiadSimulator, SimTransport, makeSimImage, mulberry32,
@@ -3150,6 +3180,22 @@ async function doCredRead() {
   setMsg('#credMsg', bad ? 'The unit differs from the fields above.' : 'Read back. Fields left empty were not compared.', bad ? 'err' : 'ok');
 }
 
+async function doCredErase() {
+  const id = realId(ui.unit);
+  if (!(await confirmDialog('Erase the credentials?',
+    `Sends AT+PROV=ERASE. The unit${id ? ` (ID ${id})` : ''} blanks its Kineis ID, ADDR and SECKEY and their backup copy, reboots, and stops transmitting until new credentials are written. The radio configuration is kept.`,
+    'Erase', { focusCancel: true }))) return;
+  setMsg('#credMsg', '');
+  $('#credSteps').hidden = true;
+  const r = await runOp('Erasing credentials', signal => eraseCredentials(ui.link, { signal, onBusy: () => setMsg('#credMsg', 'Radio busy: erasing as soon as the current transmission ends…', 'warn') }));
+  if (r.ok) {
+    ui.mode = 'app'; ui.unit.fw = r.value.fw; renderConn();
+    await refreshUnit();
+    const prov = ui.unit.state && ui.unit.state.prov;
+    setMsg('#credMsg', prov === '0' ? 'Credentials erased: the unit rebooted into NO_CREDS (radio off).' : 'Erase sent, but the unit does not report prov=0: check the unit info.', prov === '0' ? 'ok' : 'err');
+  } else setMsg('#credMsg', r.error ? r.error.message : 'Cancelled', 'err');
+}
+
 /* ---------- commissioning ---------- */
 
 function renderCommission() {
@@ -3462,7 +3508,7 @@ function updateControls() {
   en('#btnFlash', (app || bl) && !busy && imgOk);
   en('#btnBlCheck', (app || bl) && !busy);
   $('#btnBlExit').hidden = !bl; en('#btnBlExit', bl && !busy);
-  for (const id of ['#btnStRun', '#btnStRead', '#btnStWait', '#btnProvision', '#btnCredRead', '#btnCommRefresh', '#btnCommStart', '#btnCommSkip', '#btnCommArm']) en(id, app && !busy);
+  for (const id of ['#btnStRun', '#btnStRead', '#btnStWait', '#btnProvision', '#btnCredRead', '#btnCredErase', '#btnCommRefresh', '#btnCommStart', '#btnCommSkip', '#btnCommArm']) en(id, app && !busy);
   en('#btnWiz', (app || bl) && !busy);
   for (const b of $$('[data-cancel]')) b.disabled = !(busy && ui.op.cancellable);
   en('#btnConSend', conn && !busy); $('#conInput').disabled = !conn;
@@ -3574,6 +3620,7 @@ function init() {
   });
   $('#btnProvision').addEventListener('click', doProvision);
   $('#btnCredRead').addEventListener('click', doCredRead);
+  $('#btnCredErase').addEventListener('click', doCredErase);
 
   $('#btnCommRefresh').addEventListener('click', () => doComm(null));
   $('#btnCommStart').addEventListener('click', () => doComm('START'));

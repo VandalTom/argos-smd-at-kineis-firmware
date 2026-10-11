@@ -70,6 +70,8 @@ cc_con_action_t cc_console_classify(const char *line)
 		return CC_CON_COMMISSION;
 	if (body_is(line, len, "AT+SECKEY=?"))
 		return CC_CON_KEYCRC;
+	if (body_is(line, len, "AT+PROV=ERASE"))
+		return CC_CON_PROV_ERASE;
 	if (is_action(line, len, "AT+SAVE_RCONF", 0))
 		return CC_CON_CRED;
 
