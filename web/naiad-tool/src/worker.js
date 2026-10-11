@@ -19,7 +19,9 @@
  */
 
 
-const RELEASE_ASSET = /^naiad-carrier-(release|bench)__argos-smd-at-kineis-firmware\.bin$/;
+/** App image (UART bootloader updates) or '_full' = app + bootloader from 0x08000000 (SWD flashing). */
+const RELEASE_ASSET = /^naiad-carrier-(release|bench)__argos-smd-at-kineis-firmware(_full)?\.bin$/;
+const assetInfo = name => { const m = RELEASE_ASSET.exec(name); return { variant: m[1], kind: m[2] ? 'full' : 'app' }; };
 const VARIANTS = ['release', 'bench'];
 const TAG = /^v\d+\.\d+\.\d+$/;
 /** Per-release notes shown in the tool. fwId: false = predates the short 'Naiad vX.Y.Z (sha)' ID. */
@@ -97,8 +99,8 @@ async function listReleases(env) {
 	if (api.ok) {
 		return (await api.json()).filter(r => !r.draft && TAG.test(r.tag_name)).map(r => releaseEntry(env, r.tag_name, {
 			name: r.name, date: r.published_at, prerelease: !!r.prerelease, url: r.html_url,
-			assets: r.assets.filter(a => RELEASE_ASSET.test(a.name)).map(a => ({ name: a.name, size: a.size, variant: RELEASE_ASSET.exec(a.name)[1] })),
-		})).filter(r => r.assets.length).sort(newestFirst);
+			assets: r.assets.filter(a => RELEASE_ASSET.test(a.name)).map(a => ({ name: a.name, size: a.size, ...assetInfo(a.name) })),
+		})).filter(r => r.assets.some(a => a.kind === 'app')).sort(newestFirst);
 	}
 	console.log(`GitHub API ${api.status}: listing releases from the Atom feed`);
 	const feed = await fetch(`https://github.com/${env.GITHUB_REPO}/releases.atom`, { headers: { 'user-agent': 'naiad-tool' } });
@@ -114,7 +116,8 @@ async function listReleases(env) {
 		for (const variant of VARIANTS) {
 			const name = `naiad-carrier-${variant}__argos-smd-at-kineis-firmware.bin`;
 			const head = await fetch(`https://github.com/${env.GITHUB_REPO}/releases/download/${t.tag}/${name}`, { method: 'HEAD', redirect: 'manual', headers: { 'user-agent': 'naiad-tool' } });
-			if (head.status === 302 || head.status === 200) assets.push({ name, size: null, variant });
+			// CI attaches the '_full' image next to every app image (one HEAD per variant keeps the subrequest count low)
+			if (head.status === 302 || head.status === 200) assets.push({ name, size: null, variant, kind: 'app' }, { name: name.replace(/\.bin$/, '_full.bin'), size: null, variant, kind: 'full' });
 		}
 		return assets.length ? releaseEntry(env, t.tag, { date: t.date, assets }) : null;
 	}));
@@ -122,7 +125,7 @@ async function listReleases(env) {
 }
 
 async function releases(env, ctx) {
-	const res = await cached(ctx, 'releases-v2', 300, async () => json({ repo: env.GITHUB_REPO, releases: await listReleases(env) }));
+	const res = await cached(ctx, 'releases-v3', 300, async () => json({ repo: env.GITHUB_REPO, releases: await listReleases(env) }));
 	return new Response(res.body, { status: res.status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=120', 'x-content-type-options': 'nosniff' } });
 }
 

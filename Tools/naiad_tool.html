@@ -459,6 +459,44 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
     </div>
     <div id="flashResult"></div>
     <div id="flashRecovery" class="callout warn" hidden></div>
+    <fieldset id="swdBox">
+      <legend>Debug probe (SWD)</legend>
+      <p class="muted small" style="margin:0">For modules the serial update cannot reach: factory firmware without the update bootloader, or a module that stays silent. Wire a CMSIS-DAP probe to the module's SWD pads (SWDIO, SWCLK, GND, NRST, and 3.3 V as the probe's reference). It writes the full image (app + bootloader); the credentials and their backup copy are kept.</p>
+      <div class="row">
+        <select id="swdKind" aria-label="Probe type">
+          <option value="usb">CMSIS-DAP v2 probe (WebUSB)</option>
+          <option value="hid">CMSIS-DAP v1 probe (WebHID)</option>
+          <option value="sim">Simulated probe (practice)</option>
+        </select>
+        <button type="button" id="btnSwdProbe" class="btn">Choose probe…</button>
+        <span id="swdProbe" class="muted small"></span>
+      </div>
+      <div class="row">
+        <span id="swdImg" class="muted small"></span>
+        <label class="btn small">Use a _full.bin file…<input type="file" id="swdFile" accept=".bin" hidden></label>
+        <button type="button" id="btnSwdForget" class="btn small" hidden>Use the release image</button>
+      </div>
+      <div class="row">
+        <button type="button" id="btnSwdFlash" class="btn primary">Flash over SWD</button>
+        <label class="chk small" title="Holds NRST low while attaching: reaches a module asleep in STOP2. Untick for probes without a reset line."><input type="checkbox" id="swdUnderReset" checked> Connect under reset</label>
+        <span id="swdMsg" class="msg small"></span>
+      </div>
+      <div id="swdProg" hidden>
+        <div class="row small"><span id="swdPhase" class="msg"></span><span class="spacer"></span><span id="swdStats" class="muted mono"></span></div>
+        <progress id="swdBar" max="1" value="0"></progress>
+      </div>
+      <div id="swdResult"></div>
+      <details class="help">
+        <summary>Which probe?</summary>
+        <ul>
+          <li><b>Raspberry Pi Pico with Raspberry Pi's debugprobe firmware</b> (about $5): CMSIS-DAP v2, works in Chrome and Edge on Windows without a driver. GP2 = SWCLK, GP3 = SWDIO, GP1 = reset line. The boxed Raspberry Pi Debug Probe has no reset line: untick "Connect under reset" and wake the module first.</li>
+          <li><b>SEGGER J-Link BASE/PLUS V12+ (or PRO V6+)</b>: in J-Link Configurator, right-click the probe → Configure → Boot mode = CMSIS-DAPv2, then replug. Switch back to J-Link mode for JLinkExe / <code>make flash-full</code>. V10/V11: CMSIS-DAPv1 only (choose the WebHID option). The J-Link EDU Mini has no CMSIS-DAP mode.</li>
+          <li><b>DAPLink probes</b>: v2 (WebUSB) or v1 (WebHID).</li>
+          <li><b>ST-Link</b> does not speak CMSIS-DAP: use STM32CubeProgrammer for those.</li>
+          <li>Close other programs using the probe (J-Link or ST software) first. Flashing takes about half a minute.</li>
+        </ul>
+      </details>
+    </fieldset>
   </div>
 </details>
 
@@ -738,7 +776,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.2.0';
+const TOOL_VERSION = '1.3.0';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -3005,8 +3043,8 @@ async function teamSealRecords(key, records) {
 function defaultRelease(releases) {
   for (const r of releases || []) {
     if (r.warn || r.prerelease) continue;
-    const a = r.assets.find(x => x.variant === 'release');
-    if (a) return { release: r, asset: a };
+    const a = r.assets.find(x => x.variant === 'release' && x.kind !== 'full');
+    if (a) return { release: r, asset: a, full: r.assets.find(x => x.variant === 'release' && x.kind === 'full') || null };
   }
   return null;
 }
@@ -3049,6 +3087,570 @@ async function vaultCreate(data, pass) {
   return { key, salt, iter: VAULT_KDF_ITER, blob: await vaultSeal(data, key, salt) };
 }
 
+/* =====================================================================================
+ * SWD flashing through a CMSIS-DAP debug probe (WebUSB for CMSIS-DAP v2, WebHID for v1).
+ * Layers: CmsisDap (probe commands) -> SwdTarget (ADIv5 DP/AP, memory access, Cortex-M halt/reset)
+ * -> swdFlashStm32wl (STM32WL55 flash controller, RM0453). Transport-agnostic: an "io" object with
+ * send(bytes) -> reply bytes; the browser layer provides WebUSB/WebHID, the tests SimDapProbe.
+ * ===================================================================================== */
+
+const DAP_CMD = { INFO: 0x00, CONNECT: 0x02, DISCONNECT: 0x03, TRANSFER_CONFIGURE: 0x04, TRANSFER: 0x05, TRANSFER_BLOCK: 0x06, WRITE_ABORT: 0x08, SWJ_PINS: 0x10, SWJ_CLOCK: 0x11, SWJ_SEQUENCE: 0x12, SWD_CONFIGURE: 0x13 };
+const DAP_ACK = { 1: 'OK', 2: 'WAIT', 4: 'FAULT', 7: 'no answer' };
+const PIN_NRESET = 0x80;
+const le32 = v => [v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF];
+
+/* STM32WL55 (RM0453; addresses cross-checked against ST's CMSIS header, OpenOCD and Black Magic Probe) */
+const WL = {
+  FLASH_BASE: 0x08000000, FLASH_SIZE: 0x40000, PAGE: 0x800, FLASHSIZE_REG: 0x1FFF75E0,
+  FLASH_ACR: 0x58004000, FLASH_KEYR: 0x58004008, FLASH_SR: 0x58004010, FLASH_CR: 0x58004014, FLASH_OPTR: 0x58004020,
+  FLASH_PCROP1ASR: 0x58004024, FLASH_PCROP1AER: 0x58004028, FLASH_WRP1AR: 0x5800402C, FLASH_WRP1BR: 0x58004030,
+  FLASH_PCROP1BSR: 0x58004034, FLASH_PCROP1BER: 0x58004038, FLASH_SFR: 0x58004080, PWR_CR4: 0x5800040C,
+  KEY1: 0x45670123, KEY2: 0xCDEF89AB,
+  SR_BSY: 1 << 16, SR_CFGBSY: 1 << 18, SR_PESD: 1 << 19, SR_ERRORS: 0x0000C3FA, SR_CLEAR: 0x0000C3FB,
+  CR_PG: 1 << 0, CR_PER: 1 << 1, CR_STRT: 1 << 16, CR_LOCK: 1 << 31, ACR_EMPTY: 1 << 16,
+  OPTR_ESE: 1 << 8, SFR_FSD: 1 << 7, C2BOOT: 1 << 15,
+  DBGMCU_IDCODE: 0xE0042000, DBGMCU_CR: 0xE0042004, DBGMCU_APB1FZR1: 0xE004203C, DEV_ID: 0x497,
+  FZ_IWDG_WWDG: (1 << 12) | (1 << 11),
+  DHCSR: 0xE000EDF0, DEMCR: 0xE000EDFC, AIRCR: 0xE000ED0C,
+  DHCSR_KEY: 0xA05F0000, C_DEBUGEN: 1 << 0, C_HALT: 1 << 1, S_HALT: 1 << 17, S_RESET_ST: 1 << 25,
+  VC_CORERESET: 1 << 0, AIRCR_SYSRESET: 0x05FA0004,
+};
+/** Pages the SWD flasher may erase/write: app (0-99) and bootloader (102-117). Pages 100-101 hold the
+ *  power log and the Kineis credential mirror (0x08032800); 118+ is FLASH_USER (credentials). */
+const SWD_APP_PAGES = [0, 99], SWD_BL_PAGES = [102, 117];
+const swdPageWritable = p => (p >= SWD_APP_PAGES[0] && p <= SWD_APP_PAGES[1]) || (p >= SWD_BL_PAGES[0] && p <= SWD_BL_PAGES[1]);
+const SWD_SR_NAMES = { 1: 'OPERR', 3: 'PROGERR', 4: 'WRPERR', 5: 'PGAERR', 6: 'SIZERR', 7: 'PGSERR', 8: 'MISSERR', 9: 'FASTERR', 14: 'RDERR', 15: 'OPTVERR' };
+function swdSrText(sr) { return Object.entries(SWD_SR_NAMES).filter(([b]) => sr & (1 << b)).map(([, n]) => n).join(' ') || `0x${hex8(sr)}`; }
+
+class DapError extends ProtocolError {}
+
+class CmsisDap {
+  constructor(io) { this.io = io; this.packet = 64; this.info = {}; }
+  async cmd(bytes, what) {
+    const req = Uint8Array.from(bytes);
+    const res = await this.io.send(req);
+    if (!res || !res.length || res[0] !== req[0]) throw new DapError(`Probe: unexpected reply to ${what || 'command 0x' + req[0].toString(16)}`);
+    return res;
+  }
+  async infoBytes(id) { const r = await this.cmd([DAP_CMD.INFO, id], 'DAP_Info'); return r.subarray(2, 2 + r[1]); }
+  async infoString(id) { const b = await this.infoBytes(id); return latin1(b).replace(/\0+$/, ''); }
+  /** Probe capabilities, SWD mode, clock and transfer retries. */
+  async init({ clockHz = 2000000 } = {}) {
+    const ps = await this.infoBytes(0xFF);
+    if (ps.length >= 2) this.packet = Math.min(this.io.maxPacket || 1024, ps[0] | (ps[1] << 8)) || 64;
+    const caps = await this.infoBytes(0xF0);
+    if (!(caps[0] & 1)) throw new DapError('This probe does not support SWD');
+    for (const [k, id] of [['vendor', 0x01], ['product', 0x02], ['serial', 0x03], ['version', 0x04]]) {
+      try { this.info[k] = await this.infoString(id); } catch (e) { this.info[k] = ''; }
+    }
+    const c = await this.cmd([DAP_CMD.CONNECT, 1], 'DAP_Connect');
+    if (c[1] !== 1) throw new DapError('The probe did not switch to SWD');
+    await this.cmd([DAP_CMD.SWJ_CLOCK, ...le32(clockHz)], 'DAP_SWJ_Clock');
+    await this.cmd([DAP_CMD.TRANSFER_CONFIGURE, 2, 0xFF, 0xFF, 0x00, 0x00], 'DAP_TransferConfigure');   // 2 idle cycles, 65535 WAIT retries
+    await this.cmd([DAP_CMD.SWD_CONFIGURE, 0x00], 'DAP_SWD_Configure');                                    // 1-cycle turnaround
+    return this.info;
+  }
+  async disconnect() { try { await this.cmd([DAP_CMD.DISCONNECT], 'DAP_Disconnect'); } catch (e) { /* probe gone */ } }
+  async sequence(bits, bytes) { await this.cmd([DAP_CMD.SWJ_SEQUENCE, bits & 0xFF, ...bytes], 'DAP_SWJ_Sequence'); }
+  /** JTAG-to-SWD switch and line reset (ADIv5): 51+ ones, 0xE79E, 51+ ones, idle. */
+  async lineReset() {
+    const ones = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x07];
+    await this.sequence(51, ones); await this.sequence(16, [0x9E, 0xE7]); await this.sequence(51, ones); await this.sequence(8, [0x00]);
+  }
+  /** Drive nRESET (true = asserted / low). */
+  async reset(asserted) { await this.cmd([DAP_CMD.SWJ_PINS, asserted ? 0 : PIN_NRESET, PIN_NRESET, ...le32(0)], 'DAP_SWJ_Pins'); }
+  /** list: [{ ap, read, reg (0/4/8/C), value }] -> values read, in order. */
+  async transfer(list) {
+    const out = [];
+    for (let i = 0; i < list.length;) {
+      const bytes = [DAP_CMD.TRANSFER, 0, 0];
+      let n = 0, reads = 0;
+      while (i < list.length) {
+        const t = list[i], size = t.read ? 1 : 5;
+        if (bytes.length + size > this.packet || 3 + (reads + (t.read ? 1 : 0)) * 4 > this.packet) break;
+        bytes.push((t.ap ? 1 : 0) | (t.read ? 2 : 0) | (t.reg & 0x0C));
+        if (!t.read) bytes.push(...le32(t.value >>> 0)); else reads++;
+        n++; i++;
+      }
+      bytes[2] = n;
+      const r = await this.cmd(bytes, 'DAP_Transfer');
+      const ack = r[2] & 0x07;
+      if (r[1] !== n || ack !== 1) throw this.ackError(ack, r[2]);
+      for (let k = 0; k < reads; k++) out.push(u32le(r, 3 + k * 4));
+    }
+    return out;
+  }
+  /** Repeated access to one AP register (DRW): write `words`, or read `count` words. */
+  async transferBlock(reg, { words = null, count = 0 }) {
+    const req = 1 | (words ? 0 : 2) | (reg & 0x0C);
+    const n = words ? words.length : count;
+    const bytes = [DAP_CMD.TRANSFER_BLOCK, 0, n & 0xFF, n >> 8, req];
+    if (words) for (const w of words) bytes.push(...le32(w >>> 0));
+    const r = await this.cmd(bytes, 'DAP_TransferBlock');
+    const done = r[1] | (r[2] << 8), ack = r[3] & 0x07;
+    if (done !== n || ack !== 1) throw this.ackError(ack, r[3]);
+    if (words) return null;
+    const out = new Array(n);
+    for (let k = 0; k < n; k++) out[k] = u32le(r, 4 + k * 4);
+    return out;
+  }
+  ackError(ack, raw) {
+    const e = new DapError(raw & 0x08 ? 'SWD protocol error (check the SWDIO/SWCLK wiring and GND)' : ack === 7 ? 'The module does not answer on SWD (wiring, power, or asleep: a probe with a reset line connects under reset)' : `SWD transfer ${DAP_ACK[ack] || 'error ' + ack}`);
+    e.ack = ack;
+    return e;
+  }
+}
+
+/** ADIv5 debug port + the Cortex-M4 (CPU1) AHB-AP (AP0) of the STM32WL55. */
+class SwdTarget {
+  constructor(dap, { ap = 0 } = {}) { this.dap = dap; this.ap = ap; this.select = -1; this.csw = -1; }
+  async readDp(reg) { return (await this.dap.transfer([{ read: true, reg }]))[0]; }
+  async writeDp(reg, value) { await this.dap.transfer([{ reg, value }]); if (reg === 8) this.select = value; }
+  async selectAp(reg) { const v = ((this.ap & 0xFF) << 24) | (reg & 0xF0); if (v !== this.select) await this.writeDp(8, v); }
+  async writeAp(reg, value) { await this.selectAp(reg); await this.dap.transfer([{ ap: true, reg, value }]); }
+  /** Line reset, DPIDR, clear sticky errors, power up the debug domain. */
+  async attach() {
+    await this.dap.lineReset();
+    this.select = -1; this.csw = -1;
+    const dpidr = await this.readDp(0x0);
+    await this.dap.transfer([{ reg: 0x0, value: 0x1E }]);                // ABORT: clear STKCMP/STKERR/WDERR/ORUNERR
+    await this.writeDp(0x8, 0);
+    await this.writeDp(0x4, 0x50000000);                                  // CSYSPWRUPREQ | CDBGPWRUPREQ
+    for (let i = 0; ; i++) {
+      if ((((await this.readDp(0x4)) & 0xA0000000) >>> 0) === 0xA0000000) break;      // CSYSPWRUPACK | CDBGPWRUPACK
+      if (i > 50) throw new DapError('The debug port did not power up');
+      await sleep(5);
+    }
+    return dpidr;
+  }
+  async setCsw(v) { if (this.csw !== v) { await this.writeAp(0x00, v); this.csw = v; } }
+  async read32(addr) {
+    await this.setCsw(0x23000012);                                        // 32-bit, auto-increment
+    await this.selectAp(0x04);
+    return (await this.dap.transfer([{ ap: true, reg: 0x04, value: addr }, { ap: true, read: true, reg: 0x0C }]))[0];
+  }
+  async write32(addr, value) {
+    await this.setCsw(0x23000012);
+    await this.selectAp(0x04);
+    await this.dap.transfer([{ ap: true, reg: 0x04, value: addr }, { ap: true, reg: 0x0C, value }]);
+  }
+  /** Block access with TAR auto-increment, which wraps every 1 KB: split there and by packet size. */
+  async readBlock(addr, count) {
+    await this.setCsw(0x23000012);
+    const out = [], per = Math.max(1, Math.floor((this.dap.packet - 4) / 4));
+    while (out.length < count) {
+      const a = addr + out.length * 4, n = Math.min(count - out.length, per, (0x400 - (a & 0x3FF)) >> 2);
+      await this.selectAp(0x04);
+      await this.dap.transfer([{ ap: true, reg: 0x04, value: a }]);
+      out.push(...await this.dap.transferBlock(0x0C, { count: n }));
+    }
+    return out;
+  }
+  async writeBlock(addr, words) {
+    await this.setCsw(0x23000012);
+    const per = Math.max(1, Math.floor((this.dap.packet - 5) / 4));
+    for (let i = 0; i < words.length;) {
+      const a = addr + i * 4, n = Math.min(words.length - i, per, (0x400 - (a & 0x3FF)) >> 2);
+      await this.selectAp(0x04);
+      await this.dap.transfer([{ ap: true, reg: 0x04, value: a }]);
+      await this.dap.transferBlock(0x0C, { words: words.slice(i, i + n) });
+      i += n;
+    }
+  }
+  async halted() { return ((await this.read32(WL.DHCSR)) & WL.S_HALT) !== 0; }
+  async halt() {
+    await this.write32(WL.DHCSR, WL.DHCSR_KEY | WL.C_DEBUGEN | WL.C_HALT);
+    for (let i = 0; i < 50; i++) { if (await this.halted()) return; await sleep(2); }
+    throw new DapError('The CPU did not halt');
+  }
+}
+
+/**
+ * Connect to the STM32WL55 CPU1 and halt it at its reset vector. With a probe reset line, the attach
+ * happens while the chip is held in reset ("connect under reset"), which also reaches a module asleep
+ * in STOP2; the core's reset-seen flag confirms it. Otherwise: plain attach, vector catch, system reset.
+ * Then the watchdogs are frozen while halted, and the protections that could block writes are checked.
+ */
+async function swdConnect(dap, { underReset = true, onStep = () => {} } = {}) {
+  const t = new SwdTarget(dap, { ap: 0 });
+  let dpidr = null, usedReset = false;
+  if (underReset) {
+    onStep('Holding the module in reset…');
+    await dap.reset(true); await sleep(20);
+    let armed = false;
+    try {
+      dpidr = await t.attach();
+      await t.write32(WL.DEMCR, WL.VC_CORERESET);                // halt at the reset vector...
+      await t.write32(WL.DHCSR, WL.DHCSR_KEY | WL.C_DEBUGEN | WL.C_HALT);
+      armed = true;
+    } catch (e) { dpidr = null; }
+    await dap.reset(false); await sleep(30);                     // ...when reset is released
+    if (armed) {
+      try {
+        const d = await t.read32(WL.DHCSR);
+        usedReset = !!(d & WL.S_HALT) && !!(d & WL.S_RESET_ST);  // halted by a reset we caused: the reset line works
+      } catch (e) { usedReset = false; }
+    }
+  }
+  if (!usedReset) {
+    onStep('Attaching to the module…');
+    dpidr = await t.attach();
+    await t.write32(WL.DEMCR, WL.VC_CORERESET);
+    await t.halt();
+    try { await t.write32(WL.AIRCR, WL.AIRCR_SYSRESET); } catch (e) { /* the reset may cut the ACK */ }
+    await sleep(30);
+    t.select = -1; t.csw = -1;
+    await t.attach();
+  }
+  if (!(await t.halted())) await t.halt();
+  await t.write32(WL.DEMCR, 0);
+  // freeze IWDG/WWDG while halted (the firmware runs the IWDG) and keep debug alive in low-power modes
+  await t.write32(WL.DBGMCU_APB1FZR1, (await t.read32(WL.DBGMCU_APB1FZR1)) | WL.FZ_IWDG_WWDG);
+  await t.write32(WL.DBGMCU_CR, 0x7);
+  const idcode = await t.read32(WL.DBGMCU_IDCODE);
+  const devId = idcode & 0xFFF;
+  if (devId !== WL.DEV_ID) throw new DapError(`Not an STM32WL55 (device ID 0x${devId.toString(16)}, expected 0x497)`);
+  const info = {
+    target: t, dpidr, idcode, underReset: usedReset,
+    flashKb: (await t.read32(WL.FLASHSIZE_REG)) & 0xFFFF,
+    optr: await t.read32(WL.FLASH_OPTR), sfr: await t.read32(WL.FLASH_SFR),
+    wrp: [await t.read32(WL.FLASH_WRP1AR), await t.read32(WL.FLASH_WRP1BR)],
+    pcrop: [[await t.read32(WL.FLASH_PCROP1ASR), await t.read32(WL.FLASH_PCROP1AER)], [await t.read32(WL.FLASH_PCROP1BSR), await t.read32(WL.FLASH_PCROP1BER)]],
+    c2boot: ((await t.read32(WL.PWR_CR4)) & WL.C2BOOT) !== 0, sr: await t.read32(WL.FLASH_SR),
+  };
+  info.rdp = info.optr & 0xFF;
+  return info;
+}
+
+/** Why this chip's option bytes would block or endanger the flash (empty list = fine). Never writes them. */
+function swdProtectionProblems(c, pages) {
+  const out = [];
+  const hit = (a, b) => pages.some(p => p >= a && p <= b);
+  if (c.rdp !== 0xAA) out.push(`flash read protection is on (RDP 0x${c.rdp.toString(16)}); removing it mass-erases the credentials`);
+  if (c.flashKb && c.flashKb !== 256) out.push(`flash size ${c.flashKb} KB, expected 256 KB`);
+  if ((c.optr & WL.OPTR_ESE) && !(c.sfr & WL.SFR_FSD) && (c.sfr & 0x7F) <= SWD_BL_PAGES[1]) out.push(`CPU2 secure flash starts at page ${c.sfr & 0x7F}`);
+  c.wrp.forEach((w, i) => { const s = w & 0x7F, e = (w >>> 16) & 0x7F; if (s <= e && hit(s, e)) out.push(`write protection area ${'AB'[i]} covers pages ${s}-${e}`); });
+  c.pcrop.forEach(([sr, er], i) => { const s = sr & 0xFF, e = er & 0xFF; if (s <= e) out.push(`PCROP area ${'AB'[i]} is enabled`); });
+  if (c.sr & WL.SR_PESD) out.push('a flash operation is suspended');
+  return out;
+}
+
+/** Image -> pages to erase and program; refuses anything touching the preserved pages. */
+function analyzeSwdImage(bytes) {
+  const errors = [], used = [];
+  if (!bytes || !bytes.length) errors.push('Empty image');
+  else {
+    if (bytes.length > WL.FLASH_SIZE) errors.push('Larger than the flash');
+    const sp = u32le(bytes, 0), pc = u32le(bytes, 4);
+    if (sp < 0x20000000 || sp > 0x20010000 || (pc & 0xFF000000) !== 0x08000000) errors.push('No valid vector table at the start (use the _full.bin image)');
+    for (let p = 0; p * WL.PAGE < bytes.length; p++) {
+      if (!bytes.subarray(p * WL.PAGE, (p + 1) * WL.PAGE).some(b => b !== 0xFF)) continue;
+      if (!swdPageWritable(p)) errors.push(`The image has data at 0x${hex8(WL.FLASH_BASE + p * WL.PAGE)} (page ${p}), which holds the credentials or their mirror: refused`);
+      used.push(p);
+    }
+  }
+  // the whole app region (like make flash-full), and the bootloader region when the image carries one
+  const hasApp = used.some(p => p <= SWD_APP_PAGES[1]), hasBootloader = used.some(p => p >= SWD_BL_PAGES[0] && p <= SWD_BL_PAGES[1]);
+  const erase = [];
+  if (hasApp) for (let p = SWD_APP_PAGES[0]; p <= SWD_APP_PAGES[1]; p++) erase.push(p);
+  if (hasBootloader) for (let p = SWD_BL_PAGES[0]; p <= SWD_BL_PAGES[1]; p++) erase.push(p);
+  return { ok: !errors.length, errors, used, erase, hasBootloader, size: bytes ? bytes.length : 0, crc: bytes ? crc32Ieee(bytes) : 0 };
+}
+
+async function wlWaitIdle(t, signal, ms = 2000) {
+  const t0 = Date.now();
+  for (;;) {
+    const sr = await t.read32(WL.FLASH_SR);
+    if (!(sr & (WL.SR_BSY | WL.SR_CFGBSY))) return sr;
+    if (signal && signal.aborted) throw new CancelledError();
+    if (Date.now() - t0 > ms) throw new DapError('Flash stayed busy');
+    await sleep(1);
+  }
+}
+async function wlCheck(t, what) {
+  const sr = await t.read32(WL.FLASH_SR);
+  if (sr & WL.SR_ERRORS) { await t.write32(WL.FLASH_SR, sr & WL.SR_CLEAR); throw new DapError(`${what}: flash error ${swdSrText(sr)}`); }
+}
+/** Release the module: debug registers back to their reset state, then a reset into the firmware. */
+async function swdRelease(dap, t, { pulseReset }) {
+  try { await t.write32(WL.FLASH_ACR, (await t.read32(WL.FLASH_ACR)) & ~WL.ACR_EMPTY); } catch (e) { /* best effort */ }   // else BOOT0 may pick the ROM bootloader
+  try { await t.write32(WL.DBGMCU_CR, 0); await t.write32(WL.DBGMCU_APB1FZR1, (await t.read32(WL.DBGMCU_APB1FZR1)) & ~WL.FZ_IWDG_WWDG); } catch (e) { /* best effort */ }
+  await t.write32(WL.DEMCR, 0);
+  await t.write32(WL.DHCSR, WL.DHCSR_KEY);
+  if (pulseReset) { await dap.reset(true); await sleep(20); await dap.reset(false); }
+  else { try { await t.write32(WL.AIRCR, WL.AIRCR_SYSRESET); } catch (e) { /* the reset may cut the ACK */ } }
+  try { await t.writeDp(0x4, 0); } catch (e) { /* the target may already be running away */ }
+}
+
+/**
+ * Program an app + bootloader image into the STM32WL55 over SWD, the way `make flash-full` does but
+ * keeping pages 100-101 (power log + credential mirror) and FLASH_USER (credentials). Double words are
+ * streamed per page (the bus stalls while each one programs) and blank ones skipped; the first double
+ * word (initial SP + reset vector) is written LAST, so an interrupted flash leaves no bootable vector
+ * table and the next boot reaches ST's ROM bootloader. Read-back verify, then reset into the firmware.
+ */
+async function swdFlashStm32wl(dap, bytes, opts = {}) {
+  const { signal, onPhase = () => {}, onProgress = () => {}, underReset = true, verify = true, run = true } = opts;
+  const plan = analyzeSwdImage(bytes);
+  if (!plan.ok) throw new DapError(plan.errors.join('; '));
+  const t0 = Date.now();
+  const res = { ok: false, size: bytes.length, crc: hex8(plan.crc), pages: plan.erase.length, at: new Date().toISOString(), warnings: [] };
+  onPhase('connect', 'Connecting to the module over SWD…');
+  const c = await swdConnect(dap, { underReset, onStep: m => onPhase('connect', m) });
+  const t = c.target;
+  Object.assign(res, { dpidr: hex8(c.dpidr), idcode: hex8(c.idcode), optr: hex8(c.optr), underReset: c.underReset });
+  const problems = swdProtectionProblems(c, plan.erase);
+  if (problems.length) throw new DapError(`Stopped before writing anything: ${problems.join('; ')}`);
+  if (c.c2boot) res.warnings.push('CPU2 boot is enabled on this module (PWR_CR4.C2BOOT)');
+  const check = () => { if (signal && signal.aborted) throw new CancelledError(); };
+
+  onPhase('unlock', 'Unlocking the flash…');
+  await wlWaitIdle(t, signal);
+  if ((await t.read32(WL.FLASH_CR)) & WL.CR_LOCK) { await t.write32(WL.FLASH_KEYR, WL.KEY1); await t.write32(WL.FLASH_KEYR, WL.KEY2); }
+  if ((await t.read32(WL.FLASH_CR)) & WL.CR_LOCK) throw new DapError('The flash stayed locked');
+  await t.write32(WL.FLASH_SR, WL.SR_CLEAR);
+
+  const dw = i => { const o = i * 8, w = [0, 0]; for (let k = 0; k < 8; k++) { const b = o + k < bytes.length ? bytes[o + k] : 0xFF; w[k >> 2] |= b << ((k & 3) * 8); } return [w[0] >>> 0, w[1] >>> 0]; };
+  const blank = w => w[0] === 0xFFFFFFFF && w[1] === 0xFFFFFFFF;
+  try {
+    for (let i = 0; i < plan.erase.length; i++) {
+      check();
+      const p = plan.erase[i];
+      if (!swdPageWritable(p)) throw new DapError(`Refusing to erase page ${p}`);       // hard guard, whatever the plan says
+      onPhase('erase', `Erasing page ${i + 1} of ${plan.erase.length}…`);
+      onProgress({ phase: 'erase', done: i, total: plan.erase.length });
+      await t.write32(WL.FLASH_CR, WL.CR_PER | (p << 3));
+      await t.write32(WL.FLASH_CR, WL.CR_PER | (p << 3) | WL.CR_STRT);
+      await wlWaitIdle(t, signal, 250);
+      await wlCheck(t, `Erasing page ${p}`);
+    }
+    await t.write32(WL.FLASH_CR, 0);
+
+    const pages = plan.erase.filter(p => p * WL.PAGE < bytes.length);
+    const total = pages.length * (WL.PAGE / 8);
+    let done = 0, written = 0;
+    await t.write32(WL.FLASH_CR, WL.CR_PG);
+    onPhase('write', 'Writing the new firmware…');
+    for (const p of pages) {
+      check();
+      const first = p * (WL.PAGE / 8), last = first + WL.PAGE / 8;
+      for (let i = p === 0 ? 1 : first; i < last;) {                      // page 0: double word 0 comes last
+        if (blank(dw(i))) { i++; continue; }
+        const start = i, words = [];
+        while (i < last && !blank(dw(i))) { words.push(...dw(i)); i++; }
+        await t.writeBlock(WL.FLASH_BASE + start * 8, words);
+        written += words.length * 4;
+      }
+      await wlWaitIdle(t, signal, 500);
+      await wlCheck(t, `Programming page ${p}`);
+      done += WL.PAGE / 8;
+      onProgress({ phase: 'write', done, total });
+    }
+    onPhase('vectors', 'Writing the vector table…');
+    await t.writeBlock(WL.FLASH_BASE, dw(0));
+    await wlWaitIdle(t, signal, 500);
+    await wlCheck(t, 'Programming the vector table');
+    res.written = written + 8;
+  } finally {
+    try { await t.write32(WL.FLASH_CR, WL.CR_LOCK); } catch (e) { /* best effort */ }
+  }
+
+  if (verify) {
+    onPhase('verify', 'Reading back and comparing…');
+    const pages = plan.erase;
+    for (let k = 0; k < pages.length; k++) {
+      check();
+      const base = pages[k] * WL.PAGE;
+      const got = await t.readBlock(WL.FLASH_BASE + base, WL.PAGE / 4);
+      for (let j = 0; j < got.length; j++) {
+        const o = base + j * 4;
+        let want = 0;
+        for (let b = 0; b < 4; b++) want |= (o + b < bytes.length ? bytes[o + b] : 0xFF) << (b * 8);
+        if (got[j] !== (want >>> 0)) throw new DapError(`Verify failed at 0x${hex8(WL.FLASH_BASE + o)}: read 0x${hex8(got[j])}, expected 0x${hex8(want)}`);
+      }
+      onProgress({ phase: 'verify', done: k + 1, total: pages.length });
+    }
+    res.verified = true;
+  }
+  if (run) { onPhase('run', 'Starting the new firmware…'); await swdRelease(dap, t, { pulseReset: c.underReset }); }
+  res.ok = true;
+  res.durationMs = Date.now() - t0;
+  return res;
+}
+
+/**
+ * Simulated CMSIS-DAP probe wired to a simulated STM32WL55 (SW-DP, CPU1 AHB-AP, flash controller with
+ * double-word programming rules, option bytes, Cortex-M halt/reset, nRESET, STOP2). For the test suite
+ * and the page's practice mode.
+ */
+class SimDapProbe {
+  constructor({ flash = null, rdp = 0xAA, stop2 = false, nresetWired = true, packet = 64, devId = WL.DEV_ID, wrp1a = 0xFF80FFFF, sfr = 0xFFFFEFFF, ese = false } = {}) {
+    this.flash = flash || new Uint8Array(WL.FLASH_SIZE).fill(0xFF);
+    this.o = { rdp, nresetWired, packet, devId, wrp1a, sfr, ese };
+    this.maxPacket = 1024;
+    this.stop2 = stop2; this.nreset = false; this.powered = false; this.select = 0; this.csw = 0; this.tar = 0;
+    this.locked = true; this.keyStep = 0; this.cr = 0; this.sr = 0; this.pend = null; this.acr = 0x600;
+    this.dhcsr = 0; this.demcr = 0; this.halted = false; this.running = true; this.resetSeen = false;
+    this.dbgmcuCr = 0; this.fz = 0;
+    this.log = { erased: [], programmed: 0, firstVectorWriteIndex: -1, writes: 0, resets: 0 };
+    this.connected = false;
+  }
+  _sysReset() {
+    this.log.resets++; this.resetSeen = true;
+    this.stop2 = false; this.locked = true; this.cr = 0; this.keyStep = 0; this.pend = null;
+    if ((this.demcr & WL.VC_CORERESET) && (this.dhcsr & WL.C_DEBUGEN)) { this.halted = true; this.running = false; } else { this.halted = false; this.running = true; }
+  }
+  _mem32(addr) {
+    const regs = {
+      [WL.DBGMCU_IDCODE]: 0x10010000 | this.o.devId, [WL.DBGMCU_CR]: this.dbgmcuCr, [WL.DBGMCU_APB1FZR1]: this.fz,
+      [WL.FLASH_ACR]: this.acr, [WL.FLASH_SR]: this.sr, [WL.FLASH_CR]: this.cr | (this.locked ? WL.CR_LOCK : 0),
+      [WL.FLASH_OPTR]: 0x3FFFF000 | (this.o.ese ? WL.OPTR_ESE : 0) | this.o.rdp, [WL.FLASH_SFR]: this.o.sfr,
+      [WL.FLASH_WRP1AR]: this.o.wrp1a, [WL.FLASH_WRP1BR]: 0xFF80FFFF, [WL.FLASH_PCROP1ASR]: 0xFFFFFFFF, [WL.FLASH_PCROP1AER]: 0xFFFFFF00,
+      [WL.FLASH_PCROP1BSR]: 0xFFFFFFFF, [WL.FLASH_PCROP1BER]: 0xFFFFFF00, [WL.PWR_CR4]: 0, [WL.FLASHSIZE_REG]: 0xFFFF0100,
+      [WL.DEMCR]: this.demcr,
+    };
+    if (addr in regs) return regs[addr] >>> 0;
+    if (addr === WL.DHCSR) { const v = (this.dhcsr & 0xFFFF) | (this.halted ? WL.S_HALT : 0) | (this.resetSeen ? WL.S_RESET_ST : 0); this.resetSeen = false; return v >>> 0; }
+    if (addr >= WL.FLASH_BASE && addr < WL.FLASH_BASE + WL.FLASH_SIZE) return u32le(this.flash, addr - WL.FLASH_BASE);
+    if (addr >= 0x20000000 && addr < 0x20010000) return 0;
+    throw Object.assign(new Error('bus fault'), { fault: true });
+  }
+  _write32(addr, v) {
+    v >>>= 0;
+    this.log.writes++;
+    if (addr === WL.FLASH_KEYR) {
+      if (this.keyStep === 0 && v === WL.KEY1) this.keyStep = 1;
+      else if (this.keyStep === 1 && v === WL.KEY2) { this.locked = false; this.keyStep = 0; }
+      else { this.keyStep = 2; this.sr |= 1 << 7; }                         // wrong sequence: locked until reset
+      return;
+    }
+    if (addr === WL.FLASH_SR) { this.sr &= ~(v & WL.SR_CLEAR); return; }
+    if (addr === WL.FLASH_ACR) { this.acr = v; return; }
+    if (addr === WL.DBGMCU_CR) { this.dbgmcuCr = v; return; }
+    if (addr === WL.DBGMCU_APB1FZR1) { this.fz = v; return; }
+    if (addr === WL.FLASH_CR) {
+      if (v & WL.CR_LOCK) { this.locked = true; this.cr = 0; return; }
+      if (this.locked) { this.sr |= 1 << 4; return; }
+      this.cr = v & ~WL.CR_STRT;
+      if ((v & WL.CR_STRT) && (v & WL.CR_PER)) {
+        const p = (v >> 3) & 0x7F;
+        const wrp = this.o.wrp1a, s = wrp & 0x7F, e = (wrp >>> 16) & 0x7F;
+        if (s <= e && p >= s && p <= e) { this.sr |= 1 << 4; return; }        // WRPERR
+        this.flash.fill(0xFF, p * WL.PAGE, (p + 1) * WL.PAGE);
+        this.log.erased.push(p);
+      }
+      return;
+    }
+    if (addr === WL.DHCSR) {
+      if (((v & 0xFFFF0000) >>> 0) !== WL.DHCSR_KEY) return;
+      this.dhcsr = v & 0xFFFF;
+      if ((v & WL.C_HALT) && (v & WL.C_DEBUGEN)) { if (!this.nreset) { this.halted = true; this.running = false; } }
+      else if (!(v & WL.C_HALT)) { this.halted = false; if (!this.nreset) this.running = true; }
+      return;
+    }
+    if (addr === WL.DEMCR) { this.demcr = v; return; }
+    if (addr === WL.AIRCR) { if (v === WL.AIRCR_SYSRESET) this._sysReset(); return; }
+    if (addr >= WL.FLASH_BASE && addr < WL.FLASH_BASE + WL.FLASH_SIZE) {
+      const off = addr - WL.FLASH_BASE;
+      if (this.locked || !(this.cr & WL.CR_PG)) { this.sr |= 1 << 7; return; }        // PGSERR
+      if (!this.pend) {
+        if (off & 7) { this.sr |= 1 << 5; return; }                                 // PGAERR
+        this.pend = { off, w0: v };
+        return;
+      }
+      if (off !== this.pend.off + 4) { this.sr |= 1 << 7; this.pend = null; return; } // PGSERR: not the 2nd word
+      const o = this.pend.off;
+      if (!this.flash.subarray(o, o + 8).every(b => b === 0xFF)) { this.sr |= 1 << 3; this.pend = null; return; } // PROGERR
+      le32(this.pend.w0).forEach((b, k) => { this.flash[o + k] = b; });
+      le32(v).forEach((b, k) => { this.flash[o + 4 + k] = b; });
+      if (o === 0 && this.log.firstVectorWriteIndex < 0) this.log.firstVectorWriteIndex = this.log.programmed;
+      this.log.programmed++;
+      this.pend = null;
+      return;
+    }
+    if (addr >= 0x20000000 && addr < 0x20010000) return;
+    throw Object.assign(new Error('bus fault'), { fault: true });
+  }
+  /** One SWD transfer; returns { ack, value }. */
+  _xfer(req, value) {
+    const ap = req & 1, read = req & 2, reg = req & 0x0C;
+    if (!this.connected || (this.stop2 && !this.nreset)) return { ack: 7 };   // asleep: the debug domain is unclocked
+    if (!ap) {
+      if (read) return { ack: 1, value: reg === 0x0 ? 0x6BA02477 : reg === 0x4 ? (this.powered ? 0xF0000000 : 0) : 0 };
+      if (reg === 0x4) this.powered = (value & 0x50000000) === 0x50000000;
+      if (reg === 0x8) this.select = value;
+      return { ack: 1 };
+    }
+    if (!this.powered) return { ack: 4 };
+    const bank = this.select & 0xF0, apsel = this.select >>> 24;
+    if (apsel !== 0) return { ack: 4 };
+    const r = bank | reg;
+    if (this.nreset && r === 0x0C && ![WL.DHCSR, WL.DEMCR].includes(this.tar)) return { ack: 4 };   // under reset: core debug registers only
+    try {
+      if (r === 0x00) { if (read) return { ack: 1, value: this.csw }; this.csw = value; return { ack: 1 }; }
+      if (r === 0x04) { if (read) return { ack: 1, value: this.tar }; this.tar = value >>> 0; return { ack: 1 }; }
+      if (r === 0x0C) {
+        let out;
+        if (read) out = this._mem32(this.tar); else this._write32(this.tar, value);
+        if ((this.csw & 0x30) === 0x10) this.tar = ((this.tar & ~0x3FF) | ((this.tar + 4) & 0x3FF)) >>> 0;   // auto-increment wraps at 1 KB
+        return read ? { ack: 1, value: out } : { ack: 1 };
+      }
+      if (r === 0xFC) return { ack: 1, value: 0x24770011 };
+      return { ack: 1, value: 0 };
+    } catch (e) { return { ack: 4 }; }
+  }
+  async send(req) {
+    await Promise.resolve();
+    const cmd = req[0], out = [cmd];
+    switch (cmd) {
+      case DAP_CMD.INFO: {
+        const id = req[1];
+        const s = { 0x01: 'Simulated', 0x02: 'Simulated CMSIS-DAP', 0x03: 'SIM0001', 0x04: '2.1.0' }[id];
+        if (s) out.push(s.length + 1, ...asciiBytes(s), 0);
+        else if (id === 0xFF) out.push(2, this.o.packet & 0xFF, this.o.packet >> 8);
+        else if (id === 0xFE) out.push(1, 4);
+        else if (id === 0xF0) out.push(1, 0x01);
+        else out.push(0);
+        break;
+      }
+      case DAP_CMD.CONNECT: this.connected = req[1] === 1 || req[1] === 0; out.push(this.connected ? 1 : 0); break;
+      case DAP_CMD.DISCONNECT: this.connected = false; out.push(0); break;
+      case DAP_CMD.SWJ_CLOCK: case DAP_CMD.TRANSFER_CONFIGURE: case DAP_CMD.SWD_CONFIGURE: case DAP_CMD.SWJ_SEQUENCE: case DAP_CMD.WRITE_ABORT: out.push(0); break;
+      case DAP_CMD.SWJ_PINS: {
+        const sel = req[2], val = req[1];
+        if (sel & PIN_NRESET && this.o.nresetWired) {
+          const asserted = !(val & PIN_NRESET);
+          if (asserted && !this.nreset) { this.nreset = true; this.stop2 = false; this.halted = false; this.running = false; }
+          else if (!asserted && this.nreset) { this.nreset = false; this._sysReset(); }
+        }
+        out.push(this.nreset ? 0x00 : PIN_NRESET);
+        break;
+      }
+      case DAP_CMD.TRANSFER: case DAP_CMD.TRANSFER_BLOCK: {
+        const block = cmd === DAP_CMD.TRANSFER_BLOCK;
+        const n = block ? req[2] | (req[3] << 8) : req[2];
+        let p = block ? 5 : 3, done = 0, ack = 1;
+        const vals = [];
+        for (; done < n; done++) {
+          const rq = block ? req[4] : req[p++];
+          let v = 0;
+          if (!(rq & 2)) { v = u32le(req, p); p += 4; }
+          const r = this._xfer(rq, v);
+          ack = r.ack;
+          if (ack !== 1) break;
+          if (rq & 2) vals.push(r.value);
+        }
+        if (block) out.push(done & 0xFF, done >> 8, ack); else out.push(done, ack);
+        for (const v of vals) out.push(...le32(v));
+        break;
+      }
+      default: return Uint8Array.from([0xFF]);
+    }
+    if (out.length > this.o.packet) throw new Error(`simulated probe: reply of ${out.length} bytes exceeds the packet size`);
+    return Uint8Array.from(out);
+  }
+}
+
 const NaiadProtocol = {
   TOOL_VERSION, APP_BASE, APP_MAX_SIZE, RAM_START, RAM_END, DFU_CHUNK, DFU_MAX_PAYLOAD, BAUDS, ST_ITEMS, CSV_COLUMNS, AT_ERROR_TEXT, ROM_RECOVERY_CMD,
   Clock, sleep, CancelledError, TimeoutError, ProtocolError,
@@ -3066,6 +3668,7 @@ const NaiadProtocol = {
   vaultNormalize, vaultNewData, vaultFind, vaultMerge, vaultNextFree, vaultMarkInUse, vaultMarkFreed, vaultCounts, vaultCsv,
   vaultDeriveKey, vaultSeal, vaultOpen, vaultCreate, b64enc, b64dec,
   teamImportPreview, teamSealKey, teamOpenKey, teamVaultNew, teamVaultUnlock, teamSealRecords, defaultRelease, releaseLabel,
+  DAP_CMD, WL, SWD_APP_PAGES, SWD_BL_PAGES, DapError, CmsisDap, SwdTarget, swdConnect, swdProtectionProblems, analyzeSwdImage, swdFlashStm32wl, SimDapProbe,
 };
 // ==== PROTOCOL END ====
 
@@ -3517,7 +4120,7 @@ async function relInit() {
   } catch (e) { relOnly(`Releases unavailable (${e.message}): choose a .bin file`); return; }
   if (!rel.list.length) { relOnly('No Naiad release published yet'); return; }
   const sel = $('#relSelect'); sel.innerHTML = ''; sel.disabled = false;
-  for (const r of rel.list) for (const a of r.assets) sel.append(new Option(releaseLabel(r, a), `${r.tag}|${a.name}`));
+  for (const r of rel.list) for (const a of r.assets) if (a.kind !== 'full') sel.append(new Option(releaseLabel(r, a), `${r.tag}|${a.name}`));
   const d = defaultRelease(rel.list);
   if (d) sel.value = `${d.release.tag}|${d.asset.name}`;
   relSelected();
@@ -5129,6 +5732,7 @@ function renderOp() {
 }
 function updateControls() {
   const conn = !!(ui.link && ui.link.isOpen), busy = !!ui.op;
+  if ($('#btnSwdFlash') && typeof swd !== 'undefined') renderSwd();
   const app = conn && ui.mode === 'app', bl = conn && ui.mode === 'bl';
   const en = (id, on) => { const e = $(id); if (e) e.disabled = !on; };
   en('#btnConnect', !conn && !busy); en('#btnDisconnect', conn);
@@ -5166,6 +5770,253 @@ async function sendManual() {
   inp.value = '';
 }
 
+/* ---------- SWD flashing (debug probe) ----------
+ * For modules the serial bootloader cannot reach: factory firmware without AT+BOOT, or a silent unit.
+ * A CMSIS-DAP probe on the module's SWD pads writes the release's full image (app + bootloader); the
+ * credentials page and its backup copy are never touched (swdFlashStm32wl). CMSIS-DAP v2 probes go
+ * through WebUSB (driverless on Windows), v1 probes through WebHID. */
+
+const SWD_TIMEOUT_MS = 5000;
+const withTimeout = (p, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new DapError(`The probe did not answer (${what})`)), SWD_TIMEOUT_MS))]);
+
+/** CMSIS-DAP v2: a vendor-specific interface with a bulk OUT + bulk IN pair, named "...CMSIS-DAP...". */
+class WebUsbDapIo {
+  constructor(device) { this.device = device; this.label = `${device.manufacturerName || ''} ${device.productName || ''}`.trim(); }
+  static async request() {
+    const device = await navigator.usb.requestDevice({ filters: [{ classCode: 0xFF }] });
+    const io = new WebUsbDapIo(device);
+    await io.open();
+    return io;
+  }
+  async open() {
+    const d = this.device;
+    await d.open();
+    if (!d.configuration) await d.selectConfiguration(1);
+    let pick = null;
+    for (const intf of d.configuration.interfaces) {
+      for (const alt of intf.alternates) {
+        if (alt.interfaceClass !== 0xFF) continue;
+        const bulk = alt.endpoints.filter(e => e.type === 'bulk');
+        const out = bulk.find(e => e.direction === 'out'), inn = bulk.find(e => e.direction === 'in');
+        if (!out || !inn) continue;
+        const named = /CMSIS-DAP/i.test(alt.interfaceName || '');
+        if (!pick || (named && !pick.named)) pick = { intf, alt, out, inn, named };
+      }
+    }
+    if (!pick) { await d.close(); throw new DapError('This device has no CMSIS-DAP v2 (bulk) interface. A v1 probe works with the "HID probe" option.'); }
+    try { await d.claimInterface(pick.intf.interfaceNumber); }
+    catch (e) { await d.close(); throw new DapError('The browser could not open the probe: another program (J-Link or ST software, a terminal) may be using it, or Windows has no WinUSB driver for it.'); }
+    if (pick.intf.alternates.length > 1) await d.selectAlternateInterface(pick.intf.interfaceNumber, pick.alt.alternateSetting);
+    this.epOut = pick.out.endpointNumber; this.epIn = pick.inn.endpointNumber;
+  }
+  async send(bytes) {
+    await withTimeout(this.device.transferOut(this.epOut, bytes), 'USB out');
+    const r = await withTimeout(this.device.transferIn(this.epIn, 1024), 'USB in');
+    if (r.status !== 'ok') throw new DapError(`USB transfer ${r.status}`);
+    return new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
+  }
+  async close() { try { await this.device.close(); } catch (e) { /* unplugged */ } }
+}
+
+/** CMSIS-DAP v1: HID reports (64 bytes on full-speed probes). */
+class WebHidDapIo {
+  constructor(device) { this.device = device; this.waiter = null; this.label = device.productName || 'HID probe'; }
+  static async request() {
+    const devs = await navigator.hid.requestDevice({ filters: [] });
+    if (!devs.length) throw Object.assign(new DapError('No probe selected'), { name: 'NotFoundError' });
+    const io = new WebHidDapIo(devs[0]);
+    await io.open();
+    return io;
+  }
+  async open() {
+    const d = this.device;
+    if (!d.opened) await d.open();
+    const col = d.collections.find(c => c.outputReports && c.outputReports.length);
+    const rep = col ? col.outputReports[0] : null, item = rep && rep.items[0];
+    this.reportId = rep ? rep.reportId : 0;
+    this.size = item ? Math.max(64, (item.reportSize * item.reportCount) >> 3) : 64;
+    this.maxPacket = this.size;
+    this.onReport = e => { if (this.waiter) { const w = this.waiter; this.waiter = null; w(new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength)); } };
+    d.addEventListener('inputreport', this.onReport);
+  }
+  async send(bytes) {
+    const buf = new Uint8Array(this.size);
+    buf.set(bytes.subarray(0, this.size));
+    const reply = new Promise(resolve => { this.waiter = resolve; });
+    await this.device.sendReport(this.reportId, buf);
+    return withTimeout(reply, 'HID');
+  }
+  async close() { try { this.device.removeEventListener('inputreport', this.onReport); await this.device.close(); } catch (e) { /* unplugged */ } }
+}
+
+const swd = { io: null, dap: null, kind: null, label: '', file: null };
+
+/** A simulated probe on the simulated module: its app region, no credentials page content needed. */
+function swdSimProbe() {
+  const flash = new Uint8Array(WL.FLASH_SIZE).fill(0xFF);
+  const sim = ensureSim(false);
+  flash.set(sim.flash.subarray(0, APP_MAX_SIZE), 0);
+  const io = new SimDapProbe({ flash });
+  io.label = 'Simulated CMSIS-DAP probe';
+  return io;
+}
+async function swdCloseProbe() {
+  if (swd.dap) await swd.dap.disconnect();
+  if (swd.io && swd.io.close) await swd.io.close();
+  Object.assign(swd, { io: null, dap: null, kind: null, label: '' });
+  renderSwd();
+}
+async function swdOpenProbe(kind) {
+  await swdCloseProbe();
+  let io;
+  if (kind === 'sim') io = swdSimProbe();
+  else if (kind === 'hid') {
+    if (!('hid' in navigator)) throw new DapError('WebHID is not available here: use Chrome or Edge on a desktop computer.');
+    io = await WebHidDapIo.request();
+  } else {
+    if (!('usb' in navigator)) throw new DapError('WebUSB is not available here: use Chrome or Edge on a desktop computer.');
+    io = await WebUsbDapIo.request();
+  }
+  const dap = new CmsisDap(io);
+  let info;
+  try { info = await dap.init(); }
+  catch (e) { if (io.close) await io.close(); throw e; }
+  Object.assign(swd, { io, dap, kind, label: [info.vendor, info.product].filter(Boolean).join(' ') || io.label || 'CMSIS-DAP probe' });
+  note(`SWD probe: ${swd.label}${info.version ? ` (firmware ${info.version})` : ''}, ${dap.packet}-byte packets`);
+  renderSwd();
+  return swd;
+}
+function swdProbeError(e) {
+  if (e && (e.name === 'NotFoundError' || /No device selected|No probe selected/i.test(e.message))) return 'No probe selected.';
+  return e ? e.message : 'Cancelled';
+}
+/** The release's full image (app + bootloader) for SWD, or the file the user chose. */
+function swdReleaseFor(L) {
+  if (L && L.full) return L;
+  const { r, a } = relPicked();
+  if (r && a) { const full = r.assets.find(x => x.kind === 'full' && x.variant === a.variant); if (full) return { release: r, asset: a, full }; }
+  return vLatest();
+}
+async function swdImageFor(L) {
+  if (swd.file) return swd.file;
+  const R = swdReleaseFor(L);
+  if (!R || !R.full) throw new DapError('No release image is available here: choose a _full.bin file.');
+  const res = await fetch(R.full.url);
+  if (!res.ok) throw new DapError(`Download failed (HTTP ${res.status})`);
+  return { bytes: new Uint8Array(await res.arrayBuffer()), name: `${R.release.tag} ${R.full.variant === 'bench' ? 'bench' : 'field'} build, full image`, release: R.release };
+}
+
+async function runSwdOp(name, fn) {
+  if (ui.op) { note(`Busy with "${ui.op.name}"`, 'warn'); return { ok: false, busy: true }; }
+  const ac = new AbortController();
+  ui.op = { name, ac, cancellable: true, started: Date.now() };
+  renderOp(); updateControls();
+  const release = ui.link && ui.link.isOpen ? await ui.link.mutex.lock() : null;     // keep the serial side quiet meanwhile
+  try { return { ok: true, value: await fn(ac.signal) }; }
+  catch (error) {
+    if (error instanceof CancelledError) note(`${name}: cancelled`, 'warn');
+    else { note(`${name}: ${error.message}`, 'error'); if (!(error instanceof ProtocolError)) console.error(error); }
+    return { ok: false, error };
+  } finally { if (release) release(); ui.op = null; renderOp(); updateControls(); }
+}
+/** Flash an image over SWD, then find the restarted module again on the serial link (if one is open). */
+async function swdFlashImage(img, { onPhase = () => {}, onProgress = () => {} } = {}) {
+  const r = await runSwdOp('Flashing over SWD', signal => swdFlashStm32wl(swd.dap, img.bytes, { signal, underReset: $('#swdUnderReset').checked, onPhase, onProgress }));
+  if (r.ok) {
+    const v = r.value;
+    ui.flash = { ok: true, method: 'swd', name: img.name, size: v.size, crc: v.crc, verifyCrc: v.crc, durationMs: v.durationMs, oldFw: typeof ui.unit.fw === 'string' ? ui.unit.fw : null, newFw: null, startedAt: v.at, swd: v };
+    note(`SWD flash OK: ${img.name}, ${v.pages} pages erased, ${v.written} bytes written, verified, ${fmtDur(v.durationMs)}${v.underReset ? ' (connected under reset)' : ''}`);
+    for (const w of v.warnings) note(`SWD: ${w}`, 'warn');
+    if (swd.kind === 'sim') simAfterSwd();
+    await afterSwd();
+  } else ui.flash = { ok: false, method: 'swd', error: r.error ? r.error.message : 'cancelled' };
+  renderReport(); renderSwd();
+  return r;
+}
+/** Practice mode: the simulated module now runs what the simulated probe wrote, bootloader included. */
+function simAfterSwd() {
+  if (!ui.sim || !swd.io) return;
+  ui.sim.flash.set(swd.io.flash.subarray(0, APP_MAX_SIZE));
+  Object.assign(ui.sim.o, { noDfu: false, crashOnBoot: false });
+  $('#simNoDfu').checked = false; $('#simCrash').checked = false;
+  ui.sim.powerCycle();
+  if (ui.link) ui.link.markAsleep();
+}
+async function afterSwd() {
+  if (!(ui.link && ui.link.isOpen)) return;
+  ui.mode = null; renderConn();
+  await sleep(1500);
+  const r = await runOp('Finding the module again', signal => detectUnit(ui.link, { bauds: baudList(), signal }));
+  if (r.ok && r.value.mode === 'app') {
+    ui.mode = 'app'; ui.unit.fw = r.value.fw || ui.unit.fw;
+    if (ui.flash && ui.flash.method === 'swd') ui.flash.newFw = ui.unit.fw;
+    ui.selftest = null;
+    renderConn();
+    await refreshUnit();
+  } else if (r.ok && r.value.mode === 'bl') ui.mode = 'bl';
+  renderConn(); updateControls();
+}
+
+/* -- Pro view: Flash panel → Debug probe (SWD) -- */
+function renderSwd() {
+  if (!$('#swdBox')) return;
+  $('#swdProbe').textContent = swd.dap ? `Probe: ${swd.label}` : 'No probe connected.';
+  $('#btnSwdProbe').textContent = swd.dap ? 'Change probe…' : 'Choose probe…';
+  const R = swdReleaseFor(null);
+  $('#swdImg').textContent = swd.file ? `Image: ${swd.file.name}` : R && R.full ? `Image: ${R.release.tag} full image (app + bootloader) from GitHub Releases` : 'Image: choose a _full.bin file.';
+  $('#btnSwdFlash').disabled = !!ui.op || !(swd.file || (R && R.full));
+  $('#btnSwdForget').hidden = !swd.file;
+}
+function swdPhaseUi(p, msg) { $('#swdProg').hidden = false; $('#swdPhase').textContent = msg; if (p !== 'write' && p !== 'erase' && p !== 'verify') $('#swdBar').removeAttribute('value'); }
+function swdProgressUi(pr) {
+  const bar = $('#swdBar'); bar.max = pr.total; bar.value = pr.done;
+  $('#swdStats').textContent = `${pr.phase} ${Math.floor(pr.done * 100 / pr.total)} %`;
+}
+async function doSwdFlash() {
+  $('#swdResult').innerHTML = '';
+  let img;
+  try {
+    if (!swd.dap) await swdOpenProbe($('#swdKind').value);
+    img = await swdImageFor(null);
+  } catch (e) { setMsg('#swdMsg', swdProbeError(e), 'err'); renderSwd(); return; }
+  const plan = analyzeSwdImage(img.bytes);
+  if (!plan.ok) { setMsg('#swdMsg', plan.errors.join(' '), 'err'); return; }
+  const body = `Write ${img.name}\n${fmtBytes(img.bytes.length)} (${plan.erase.length} pages: app${plan.hasBootloader ? ' + bootloader' : ''})\nthrough ${swd.label}.\n\nThe credentials (0x0803B000) and their backup copy (0x08032800) are kept. The module restarts into the new firmware.`
+    + (img.release && img.release.warn ? `\n\nWARNING: ${img.release.warn}` : '');
+  if (!(await confirmDialog('Flash over SWD?', body, 'Flash'))) return;
+  setMsg('#swdMsg', '');
+  $('#swdBar').value = 0;
+  const r = await swdFlashImage(img, { onPhase: swdPhaseUi, onProgress: swdProgressUi });
+  const div = document.createElement('div');
+  div.className = 'verdict ' + (r.ok ? 'pass' : 'fail');
+  div.textContent = r.ok
+    ? `SWD flash OK: ${r.value.written} bytes, ${r.value.pages} pages, verified in ${fmtDur(r.value.durationMs)}${ui.unit.fw && ui.flash.newFw ? `. The module runs ${ui.flash.newFw}` : '. The module restarted into the new firmware'}.`
+    : `SWD flash failed: ${swdProbeError(r.error)}`;
+  $('#swdResult').append(div);
+  $('#swdPhase').textContent = r.ok ? 'Done.' : 'Stopped.';
+}
+function initSwd() {
+  $('#btnSwdProbe').addEventListener('click', async () => {
+    try { await swdOpenProbe($('#swdKind').value); setMsg('#swdMsg', ''); }
+    catch (e) { setMsg('#swdMsg', swdProbeError(e), 'err'); }
+  });
+  $('#swdKind').addEventListener('change', () => void swdCloseProbe());
+  $('#swdFile').addEventListener('change', async e => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    const plan = analyzeSwdImage(bytes);
+    if (!plan.ok) { setMsg('#swdMsg', `${f.name}: ${plan.errors.join(' ')}`, 'err'); return; }
+    swd.file = { bytes, name: f.name };
+    setMsg('#swdMsg', `${f.name}: ${plan.erase.length} pages${plan.hasBootloader ? ', with the bootloader' : ', no bootloader in it'}.`, plan.hasBootloader ? 'ok' : 'warn');
+    renderSwd();
+  });
+  $('#btnSwdForget').addEventListener('click', () => { swd.file = null; setMsg('#swdMsg', ''); renderSwd(); });
+  $('#btnSwdFlash').addEventListener('click', () => void doSwdFlash());
+  if ('usb' in navigator) navigator.usb.addEventListener('disconnect', e => { if (swd.io && swd.io.device === e.device) { note('The SWD probe was unplugged', 'warn'); Object.assign(swd, { io: null, dap: null, kind: null, label: '' }); renderSwd(); } });
+  renderSwd();
+}
+
 /* ---------- Voyage view (guided, step by step) ----------
  * A linear route through the same operations as the Pro view: seven "seas", one task each, in
  * production order. Each sea's status is derived from the live unit state (ui.*), so the two views
@@ -5193,7 +6044,7 @@ const SENSOR_INFO = {
 const K_VOYAGES = 'naiadTool.voyages.v1';
 const SHIP_SVG = '<svg viewBox="0 0 40 34" aria-hidden="true"><path d="M20 3 20 24 8 24Z" fill="#fff"/><path d="M22 7 22 24 33 24Z" fill="#ffe08a"/><path d="M4 26H36L31 32H9Z" fill="#8b4a22"/><path d="M20 2V26" stroke="#5b3a1a" stroke-width="1.5"/></svg>';
 
-const voy = { step: 0, busy: false, prog: null, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, src: null, manual: false, raf: 0, hailed: false, sang: false };
+const voy = { step: 0, busy: false, prog: null, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, src: null, manual: false, raf: 0, hailed: false, sang: false, swdOpen: false, swdKind: 'usb', swdDone: null };
 
 /** Small DOM builder: el('div', { class, text, onclick, ...attrs }, ...children) */
 function el(tag, props = {}, ...kids) {
@@ -5455,9 +6306,11 @@ const VVIEWS = {
         'Is the module powered (battery pack connected, or the bench supply on)?',
         'Wiring: adapter TX → P4 (PA3), adapter RX ← P5 (PA2), GND ↔ GND. Swapped TX and RX is the most common mistake.',
         'Use a 3.3 V CP2102, CH340 or FT232 adapter: Prolific PL2303 clones are blocked on Windows 11.',
-        'Still silent? The firmware may be damaged or the module asleep in a deep state: flash it with a debug probe (Pro view → Firmware flash → SWD), or ask for the recovery steps.',
+        'Still silent? The firmware may be damaged or the module asleep in a deep state: flash it with a debug probe (SWD).',
       ]));
-      out.push(el('div', { class: 'vactions' }, vBtn('Try again', async () => { await disconnect(false); await vConnect(); }, { primary: true })));
+      out.push(el('div', { class: 'vactions' }, vBtn('Try again', async () => { await disconnect(false); await vConnect(); }, { primary: true }),
+        voy.swdOpen ? null : vLink('Flash it with a debug probe (SWD)', () => { voy.swdOpen = true; vRender(); })));
+      if (voy.swdOpen) out.push(...vSwdPanel());
     }
     out.push(el('div', { class: 'vactions' }, vLink('Disconnect, or switch to another module', async () => { await disconnect(false); voy.err = {}; vRender(); })));
     return out;
@@ -5484,11 +6337,14 @@ const VVIEWS = {
     if (L && L.release.warn) out.push(vState('warn', 'Note on this release', L.release.warn));
     if (f !== 'current' && f !== 'naiad') {
       const acts = el('div', { class: 'vactions' });
-      if (L) acts.append(vBtn(`Install ${tag}`, install, { primary: true }));
-      acts.append(el('label', { class: 'btn', style: 'display:inline-flex;gap:6px;align-items:center' }, L ? 'Use a .bin file instead…' : 'Choose a firmware .bin…',
+      const needsProbe = !!(voy.err.firmware && voy.err.firmware.probe);      // the serial cable cannot do it: only the probe below
+      if (L && !needsProbe) acts.append(vBtn(`Install ${tag}`, install, { primary: true }));
+      if (!needsProbe) acts.append(el('label', { class: 'btn', style: 'display:inline-flex;gap:6px;align-items:center' }, L ? 'Use a .bin file instead…' : 'Choose a firmware .bin…',
         el('input', { type: 'file', accept: '.bin', hidden: true, onchange: e => { const file = e.target.files[0]; if (file) void vInstallFile(file); } })));
       if (f !== 'needs') acts.append(vLink('Keep the current firmware', () => { voy.skip.firmware = true; vRender(); }));
+      if (!voy.swdOpen && !(voy.err.firmware && voy.err.firmware.probe)) acts.append(vLink('Use a debug probe (SWD) instead', () => { voy.swdOpen = true; vRender(); }));
       out.push(acts);
+      if (voy.swdOpen || (voy.err.firmware && voy.err.firmware.probe)) out.push(...vSwdPanel());
     }
     return out;
   },
@@ -5681,8 +6537,8 @@ async function vFlash(bytes, name, expectFw) {
   if (err.noBootloader || /AT\+BOOT|1203/.test(err.message)) {
     ui.mode = 'app';
     voy.err.firmware = {
-      title: 'This module cannot update over the serial cable', text: 'Its factory firmware has no update mode. It needs a one-time update with a debug probe (SWD); after that, updates go over the cable.',
-      fixes: ['Pro view → Firmware flash → "Debug probe (SWD)", with a CMSIS-DAP probe on the module’s SWD pads.', 'Or ask the firmware team to flash it (make flash-full with a J-Link).'],
+      title: 'This module cannot update over the serial cable', probe: true,
+      text: 'Its factory firmware has no update mode. It needs a one-time update with a debug probe (SWD), below; after that, updates go over the cable.',
     };
   } else if (err.inBootloader) {
     ui.mode = 'bl';
@@ -5784,10 +6640,54 @@ async function vNextUnit() {
   await disconnect(false);
   if (sim) ensureSim(true);
   Object.assign(ui, { unit: {}, selftest: null, flash: null, creds: null, commission: null, wizard: null });
-  Object.assign(voy, { step: 0, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, manual: false, sang: false });
+  Object.assign(voy, { step: 0, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, manual: false, sang: false, swdOpen: false, swdDone: null });
   renderUnit(); renderSelftest(); renderCommission(); renderReport();
   note(sim ? 'New simulated module ready: hail it.' : 'Connect the next module, then hail it.');
   vRender();
+}
+
+/* ---- SWD from the Voyage view ---- */
+function vSwdPanel() {
+  const sim = ui.transport ? ui.transport.kind === 'sim' : voy.src === 'sim';
+  const R = swdReleaseFor(vLatest()), out = [];
+  if (voy.swdDone) out.push(vState('ok', 'Flashed over SWD', `${voy.swdDone.written} bytes written and verified${vConn() ? '' : '. Now connect the serial adapter and hail the module'}.`));
+  if (voy.err.swd) {
+    out.push(vState('storm', voy.err.swd.title, voy.err.swd.text));
+    out.push(vFixes(['Check the probe wiring: SWDIO, SWCLK, GND, NRST, and the 3.3 V reference.', 'Close J-Link or ST software that may be using the probe, then try again.', 'No reset line on the probe and the module asleep? Power-cycle the module and flash right away.']));
+  }
+  out.push(vState('info', 'Flash with a debug probe (SWD)', `Wire a CMSIS-DAP probe to the module’s SWD pads: SWDIO, SWCLK, GND, NRST and the 3.3 V reference. It writes ${R && R.full ? `${R.release.tag}: firmware and update bootloader` : 'the full firmware image'}. The module keeps its credentials.`));
+  if (!sim) {
+    out.push(el('div', { class: 'vchoices', role: 'group', 'aria-label': 'Probe type' },
+      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(voy.swdKind !== 'hid'), onclick: () => { voy.swdKind = 'usb'; vRender(); } },
+        el('b', { text: 'USB probe (CMSIS-DAP v2)' }), el('span', { text: 'Pico debugprobe, DAPLink, or a J-Link switched to CMSIS-DAPv2.' })),
+      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(voy.swdKind === 'hid'), onclick: () => { voy.swdKind = 'hid'; vRender(); } },
+        el('b', { text: 'Older HID probe (CMSIS-DAP v1)' }), el('span', { text: 'J-Link V10/V11 in CMSIS-DAPv1 mode, older DAPLink.' }))));
+  }
+  out.push(el('div', { class: 'vactions' }, vBtn(R && R.full ? `Flash ${R.release.tag} with the ${sim ? 'simulated ' : ''}probe` : 'Flash with the probe', () => vSwdFlash(sim ? 'sim' : voy.swdKind), { primary: true, disabled: !(R && R.full) && !swd.file })));
+  out.push(el('details', { class: 'help' }, el('summary', { text: 'Which probe, and how to switch a J-Link' }), vFixes([
+    'A Raspberry Pi Pico with the debugprobe firmware (about $5) works without drivers: GP2 = SWCLK, GP3 = SWDIO, GP1 = reset.',
+    'J-Link BASE/PLUS V12+: J-Link Configurator → right-click the probe → Configure → Boot mode = CMSIS-DAPv2, then replug (switch back for JLinkExe).',
+    'ST-Link does not speak CMSIS-DAP: use STM32CubeProgrammer for those.',
+  ])));
+  return out;
+}
+async function vSwdFlash(kind) {
+  await vDo('Flashing over SWD', async () => {
+    voy.err.swd = null; voy.swdDone = null;
+    vSetProg(kind === 'sim' ? 'Connecting the simulated probe…' : 'Choose the probe in the browser’s list…');
+    try { await swdOpenProbe(kind); } catch (e) { voy.err.swd = { title: 'The probe could not be opened', text: swdProbeError(e) }; return; }
+    let img;
+    try { vSetProg('Fetching the full firmware image…'); img = await swdImageFor(vLatest()); }
+    catch (e) { voy.err.swd = { title: 'No firmware image', text: e.message }; return; }
+    const pct = pr => Math.floor(pr.done * 100 / pr.total);
+    const r = await swdFlashImage(img, {
+      onPhase: (p, m) => vSetProg(m),
+      onProgress: pr => vSetProg(pr.phase === 'erase' ? `Clearing the old firmware: page ${pr.done + 1} of ${pr.total}…` : pr.phase === 'write' ? `Writing over SWD: ${pct(pr)} % · ⛵ making way` : `Checking what was written: ${pct(pr)} %`, pr.done, pr.total),
+    });
+    if (!r.ok) { voy.err.swd = { title: 'The SWD flash did not complete', text: swdProbeError(r.error) }; return; }
+    voy.swdDone = r.value; voy.err.firmware = null; voy.err.connect = null;
+    if (vConn() && ui.mode === 'app') voy.swdOpen = false;
+  });
 }
 
 /* ---- voyage music ----
@@ -6068,6 +6968,7 @@ function init() {
 
   setInterval(() => { if (ui.op) renderOp(); renderTime(); pollTick(); }, 1000);
   renderUnit(); renderSelftest(); renderCommission(); renderReport(); updateControls();
+  initSwd();
   initVoyage();
   note(`Naiad commissioning tool v${TOOL_VERSION} ready. Choose Serial port or Simulator, then Connect.`);
 }

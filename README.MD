@@ -251,6 +251,23 @@ when something fails; seas unlock in order and the chart tracks progress.
 An original jingle plays once when a voyage starts (Sound on/off; "Music…"
 can use an audio file of your own, kept in that browser only).
 
+*Debug probe (SWD)*: for modules the serial update cannot reach (factory
+firmware without the update bootloader, or a silent module), the Flash panel
+and the Voyage view flash the release's full image (app + bootloader) through
+a CMSIS-DAP probe on the module's SWD pads, from the browser: CMSIS-DAP v2 via
+WebUSB (no driver on Windows), v1 via WebHID. It connects under reset (NRST
+held low: reaches a module asleep in STOP2), freezes the watchdogs while the
+CPU is halted, refuses read-protected chips, CPU2 secure areas and
+write-protected pages, erases only the app (pages 0-99) and bootloader (102-117)
+regions (never the power log + credential mirror at 0x08032000-0x08032FFF or
+FLASH_USER at 0x0803B000), writes the vector table last, verifies by reading
+back, and restarts the module. Probes: a Raspberry Pi Pico running Raspberry
+Pi's debugprobe firmware (GP2 SWCLK, GP3 SWDIO, GP1 reset), DAPLink, or a
+J-Link BASE/PLUS V12+ switched to CMSIS-DAPv2 in J-Link Configurator (Boot
+mode; switch back for JLinkExe). ST-Link is not CMSIS-DAP: use
+STM32CubeProgrammer. A simulated probe is available for practice; the browser
+flasher is tested against it (not yet on a real probe).
+
 *Released firmware*: the Flash panel lists the Naiad images attached to the
 GitHub Releases (field and bench builds) and loads one with a click; the
 flash is then verified against the release's firmware ID (`Naiad vX.Y.Z (`).

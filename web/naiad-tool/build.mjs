@@ -15,8 +15,8 @@ rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 copyFileSync(src, join(dist, 'index.html'));
 
-// Workers static assets honour a _headers file. Serial access stays limited
-// to this origin; the page needs no other powerful features. The CSP lets
+// Workers static assets honour a _headers file. Serial, USB and HID access
+// (UART link, SWD probes) stay limited to this origin; the page needs no other powerful features. The CSP lets
 // the single-file page run and talk to its own Worker API only (connect-src
 // 'self': release list/images, team credentials store); no other host, no
 // forms, no framing, so nothing typed into the page can be sent elsewhere.
@@ -34,7 +34,7 @@ writeFileSync(join(dist, '_headers'), [
 	'/*',
 	'  X-Content-Type-Options: nosniff',
 	'  Referrer-Policy: no-referrer',
-	'  Permissions-Policy: serial=(self), camera=(), microphone=(), geolocation=()',
+	'  Permissions-Policy: serial=(self), usb=(self), hid=(self), camera=(), microphone=(), geolocation=()',
 	'  X-Frame-Options: DENY',
 	`  Content-Security-Policy: ${csp}`,
 	'',

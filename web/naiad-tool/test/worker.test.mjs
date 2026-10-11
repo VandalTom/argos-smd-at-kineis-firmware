@@ -152,7 +152,7 @@ await test('releases: Naiad app images only, no drafts or odd tags, notes per re
 	eq(r.status, 200, 'status');
 	eq(r.data.releases.map(x => x.tag), ['v1.0.1', 'v1.0.0'], 'tags');
 	const v101 = r.data.releases[0];
-	eq(v101.assets.map(a => a.variant), ['release', 'bench'], 'variants');
+	eq(v101.assets.map(a => `${a.variant}/${a.kind}`), ['release/app', 'bench/app', 'release/full'], 'app images + the full image for SWD');
 	eq(v101.assets[0].url, '/api/firmware/v1.0.1/naiad-carrier-release__argos-smd-at-kineis-firmware.bin', 'proxied url');
 	eq(v101.fwId, 'Naiad v1.0.1 (', 'fw id');
 	eq(v101.warn, '', 'no warning');
@@ -166,7 +166,8 @@ await test('releases: falls back to the Atom feed when the API is rate-limited',
 	net.apiStatus = 200;
 	eq(r.status, 200, 'status');
 	eq(r.data.releases.map(x => x.tag), ['v1.0.1', 'v1.0.0'], 'only tags with Naiad images, newest first');
-	eq(r.data.releases.map(x => x.assets.map(a => a.variant).join('+')), ['release+bench', 'release'], 'images found');
+	eq(r.data.releases.map(x => x.assets.filter(a => a.kind === 'app').map(a => a.variant).join('+')), ['release+bench', 'release'], 'images found');
+	eq(r.data.releases[0].assets.filter(a => a.kind === 'full').map(a => a.name), ['naiad-carrier-release__argos-smd-at-kineis-firmware_full.bin', 'naiad-carrier-bench__argos-smd-at-kineis-firmware_full.bin'], 'full images listed with them');
 	ok(/Do not deploy/.test(r.data.releases[1].warn), 'notes applied');
 });
 
@@ -176,6 +177,7 @@ await test('firmware proxy: serves release images, refuses anything else', async
 	eq(res.status, 200, 'status');
 	eq(res.headers.get('content-type'), 'application/octet-stream', 'type');
 	eq(Buffer.from(await res.arrayBuffer()).equals(Buffer.from(IMAGE)), true, 'bytes');
+	eq((await call(env, 'GET', '/api/firmware/v1.0.1/naiad-carrier-release__argos-smd-at-kineis-firmware_full.bin', { token: null })).status, 200, 'full image (SWD)');
 	for (const p of ['/api/firmware/v1.0.1/naiad-carrier-release__argos-smd-at-kineis-firmware.elf', '/api/firmware/main/naiad-carrier-release__argos-smd-at-kineis-firmware.bin',
 		'/api/firmware/v1.0.1/..%2F..%2Fsecret', '/api/firmware/v1.0.1/gui-pa-uart__argos-smd-at-kineis-firmware.bin']) {
 		eq((await call(env, 'GET', p, { token: null })).status, 404, p);

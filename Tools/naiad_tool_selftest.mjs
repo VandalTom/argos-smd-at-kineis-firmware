@@ -889,6 +889,107 @@ await test('Team vault: passphrase crypto (create, unlock, wrong passphrase, key
   eq((await P.vaultOpen(blob, 'correct horse battery staple')).data.records[0].key, key, 'offline copy opens with the team passphrase');
 });
 
+/* ---------- SWD flashing (CMSIS-DAP, simulated probe + STM32WL55) ---------- */
+function swdImage({ appSize = 120 * 1024, blSize = 20 * 1024, seed = 7 } = {}) {
+  const rnd = P.mulberry32(seed);
+  const img = new Uint8Array(0x33000 + blSize).fill(0xFF);
+  for (let i = 8; i < appSize; i++) img[i] = Math.floor(rnd() * 256);
+  P.putU32le(img, 0, 0x20008000); P.putU32le(img, 4, 0x080001C1);
+  for (let i = 0x33008; i < 0x33000 + blSize; i++) img[i] = Math.floor(rnd() * 256);
+  P.putU32le(img, 0x33000, 0x20008000); P.putU32le(img, 0x33004, 0x08033201);
+  return img;
+}
+function swdUnitFlash(seed = 3) {
+  // a module that already ran firmware: old app, the credential mirror page, FLASH_USER credentials
+  const f = new Uint8Array(P.WL.FLASH_SIZE).fill(0xFF), rnd = P.mulberry32(seed);
+  for (let i = 0; i < 0x20000; i++) f[i] = Math.floor(rnd() * 256);
+  for (let i = 0x32000; i < 0x33000; i++) f[i] = Math.floor(rnd() * 256);   // power log + credential mirror (pages 100-101)
+  for (let i = 0x3B000; i < 0x40000; i++) f[i] = Math.floor(rnd() * 256);   // FLASH_USER (pages 118-127)
+  return f;
+}
+const PROTECTED = [[0x32000, 0x33000], [0x3B000, 0x40000]];
+const sameRange = (a, b, s, e) => a.subarray(s, e).every((x, i) => x === b[s + i]);
+
+await test('SWD: image plan erases app + bootloader pages only, refuses images over the credential pages', async () => {
+  const plan = P.analyzeSwdImage(swdImage());
+  assert(plan.ok, plan.errors.join(' '));
+  assert(!plan.erase.some(p => p === 100 || p === 101 || p >= 118), 'never the mirror or FLASH_USER pages');
+  eq(plan.erase.filter(p => p <= 99).length, 100, 'the whole app region (pages 0-99), like make flash-full');
+  eq(plan.erase.filter(p => p >= 102).length, 16, 'the bootloader region (pages 102-117)');
+  assert(plan.hasBootloader, 'bootloader detected');
+  const bad = swdImage(); bad[0x32900] = 0x00;
+  assert(/page 101/.test(P.analyzeSwdImage(bad).errors.join()), 'data in the mirror page refused');
+  const big = new Uint8Array(0x3B010).fill(0xFF); big.set(swdImage().subarray(0, 0x3B000)); big[0x3B004] = 1;
+  assert(/page 118/.test(P.analyzeSwdImage(big).errors.join()), 'data in FLASH_USER refused');
+  const noVec = swdImage(); P.putU32le(noVec, 0, 0xFFFFFFFF);
+  assert(!P.analyzeSwdImage(noVec).ok, 'no vector table refused');
+});
+
+await test('SWD: flash a unit (connect under reset): image written, credentials + mirror kept, vector table last, verified, running', async () => {
+  const img = swdImage(), before = swdUnitFlash();
+  const sim = new P.SimDapProbe({ flash: before.slice() });
+  sim.acr |= P.WL.ACR_EMPTY;                                   // as after a boot with an erased page 0
+  const dap = new P.CmsisDap(sim);
+  const info = await dap.init();
+  eq(info.product, 'Simulated CMSIS-DAP', 'probe info');
+  const phases = [];
+  let frozen = null;
+  const res = await P.swdFlashStm32wl(dap, img, { onPhase: p => { if (phases[phases.length - 1] !== p) phases.push(p); if (p === 'write') frozen = sim.fz; } });
+  eq(frozen & P.WL.FZ_IWDG_WWDG, P.WL.FZ_IWDG_WWDG, 'watchdogs frozen while halted');
+  assert(sim.fz === 0 && sim.dbgmcuCr === 0, 'debug freeze / low-power debug released afterwards');
+  eq(sim.acr & P.WL.ACR_EMPTY, 0, 'empty-flash latch cleared, so the next boot runs the app');
+  assert(res.ok && res.verified && res.underReset, JSON.stringify(res));
+  eq(phases.join(','), 'connect,unlock,erase,write,vectors,verify,run', 'phases');
+  assert(sameRange(sim.flash, img, 0, 120 * 1024), 'app written');
+  assert(sameRange(sim.flash, img, 0x33000, 0x33000 + 20 * 1024), 'bootloader written');
+  for (const [s, e] of PROTECTED) assert(sameRange(sim.flash, before, s, e), `0x${(0x08000000 + s).toString(16)} untouched`);
+  assert(!sim.log.erased.some(p => p === 100 || p === 101 || p >= 118), 'protected pages never erased');
+  eq(sim.log.firstVectorWriteIndex, sim.log.programmed - 1, 'first double word programmed last');
+  assert(sim.locked && sim.running && !sim.halted, 'flash relocked, module running');
+  return `${res.written} B written in ${sim.log.programmed} double words, ${res.pages} pages erased`;
+});
+
+await test('SWD: a unit asleep in STOP2 needs nRESET; RDP, wrong chip and cancel are refused safely', async () => {
+  const img = swdImage({ appSize: 16 * 1024, blSize: 4096 });
+  // asleep, nRESET wired: connect under reset wakes it
+  let sim = new P.SimDapProbe({ stop2: true });
+  let dap = new P.CmsisDap(sim); await dap.init();
+  assert((await P.swdFlashStm32wl(dap, img, { verify: false })).ok, 'flashed through connect-under-reset');
+  // asleep, nRESET not wired: a clear error, nothing erased
+  sim = new P.SimDapProbe({ stop2: true, nresetWired: false });
+  dap = new P.CmsisDap(sim); await dap.init();
+  await rejects(P.swdFlashStm32wl(dap, img), e => /does not answer/.test(e.message), 'asleep without nRESET');
+  eq(sim.log.erased.length, 0, 'nothing erased');
+  // awake, nRESET not wired: plain attach + vector-catch reset
+  sim = new P.SimDapProbe({ nresetWired: false });
+  dap = new P.CmsisDap(sim); await dap.init();
+  const r = await P.swdFlashStm32wl(dap, img);
+  assert(r.ok && !r.underReset, 'plain attach path');
+  // read protection on: stop before erasing anything
+  sim = new P.SimDapProbe({ rdp: 0xBB, flash: swdUnitFlash() });
+  dap = new P.CmsisDap(sim); await dap.init();
+  await rejects(P.swdFlashStm32wl(dap, img), e => /read protection is on/.test(e.message), 'RDP 1 refused');
+  eq(sim.log.erased.length, 0, 'nothing erased under RDP');
+  // write protection over the app, or a CPU2 secure area: refused before any erase
+  for (const opt of [{ wrp1a: (5 << 16) | 2 }, { ese: true, sfr: 0xFFFFEF60 }]) {
+    sim = new P.SimDapProbe(opt);
+    dap = new P.CmsisDap(sim); await dap.init();
+    await rejects(P.swdFlashStm32wl(dap, img), e => /Stopped before writing/.test(e.message), JSON.stringify(opt));
+    eq(sim.log.erased.length, 0, 'nothing erased');
+  }
+  // another chip
+  sim = new P.SimDapProbe({ devId: 0x495 });
+  dap = new P.CmsisDap(sim); await dap.init();
+  await rejects(P.swdFlashStm32wl(dap, img), e => /Not an STM32WL55/.test(e.message), 'wrong device');
+  // cancel during the write: flash relocked, vector table not written (no half image boots)
+  sim = new P.SimDapProbe({ packet: 512 });
+  dap = new P.CmsisDap(sim); await dap.init();
+  const ac = new AbortController();
+  await rejects(P.swdFlashStm32wl(dap, swdImage(), { signal: ac.signal, onProgress: p => { if (p.phase === 'write' && p.done > 2000) ac.abort(); } }), e => e instanceof P.CancelledError, 'cancelled');
+  assert(sim.locked, 'flash relocked after cancel');
+  eq(P.u32le(sim.flash, 0), 0xFFFFFFFF, 'vector table still blank: the ROM bootloader starts next boot');
+});
+
 await test('Releases: the image offered first is the newest field build without a warning', async () => {
   const a = v => ({ name: `naiad-carrier-${v}__argos-smd-at-kineis-firmware.bin`, variant: v });
   const list = [
