@@ -23,6 +23,7 @@ Tools/*
 !Tools/dfu_tool.py
 !Tools/uart_dfu_check.py
 !Tools/rom_uart_flash.py
+!Tools/rom_uart_flash_selftest.py
 !Tools/naiad_tool.html
 !Tools/naiad_tool_selftest.mjs
 !Tools/naiad_power_model.py

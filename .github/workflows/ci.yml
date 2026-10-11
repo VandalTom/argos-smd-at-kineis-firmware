@@ -37,6 +37,25 @@ jobs:
           path: test-results.txt
 
   # ----------------------------------------------------------------------------
+  # 1b) Host tools: the UART flashers and the Naiad line station, each driven
+  #     against a simulated module over a fake serial port (no hardware).
+  # ----------------------------------------------------------------------------
+  host-tools:
+    name: Host tools (offline simulations)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pyserial
+        run: pip install pyserial==3.5
+      - name: ROM-bootloader flasher (AN3155 simulation)
+        run: python Tools/rom_uart_flash_selftest.py > rom.log && tail -1 rom.log
+      - name: Naiad line station (console + DFU simulation)
+        run: python Tools/naiad_station_selftest.py
+
+  # ----------------------------------------------------------------------------
   # 2) Build every allowed board/app variant (firmware images as artifacts).
   #    Each matrix entry is one independent job (fail-fast: false), so a single
   #    broken variant does not hide the others. To add a variant, add one line.
@@ -129,7 +148,7 @@ jobs:
   release:
     name: Publish Release
     runs-on: ubuntu-24.04
-    needs: [unit-tests, build]
+    needs: [unit-tests, host-tools, build]
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
