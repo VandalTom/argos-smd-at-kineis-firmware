@@ -173,8 +173,10 @@ static void parse_gsv(cc_nmea_parser_t *p)
 	int num = atoi(f[1]);
 	int idx = atoi(f[2]);
 
-	if (idx == 1)
+	if (idx == 1) {
 		p->gsv_cur = 0;
+		p->gsv_in_group = true;
+	}
 	for (int k = 4; k + 3 < n; k += 4) {
 		int cno = f[k + 3][0] ? atoi(f[k + 3]) : 0;
 
@@ -183,8 +185,14 @@ static void parse_gsv(cc_nmea_parser_t *p)
 		if (cno >= CC_GPS_SKY_MIN_CNO && p->gsv_cur < 255)
 			p->gsv_cur++;
 	}
-	if (idx == num)
+	/* Commit only groups seen from message 1: joining mid-group (listening
+	 * starts late, or a lost sentence) would under-count the sky */
+	if (idx == num && p->gsv_in_group) {
 		p->gsv_strong[slot] = p->gsv_cur;
+		p->gsv_in_group = false;
+		if (p->gsv_groups < 0xFFFFu)
+			p->gsv_groups++;
+	}
 	p->gsv_msgs++;
 }
 
@@ -200,7 +208,8 @@ uint8_t cc_nmea_sky_strong(const cc_nmea_parser_t *p)
 bool cc_nmea_no_sky(const cc_nmea_parser_t *p, uint32_t elapsed_ms, uint32_t check_ms,
                     uint8_t min_strong)
 {
-	return elapsed_ms >= check_ms && p->gsv_msgs > 0 && cc_nmea_sky_strong(p) < min_strong;
+	return elapsed_ms >= check_ms && p->gsv_groups >= CC_GPS_SKY_MIN_GROUPS &&
+	       cc_nmea_sky_strong(p) < min_strong;
 }
 
 static bool parse(cc_nmea_parser_t *p)

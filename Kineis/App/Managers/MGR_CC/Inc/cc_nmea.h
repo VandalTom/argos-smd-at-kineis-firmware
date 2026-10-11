@@ -46,6 +46,8 @@ typedef struct {
 	uint32_t gsv_msgs;      /**< checksum-valid GSV sentences this session */
 	uint8_t  gsv_strong[5]; /**< strong sats per constellation (GP, GL, GA, GB/BD, other) */
 	uint8_t  gsv_cur;       /**< strong sats accumulating in the group being received */
+	bool     gsv_in_group;  /**< the group being received started at its message 1 */
+	uint16_t gsv_groups;    /**< complete GSV groups this session (judgeable sky views) */
 	uint8_t  max_cno;       /**< best C/N0 seen this session, dBHz */
 } cc_nmea_parser_t;
 
@@ -62,9 +64,11 @@ const cc_gps_fix_t *cc_nmea_fix(const cc_nmea_parser_t *p);
 uint8_t cc_nmea_sky_strong(const cc_nmea_parser_t *p);
 
 /**
- * @brief True when this window can be abandoned: at least @p check_ms in,
- *        GSV is being received (otherwise we cannot judge — never abort),
- *        and fewer than @p min_strong satellites are tracked strongly.
+ * @brief True when this window can be abandoned: at least @p check_ms since
+ *        the receiver powered up, at least CC_GPS_SKY_MIN_GROUPS complete GSV
+ *        groups received (no GSV = cannot judge, never abort; listening may
+ *        start well after power-up, so one stray sentence is not a sky view),
+ *        and fewer than @p min_strong satellites tracked strongly.
  */
 bool cc_nmea_no_sky(const cc_nmea_parser_t *p, uint32_t elapsed_ms, uint32_t check_ms,
                     uint8_t min_strong);

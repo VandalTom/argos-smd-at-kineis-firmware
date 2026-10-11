@@ -29,9 +29,10 @@
 #define CC_ENABLE_AHT20     0
 
 /* ---- Timing (mission cadence) ------------------------------------------ */
-/* Base publish period per battery tier. One full cycle = WS85 sample ->
- * env sample -> GPS fix (every Nth cycle) -> pack -> TX, then wait out the
- * remainder of the period. Each cycle's actual period gets +0..CC_TX_JITTER_PCT%
+/* Base publish period per battery tier. One full cycle = battery + tier ->
+ * GPS power-up (when a fix is due; see CC_GPS_HOT_*) -> WS85 sample -> env
+ * sample -> listen for the GPS fix -> pack -> TX, then wait out the remainder
+ * of the period. Each cycle's actual period gets +0..CC_TX_JITTER_PCT%
  * of hardware-RNG jitter so TX times don't phase-lock against the Kineis
  * satellite pass schedule. */
 #define CC_TX_PERIOD_MS         420000UL  /**< 7 min base (bench: 60000UL) */
@@ -66,8 +67,9 @@
 #define CC_WS85_BAUD            115200UL  /**< sensor's stored link baud */
 #define CC_WS85_WAIT_MS         40000UL   /**< max wait for one CRC-valid broadcast
                                            *   (~30 s period on battery + margin) */
-#define CC_WS85_MAX_AGE_MS      60000UL   /**< cache max age before re-sampling
-                                           *   (TESTING value; field: 30 min) */
+#define CC_WS85_MAX_AGE_MS      60000UL   /**< cache max age before re-sampling:
+                                           *   shorter than any TX period, so every
+                                           *   packet carries this cycle's reading */
 #define CC_WS85_ADDR            0x85      /**< Modbus slave address */
 
 /* ---- GPS ---------------------------------------------------------------- */
@@ -80,6 +82,15 @@
 #define CC_GPS_MAX_DURATIONS    6         /**< adaptive ramp: max chained windows
                                            *   (6 x 90 s = 9 min ephemeris download) */
 #define CC_GPS_FIX_EVERY_N_TX   3         /**< scheduled fix every Nth transmit */
+#define CC_GPS_FIX_EVERY_N_TX_LOW 6       /**< LOW battery tier: sparser fixes, and no
+                                           *   every-cycle commissioning probes
+                                           *   (CRIT: no GPS at all) */
+/* Power-up timing (cc_gpsplan.h): the receiver normally powers at cycle start
+ * and acquires while WS85/env are read; once a recent fix has shown it
+ * hot-starts, it powers only after them (a head start would only burn GPS
+ * current through the WS85 wait). */
+#define CC_GPS_HOT_MS           10000UL   /**< fix this quick = hot start */
+#define CC_GPS_HOT_AGE_MS       (2UL * 3600UL * 1000UL) /**< older fix: expect warm/cold */
 /* Sky check (power): GPS is the dominant consumer, and indoors a window can
  * never succeed. After CC_GPS_SKY_CHECK_MS, if the receiver's GSV reports
  * fewer than CC_GPS_SKY_MIN_SATS satellites at >= CC_GPS_SKY_MIN_CNO dBHz, the
@@ -88,9 +99,11 @@
 #define CC_GPS_SKY_CHECK_MS     45000UL
 #define CC_GPS_SKY_MIN_SATS     2
 #define CC_GPS_SKY_MIN_CNO      20        /**< dBHz */
+#define CC_GPS_SKY_MIN_GROUPS   3         /**< complete GSV groups before judging
+                                           *   (~1 epoch of every constellation) */
 
 /* ---- Env sensors (I2C2) -------------------------------------------------- */
-#define CC_ENV_MAX_AGE_MS       60000UL   /**< shared cache max age (TESTING: 1 min) */
+#define CC_ENV_MAX_AGE_MS       60000UL   /**< shared cache max age: fresh every cycle */
 #define CC_BMP280_ADDR          0         /**< 0 = auto-probe 0x76 then 0x77 */
 #define CC_SHT45_ADDR           0x44      /**< SHT45-AD1B variants use 0x45/0x46 */
 

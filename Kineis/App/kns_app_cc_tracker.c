@@ -66,6 +66,7 @@
 #include "cc_commission.h"
 #include "cc_sleep.h"
 #include "cc_clock.h"
+#include "cc_gpsplan.h"
 #include "rtc.h"
 #include "mgr_cred.h"
 #include "cc_hw.h"
@@ -97,14 +98,15 @@ typedef enum {
 	CC_ST_SELFTEST,      /**< appended: keeps the evtlog/err numbering stable */
 	CC_ST_RESCUE,        /**< console-only after repeated failed boots */
 	CC_ST_NO_CREDS,      /**< unprovisioned: MAC never started, console up */
+	CC_ST_CYCLE_START,   /**< battery + tier, GPS power-up decision */
 } cc_state_t;
 
 static const char *const cc_state_names[] = {
 	"BOOT", "INIT_MAC", "WAIT_MAC_READY", "SAMPLE_WS85", "SAMPLE_ENV",
 	"SAMPLE_GPS", "TX_SEND", "WAIT_TX_DONE", "CYCLE_WAIT", "SELFTEST", "RESCUE",
-	"NO_CREDS",
+	"NO_CREDS", "CYCLE_START",
 };
-_Static_assert(sizeof(cc_state_names) / sizeof(cc_state_names[0]) == CC_ST_NO_CREDS + 1,
+_Static_assert(sizeof(cc_state_names) / sizeof(cc_state_names[0]) == CC_ST_CYCLE_START + 1,
 	"cc_state_names must list every cc_state_t");
 
 static cc_state_t cc_state;
@@ -284,6 +286,12 @@ static uint8_t gps_durations = 1; /**< windows next acquisition chains (1..MAX) 
 static uint8_t gps_skip_cycles;   /**< backoff skips after a miss */
 static uint8_t gps_countdown;     /**< scheduled skips until next attempt */
 static bool    gps_fast;          /**< this acquisition is a commissioning probe */
+static bool    gps_planned;       /**< this cycle tries for a fix */
+static bool    gps_early;         /**< ...powered at cycle start (cc_gpsplan.h) */
+static bool    gps_listening;     /**< GPS UART session open */
+static uint32_t gps_on_tick;      /**< receiver power-up: budget + sky check run from here */
+static uint32_t gps_listen_tick;  /**< GPS UART opened */
+static cc_gpsplan_t gps_plan_st;
 #endif
 
 /* ---- Helpers ---- */
@@ -530,18 +538,6 @@ static void i2c_sample(void)
 }
 #endif /* CC_ENABLE_ENV_I2C */
 
-/** The ENV phase: supply voltages (sampled even when the I2C bus is down —
- *  the battery tier depends on them), then the I2C sensors. */
-static __attribute__((unused)) void env_sample(void)
-{
-#if CC_ENABLE_ADC_SENSE
-	adc_sample(NULL, NULL);
-#endif
-#if CC_ENABLE_ENV_I2C
-	i2c_sample();
-#endif
-}
-
 #if CC_ENABLE_ENV_I2C
 static bool env_stale(void)
 {
@@ -555,9 +551,6 @@ static bool env_stale(void)
 #endif
 #if CC_ENABLE_AHT20
 	stale = stale || !cache_fresh(&aht_cache.meta, CC_ENV_MAX_AGE_MS);
-#endif
-#if CC_ENABLE_ADC_SENSE
-	stale = true; /* supply voltages: sample every cycle */
 #endif
 	return stale;
 }
@@ -651,12 +644,24 @@ static void build_fields(cc_payload_fields_t *f)
  *  tier on the NiMH reading (0 = not measured this cycle -> LOW, conservative). */
 static void cycle_snapshot(void)
 {
-	cc_tier_t was = tier.tier;
-
 	build_fields(&cycle_fields);
-	cycle_base_ms = cc_tier_update(&tier, cycle_fields.batt_mv, true);
+}
+
+/** Cycle start: read the pack and move the tier first — this cycle's tier
+ *  decides whether the GPS runs at all (0 mV = not measured -> LOW). */
+static void cycle_battery(void)
+{
+	cc_tier_t was = tier.tier;
+	uint16_t mv = 0;
+
+#if CC_ENABLE_ADC_SENSE
+	adc_sample(NULL, NULL);
+	if (cache_fresh(&adc_cache.meta, CC_ENV_MAX_AGE_MS))
+		mv = adc_cache.nimh_mv;
+#endif
+	cycle_base_ms = cc_tier_update(&tier, mv, true);
 	if (tier.tier != was)
-		MGR_LOG_INFO("[BAT] %umV: tier %s -> %s\r\n", cycle_fields.batt_mv,
+		MGR_LOG_INFO("[BAT] %umV: tier %s -> %s\r\n", mv,
 			cc_tier_name(was), cc_tier_name(tier.tier));
 }
 
@@ -712,11 +717,79 @@ static void quiesce_sessions(void)
 	ws_session_open = false;
 #endif
 #if CC_ENABLE_GPS
-	gps_budget_ms = 0; /* an interrupted acquisition restarts next cycle */
+	/* an interrupted acquisition restarts with the next cycle */
+	gps_planned = false;
+	gps_listening = false;
+	gps_budget_ms = 0;
 	CC_HW_gpsPowerOff();
 #endif
 	CC_HW_uartClose(); /* no-op when no session is open */
 }
+
+#if CC_ENABLE_GPS
+static void gps_power_up(void)
+{
+	cc_nmea_init(&nmea);
+	CC_HW_gpsPowerOn();
+	gps_on_tick = HAL_GetTick();
+	gps_listening = false;
+}
+
+/** Cycle start, after the battery reading: does this cycle try for a fix,
+ *  and does the receiver get its head start (cc_gpsplan.h)? */
+static void gps_plan(void)
+{
+	cc_comm_gps_t pol = cc_comm_gps_policy(&comm, powerup_ms(), CC_COMM_FAST_GPS_MS);
+
+	gps_planned = false;
+	if (tier.tier == CC_TIER_CRIT) {
+		MGR_LOG_DEBUG("[GPS] skipped (battery critical)\r\n");
+		return;
+	}
+	if (pol == CC_COMM_GPS_SKIP) {
+		MGR_LOG_DEBUG("[GPS] skipped (deployment burst)\r\n");
+		return;
+	}
+	/* LOW battery: no every-cycle commissioning probes; sparser fixes */
+	gps_fast = (pol == CC_COMM_GPS_FAST) && tier.tier != CC_TIER_LOW;
+	if (!gps_fast && gps_countdown > 0) {
+		gps_countdown--;
+		MGR_LOG_DEBUG("[GPS] scheduled skip (%u left)\r\n", gps_countdown);
+		return;
+	}
+	if (!gps_fast && gps_skip_cycles > 0) {
+		gps_skip_cycles--;
+		MGR_LOG_DEBUG("[GPS] backoff skip (%u left)\r\n", gps_skip_cycles);
+		return;
+	}
+	if (gps_fast) {
+		/* Waiting to be deployed: every cycle, one fixed window */
+		comm.gps_tries++;
+		gps_budget_ms = CC_COMM_GPS_WINDOW_MS;
+	} else {
+		gps_budget_ms = (uint32_t)gps_durations * CC_GPS_TTFF_BUDGET_MS;
+	}
+	gps_planned = true;
+	gps_early = cc_gpsplan_early(&gps_plan_st, HAL_GetTick(), CC_GPS_HOT_AGE_MS);
+	if (gps_early)
+		gps_power_up();
+	MGR_LOG_DEBUG("[GPS] attempt this cycle (budget %lus, %s)\r\n",
+		(unsigned long)(gps_budget_ms / 1000),
+		gps_early ? "powered now, acquiring while sensors are read" :
+		            "hot receiver: powered after the sensors");
+}
+
+/** This cycle's attempt is over (fix, miss or no UART): receiver off. */
+static void gps_end(void)
+{
+	if (gps_listening)
+		CC_HW_uartClose();
+	CC_HW_gpsPowerOff();
+	gps_planned = false;
+	gps_listening = false;
+	gps_budget_ms = 0;
+}
+#endif
 
 /* ---- Commissioning persistence (TAMP BKP12R: survives resets, not power loss) ---- */
 
@@ -845,7 +918,7 @@ static void fmt_env(char *d, size_t n, float tc, float hpa, float rh)
 static void selftest_start(uint8_t mask, bool at_boot)
 {
 	/* Started mid-cycle (before its TX): that cycle resumes afterwards */
-	st_resume_cycle = cc_state == CC_ST_SAMPLE_WS85 || cc_state == CC_ST_SAMPLE_ENV ||
+	st_resume_cycle = cc_state == CC_ST_CYCLE_START || cc_state == CC_ST_SAMPLE_WS85 || cc_state == CC_ST_SAMPLE_ENV ||
 	                  cc_state == CC_ST_SAMPLE_GPS || cc_state == CC_ST_TX_SEND;
 	quiesce_sessions();
 	cc_selftest_begin(&st, mask, at_boot);
@@ -874,7 +947,7 @@ static void selftest_finish(void)
 	if (st.at_boot) {
 		/* Boot run: straight into the first cycle (its GPS step is the
 		 * commissioning probe). Sensor caches are fresh from the test. */
-		transition_to(CC_ST_SAMPLE_WS85);
+		transition_to(CC_ST_CYCLE_START);
 		return;
 	}
 	if (transmitted) {
@@ -885,7 +958,7 @@ static void selftest_finish(void)
 	} else if (st_resume_cycle) {
 		/* It interrupted a cycle before its TX: finish that cycle (caches
 		 * are fresh from the test; an interrupted GPS window restarts) */
-		transition_to(CC_ST_SAMPLE_WS85);
+		transition_to(CC_ST_CYCLE_START);
 		return;
 	}
 	transition_to(CC_ST_CYCLE_WAIT);
@@ -1120,7 +1193,7 @@ static void after_mac_ready(void)
 	if (mask)
 		selftest_start(mask, at_boot);
 	else
-		transition_to(CC_ST_SAMPLE_WS85);
+		transition_to(CC_ST_CYCLE_START);
 }
 
 /* ---- Debug console ---- */
@@ -1483,6 +1556,16 @@ void KNS_APP_cc_tracker_loop(void)
 		}
 		return;
 
+	case CC_ST_CYCLE_START:
+		/* Battery first (this cycle's tier gates the GPS), then the GPS
+		 * decision: an early receiver acquires while WS85/env are read */
+		cycle_battery();
+#if CC_ENABLE_GPS
+		gps_plan();
+#endif
+		transition_to(CC_ST_SAMPLE_WS85);
+		return;
+
 	case CC_ST_SAMPLE_WS85:
 #if CC_ENABLE_WS85
 		/* Open the capture session once, on entry */
@@ -1525,62 +1608,35 @@ void KNS_APP_cc_tracker_loop(void)
 	case CC_ST_SAMPLE_ENV:
 #if CC_ENABLE_ENV_I2C
 		if (env_stale())
-			env_sample(); /* single blocking pass (~300 ms) */
+			i2c_sample(); /* single blocking pass (~300 ms) */
 		else
 			MGR_LOG_DEBUG("[ENV] caches fresh — skipping sample\r\n");
-#elif CC_ENABLE_ADC_SENSE
-		adc_sample(NULL, NULL); /* the battery tier needs it every cycle */
 #endif
+		/* Battery read at cycle start (cycle_battery), well inside its age */
 		cycle_snapshot();
 		transition_to(CC_ST_SAMPLE_GPS);
 		return;
 
 	case CC_ST_SAMPLE_GPS:
 #if CC_ENABLE_GPS
-		/* Schedule gates, evaluated once on entry (budget==0 marks entry) */
-		if (gps_budget_ms == 0) {
-			cc_comm_gps_t pol = cc_comm_gps_policy(&comm, powerup_ms(), CC_COMM_FAST_GPS_MS);
-
-			if (tier.tier == CC_TIER_CRIT) {
-				MGR_LOG_DEBUG("[GPS] skipped (battery critical)\r\n");
-				transition_to(CC_ST_TX_SEND);
-				return;
-			}
-			if (pol == CC_COMM_GPS_SKIP) {
-				MGR_LOG_DEBUG("[GPS] skipped (deployment burst)\r\n");
-				transition_to(CC_ST_TX_SEND);
-				return;
-			}
-			gps_fast = (pol == CC_COMM_GPS_FAST);
-			if (!gps_fast && gps_countdown > 0) {
-				gps_countdown--;
-				MGR_LOG_DEBUG("[GPS] scheduled skip (%u left)\r\n", gps_countdown);
-				transition_to(CC_ST_TX_SEND);
-				return;
-			}
-			if (!gps_fast && gps_skip_cycles > 0) {
-				gps_skip_cycles--;
-				MGR_LOG_DEBUG("[GPS] backoff skip (%u left)\r\n", gps_skip_cycles);
-				transition_to(CC_ST_TX_SEND);
-				return;
-			}
-			if (gps_fast) {
-				/* Waiting to be deployed: every cycle, one fixed window */
-				comm.gps_tries++;
-				gps_budget_ms = CC_COMM_GPS_WINDOW_MS;
-			} else {
-				gps_budget_ms = (uint32_t)gps_durations * CC_GPS_TTFF_BUDGET_MS;
-			}
-			cc_nmea_init(&nmea);
-			CC_HW_gpsPowerOn();
+		/* The attempt was planned at cycle start (gps_plan); an early
+		 * receiver has been acquiring through the WS85/env reads */
+		if (!gps_planned) {
+			transition_to(CC_ST_TX_SEND);
+			return;
+		}
+		if (!gps_listening) {
+			if (!gps_early)
+				gps_power_up();
 			if (!CC_HW_uartOpen(CC_UART_GPS)) {
-				CC_HW_gpsPowerOff();
-				gps_budget_ms = 0;
+				gps_end();
 				transition_to(CC_ST_TX_SEND);
 				return;
 			}
-			MGR_LOG_DEBUG("[GPS] acquiring (budget %lus)\r\n",
-				(unsigned long)(gps_budget_ms / 1000));
+			gps_listening = true;
+			gps_listen_tick = HAL_GetTick();
+			MGR_LOG_DEBUG("[GPS] listening (%lus since power-up)\r\n",
+				(unsigned long)((gps_listen_tick - gps_on_tick) / 1000));
 		}
 		{
 			uint8_t buf[64];
@@ -1593,25 +1649,28 @@ void KNS_APP_cc_tracker_loop(void)
 
 			if (fix && cc_nmea_fix(&nmea)->valid) {
 				const cc_gps_fix_t *g = cc_nmea_fix(&nmea);
+				uint32_t now = HAL_GetTick();
 
 				gps_lat = g->lat;
 				gps_lon = g->lon;
 				gps_ever_fixed = true;
 				clock_seed(g->epoch);
-				MGR_LOG_INFO("[GPS] fix %d.%06lu,%d.%06lu sats %u TTFF %lus\r\n",
+				MGR_LOG_INFO("[GPS] fix %d.%06lu,%d.%06lu sats %u, %lus after power-up (%s)\r\n",
 					(int)g->lat,
 					(unsigned long)((g->lat - (int)g->lat) * 1e6 * ((g->lat < 0) ? -1 : 1)),
 					(int)g->lon,
 					(unsigned long)((g->lon - (int)g->lon) * 1e6 * ((g->lon < 0) ? -1 : 1)),
 					g->sats,
-					(unsigned long)(state_elapsed_ms() / 1000));
-				CC_HW_uartClose();
-				CC_HW_gpsPowerOff();
+					(unsigned long)((now - gps_on_tick) / 1000),
+					gps_early ? "early start" : "late start");
+				cc_gpsplan_on_fix(&gps_plan_st, now, gps_early, now - gps_on_tick,
+					now - gps_listen_tick, CC_GPS_HOT_MS);
+				gps_end();
 				gps_durations = 1; /* hot from here */
 				gps_skip_cycles = 0;
-				gps_countdown = CC_GPS_FIX_EVERY_N_TX - 1;
-				gps_budget_ms = 0;
-				if (cc_comm_on_fix(&comm, HAL_GetTick()))
+				gps_countdown = ((tier.tier == CC_TIER_LOW) ? CC_GPS_FIX_EVERY_N_TX_LOW :
+				                 CC_GPS_FIX_EVERY_N_TX) - 1;
+				if (cc_comm_on_fix(&comm, now))
 					MGR_LOG_INFO("[COMM] first fix since power-up: deployment burst, "
 						"TX every %lus for %lu min\r\n",
 						(unsigned long)(CC_COMM_BURST_PERIOD_MS / 1000UL),
@@ -1620,26 +1679,27 @@ void KNS_APP_cc_tracker_loop(void)
 				return;
 			}
 		}
-		bool no_sky = cc_nmea_no_sky(&nmea, state_elapsed_ms(), CC_GPS_SKY_CHECK_MS,
-			CC_GPS_SKY_MIN_SATS);
+		/* Budget and sky check run from receiver power-up, not from when
+		 * listening began (cc_nmea_no_sky waits for whole GSV groups) */
+		uint32_t on_ms = HAL_GetTick() - gps_on_tick;
+		bool no_sky = cc_nmea_no_sky(&nmea, on_ms, CC_GPS_SKY_CHECK_MS, CC_GPS_SKY_MIN_SATS);
 
-		if (no_sky || state_elapsed_ms() > gps_budget_ms) {
+		if (no_sky || on_ms > gps_budget_ms) {
 			if (no_sky)
 				MGR_LOG_INFO("[GPS] no sky after %lus (%u strong sats, best %u dBHz) - window ended early\r\n",
-					(unsigned long)(state_elapsed_ms() / 1000),
+					(unsigned long)(on_ms / 1000),
 					cc_nmea_sky_strong(&nmea), nmea.max_cno);
 			MGR_LOG_DEBUG("[GPS] no fix in %lus (%lu sentences, %lu cs-err) — backoff %u\r\n",
-				(unsigned long)(state_elapsed_ms() / 1000),
+				(unsigned long)(on_ms / 1000),
 				(unsigned long)nmea.sentences,
 				(unsigned long)nmea.cs_errors, gps_durations);
-			CC_HW_uartClose();
-			CC_HW_gpsPowerOff();
+			cc_gpsplan_on_miss(&gps_plan_st);
+			gps_end();
 			if (!gps_fast) {
 				gps_skip_cycles = gps_durations;
 				if (gps_durations < CC_GPS_MAX_DURATIONS)
 					gps_durations++;
 			}
-			gps_budget_ms = 0;
 			transition_to(CC_ST_TX_SEND);
 		}
 #else
@@ -1733,7 +1793,7 @@ void KNS_APP_cc_tracker_loop(void)
 
 		cycle_start_tick = HAL_GetTick();
 		cycle_period_ms = 0;
-		transition_to(CC_ST_SAMPLE_WS85);
+		transition_to(CC_ST_CYCLE_START);
 		return;
 	}
 

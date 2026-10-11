@@ -151,6 +151,18 @@ the 24-byte payload v3 and transmits it as one LDA2 frame. Cadence is
 battery-tiered (7/15/30 min + 0..30 % jitter). Configuration is compile-time
 (`Kineis/App/Managers/MGR_CC/Inc/cc_conf.h`).
 
+**Cycle order (shortest wake)** — battery reading and tier first; if a fix
+is due, the GPS is powered straight away and acquires while the WS85 (up to
+~35 s for its broadcast) and BME280 are read, then its NMEA is checked (USART1
+serves one sensor at a time; the receiver needs no listener to acquire), then
+the frame goes out. Sensor readings are taken every cycle (1 min freshness
+limit), so each packet carries readings from right before it. Once a recent
+fix has shown the receiver hot-starts (fix within 10 s), it is powered after
+the sensors instead: a head start would only burn GPS current through the
+WS85 wait. GPS cadence by battery: a fix every 3rd transmission at
+HIGH/MID; every 6th and no every-cycle commissioning probes at LOW; none at
+CRIT.
+
 **Critical battery** — a NiMH pack measured below 2.10 V (1.05 V/cell) puts
 the unit in the `CRIT` tier: no GPS, no deployment burst, one transmission
 every 2 h (still carrying the voltage) until the pack recovers past
@@ -191,9 +203,10 @@ MAC's TX_DONE for one real frame (no satellite pass needed). Report:
 deployed later with no button. The first GPS fix since power-up is the
 "outdoors now" signal: the unit transmits every 60 s (+0..5 s jitter) for
 30 min so it is heard quickly, then runs normally. Until that fix, GPS is
-tried every cycle for the first 48 h (one window, no backoff) and the window
-ends after 45 s if the receiver tracks fewer than two satellites above
-20 dBHz (indoors). The "done" flag lives in a TAMP backup register: it
+tried every cycle for the first 48 h after power-up (one window, no backoff;
+not at LOW or CRIT battery) and the window ends 45 s after GPS power-up if
+the receiver tracks fewer than two satellites above 20 dBHz (indoors),
+judged over at least 3 complete GSV groups. The "done" flag lives in a TAMP backup register: it
 survives watchdog/soft resets and updates and is cleared only by real power
 loss.
 

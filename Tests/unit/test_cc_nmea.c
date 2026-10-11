@@ -148,8 +148,43 @@ void test_gsv_indoor_no_sky(void)
 	feed_sentence(&p, "GLGSV,1,1,02,65,40,100,,72,25,210,12");
 	ASSERT_EQ(1, cc_nmea_sky_strong(&p));          /* only the 21 dBHz one */
 	ASSERT_EQ(21, p.max_cno);
+	ASSERT_EQ(2, p.gsv_groups);
+	ASSERT_FALSE(cc_nmea_no_sky(&p, 45000, 45000, 2)); /* < MIN_GROUPS: not judged yet */
+	feed_sentence(&p, "GPGSV,2,1,06,02,45,120,18,05,30,200,,12,60,045,15,15,10,300,");
+	feed_sentence(&p, "GPGSV,2,2,06,24,20,080,21,29,05,150,");
 	ASSERT_FALSE(cc_nmea_no_sky(&p, 30000, 45000, 2)); /* too early to judge */
 	ASSERT_TRUE(cc_nmea_no_sky(&p, 45000, 45000, 2));
+	TEST_PASS();
+}
+
+/** Listening starts late (GPS powered while the WS85 was read): already past
+ *  the check time, the first sentences must not end the window. */
+void test_gsv_late_listen_not_premature(void)
+{
+	cc_nmea_parser_t p;
+
+	cc_nmea_init(&p);
+	/* joined mid-group: message 2 of 2 alone is not a sky view */
+	feed_sentence(&p, "GPGSV,2,2,06,24,20,080,21,29,05,150,");
+	ASSERT_EQ(0, p.gsv_groups);
+	ASSERT_EQ(0, cc_nmea_sky_strong(&p));
+	ASSERT_FALSE(cc_nmea_no_sky(&p, 60000, 45000, 2));
+	/* one complete group: still not enough to judge */
+	feed_sentence(&p, "GLGSV,1,1,02,65,40,100,,72,25,210,12");
+	ASSERT_FALSE(cc_nmea_no_sky(&p, 60000, 45000, 2));
+	TEST_PASS();
+}
+
+/** A group joined mid-way is not committed: it would under-count the sky. */
+void test_gsv_partial_group_ignored(void)
+{
+	cc_nmea_parser_t p;
+
+	cc_nmea_init(&p);
+	feed_sentence(&p, "GPGSV,1,1,02,02,45,120,31,05,30,200,27"); /* 2 strong GP */
+	feed_sentence(&p, "GPGSV,2,2,06,24,20,080,,29,05,150,");     /* tail, no head */
+	ASSERT_EQ(2, cc_nmea_sky_strong(&p));
+	ASSERT_EQ(1, p.gsv_groups);
 	TEST_PASS();
 }
 
@@ -212,6 +247,8 @@ int main(void)
 	RUN_TEST(test_hemispheres);
 	RUN_TEST(test_noise_immunity);
 	RUN_TEST(test_gsv_indoor_no_sky);
+	RUN_TEST(test_gsv_late_listen_not_premature);
+	RUN_TEST(test_gsv_partial_group_ignored);
 	RUN_TEST(test_gsv_outdoor_sky);
 	RUN_TEST(test_gsv_group_replaces);
 	RUN_TEST(test_gsv_nmea41_signal_id);
