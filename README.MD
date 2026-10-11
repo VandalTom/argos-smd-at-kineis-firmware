@@ -212,6 +212,17 @@ by itself (`+PROV=OK`) once ID, ADDR and SECKEY are present. Build with
 `CC_ALLOW_TEST_CREDS=1` (cc_conf.h) to transmit under the test identity on a
 bench.
 
+**Production line** — `Tools/naiad_station.py` does one unit per command:
+flash (optional), firmware check, provisioning with read-back and key CRC,
+self-test, commissioning flag, and a JSON report; exit code 0 = PASS. Sensor
+items a jig can't exercise are downgraded with `--ignore GPS,WS85`.
+`Tools/naiad_station_selftest.py` runs it against a simulated unit (no
+hardware).
+
+```bash
+python Tools/naiad_station.py --port COM5 --flash build/argos-smd-at-kineis-firmware.bin --id 279665 --addr 1A2B3C4D --seckey <32 hex> --ignore GPS,WS85 --commission skip
+```
+
 **Update and recovery path**
 
 1. Normal update: `Tools/uart_dfu_check.py --port <port> --flash build/argos-smd-at-kineis-firmware.bin`
