@@ -105,7 +105,10 @@
 /* ---- TX ------------------------------------------------------------------ */
 #define CC_TX_RESULT_TIMEOUT_MS 180000UL  /**< wait for MAC TX_DONE (3 min) */
 #define CC_MAC_READY_TIMEOUT_MS 30000UL
-#define CC_MAC_INIT_MAX_RETRIES 3
+#define CC_MAC_INIT_MAX_RETRIES 3         /**< init timeouts or MAC errors, then reset */
+#define CC_TX_FAIL_RESET_COUNT  3         /**< cycles in a row whose frame never
+                                           *   completed (timeout/abort/MAC error/
+                                           *   queue refused) -> reset the stack */
 
 /* ---- Self-test (boot + AT+SELFTEST; see cc_selftest.h) ---------------------
  * Production-line fast: GPS proves NMEA arrives (no fix), TX passes on the
@@ -147,8 +150,17 @@
 #define CC_STOP2_MIN_MS        2000UL      /**< shorter waits just WFI */
 #define CC_STOP2_MAX_MS        3600000UL   /**< per call; WUT range and the
                                                 <24 h tick compensation */
-#define CC_CONSOLE_AWAKE_MS    30000UL     /**< no STOP2 this long after console
-                                                activity or a console-RX wake */
+#define CC_CONSOLE_AWAKE_MS    30000UL     /**< no STOP2 this long after a
+                                                console line */
+#define CC_CONSOLE_EDGE_HOLD_MS 5000UL     /**< after a bare RX-edge wake: time
+                                                for the host's line to arrive */
+/* RX-wake storm guard (cc_rxwake.h): an unconnected console line can pick up
+ * noise edges (bench-confirmed on UW_DOPPLER) that would keep the unit out of
+ * STOP2. This many edge wakes with no console line disarm the wake for the
+ * backoff, doubling per storm up to the cap; any real line resets it. */
+#define CC_RX_WAKE_STORM_COUNT    6
+#define CC_RX_WAKE_BACKOFF_MS     (30UL * 60UL * 1000UL)
+#define CC_RX_WAKE_BACKOFF_MAX_MS (4UL * 3600UL * 1000UL)
 
 /* ---- Rescue mode (keeps the UART update path alive through a bad build) ----
  * Every boot bumps a counter in TAMP BKP13R; a boot that stays up

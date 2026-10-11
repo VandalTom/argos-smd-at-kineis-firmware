@@ -23,6 +23,7 @@
 #include "mcu_misc.h"
 #include "cc_conf.h"
 #include "cc_hw.h"
+#include "cc_rxwake.h"
 #include "cc_sleep.h"
 
 extern void MX_GPIO_Init(void);
@@ -31,6 +32,7 @@ static volatile bool s_rx_edge;
 static uint32_t s_awake_until;     /**< 0 = no hold-off */
 static uint32_t s_total_ms;
 static uint32_t s_count;
+static cc_rxwake_t s_rxwake;   /**< zero-init = armed, no history */
 
 /* PA3 falling edge = console RX while asleep. Armed only during STOP2
  * (overrides the weak default; MGR_REED, the other EXTI3 user, is
@@ -56,6 +58,12 @@ static bool console_awake(void)
 		return true;
 	s_awake_until = 0u;
 	return false;
+}
+
+void CC_SLEEP_consoleLine(void)
+{
+	cc_rxwake_on_line(&s_rxwake);
+	CC_SLEEP_holdAwake(CC_CONSOLE_AWAKE_MS);
 }
 
 uint32_t CC_SLEEP_totalMs(void)
@@ -91,13 +99,27 @@ static void restore_clock(void)
 	(void)HAL_RCC_ClockConfig(&clk, flat);
 }
 
+/** RTC liveness. RSF only clears with the RTC write protection off (HAL
+ *  note on HAL_RTC_WaitForSynchro; RTC_ICSR is write-protected): with it on,
+ *  the clear is ignored, RSF stays set and a dead clock passes. Unlocked,
+ *  RSF re-sets within ~2 RTCCLK cycles on a live clock; a dead one times out. */
+static bool rtc_ticking(void)
+{
+	HAL_StatusTypeDef st;
+
+	__HAL_RTC_WRITEPROTECTION_DISABLE(&hrtc);
+	st = HAL_RTC_WaitForSynchro(&hrtc);
+	__HAL_RTC_WRITEPROTECTION_ENABLE(&hrtc);
+	return st == HAL_OK;
+}
+
 static bool arm_wakeup_timer(uint32_t ms)
 {
 	HAL_StatusTypeDef st;
 
 	/* A dead LSE leaves the RTC frozen: STOP2 would never wake (and the
 	 * IWDG is frozen too). Same liveness gate + LSI fallback as UW. */
-	if (HAL_RTC_WaitForSynchro(&hrtc) != HAL_OK) {
+	if (!rtc_ticking()) {
 		SystemClock_armLsiFallback();
 		MGR_LOG_ERR("[SLP] RTC not ticking (LSE dead?) - reset to LSI fallback\r\n");
 		MGR_ERR_logAndReset(ERR_RTC_DEAD);
@@ -163,24 +185,32 @@ bool CC_SLEEP_stop2Until(uint32_t deadline)
 	CC_HW_init();
 	(void)HAL_SUBGHZ_DeInit(&hsubghz);
 
+	bool rx_wake_armed = cc_rxwake_armed(&s_rxwake, HAL_GetTick());
+
 	{
+		/* Console RX held high either way; the falling-edge wake only
+		 * while the storm guard allows it (cc_rxwake.h) */
 		GPIO_InitTypeDef rx_wake = {0};
 
 		rx_wake.Pin = GPIO_PIN_3;
-		rx_wake.Mode = GPIO_MODE_IT_FALLING;
+		rx_wake.Mode = rx_wake_armed ? GPIO_MODE_IT_FALLING : GPIO_MODE_INPUT;
 		rx_wake.Pull = GPIO_PULLUP;
 		HAL_GPIO_Init(GPIOA, &rx_wake);
 		__HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_3);
 		s_rx_edge = false;
-		HAL_NVIC_SetPriority(EXTI3_IRQn, 5, 0);
-		HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+		if (rx_wake_armed) {
+			HAL_NVIC_SetPriority(EXTI3_IRQn, 5, 0);
+			HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+		}
 	}
 
 	/* CPU2 must not cap the system low-power mode */
 	MODIFY_REG(PWR->C2CR1, PWR_C2CR1_LPMS, PWR_LOWPOWERMODE_SHUTDOWN);
 
 	__disable_irq();
-	bool skip = MGR_AT_CMD_isPendingAt() || KNS_Q_isEvtInSomeQ();
+	/* s_rx_edge: an edge between arming and here already ran the ISR
+	 * (pending bit cleared), so WFI would not see it */
+	bool skip = MGR_AT_CMD_isPendingAt() || KNS_Q_isEvtInSomeQ() || s_rx_edge;
 
 	HAL_SuspendTick();
 	LPM_saveRtcTime();
@@ -209,7 +239,13 @@ bool CC_SLEEP_stop2Until(uint32_t deadline)
 	}
 	if (s_rx_edge) {
 		s_rx_edge = false;
-		CC_SLEEP_holdAwake(CC_CONSOLE_AWAKE_MS);
+		/* Briefly, until a line proves a host (CC_SLEEP_consoleLine) */
+		if (cc_rxwake_on_edge(&s_rxwake, HAL_GetTick(), CC_RX_WAKE_STORM_COUNT,
+		    CC_RX_WAKE_BACKOFF_MS, CC_RX_WAKE_BACKOFF_MAX_MS))
+			CC_SLEEP_holdAwake(CC_CONSOLE_EDGE_HOLD_MS);
+		else
+			MGR_LOG_WARN("[SLP] console RX wake storm (no host) - wake disarmed %lus\r\n",
+				(unsigned long)(s_rxwake.backoff_ms / 1000UL));
 	}
 
 	HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);

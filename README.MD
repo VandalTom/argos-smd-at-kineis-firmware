@@ -154,8 +154,9 @@ battery-tiered (7/15/30 min + 0..30 % jitter). Configuration is compile-time
 **Critical battery** — a NiMH pack measured below 2.10 V (1.05 V/cell) puts
 the unit in the `CRIT` tier: no GPS, no deployment burst, one transmission
 every 2 h (still carrying the voltage) until the pack recovers past
-2.15 V. The boot self-test skips its TX on such a pack so brownout resets
-can't turn into a transmit loop. A reading below 1.0 V counts as "no
+2.15 V. A boot counts as a transmission (the boot self-test skips its TX and
+the first frame waits the full 2 h), so brownout resets under PA load can't
+turn into a transmit loop. A reading below 1.0 V counts as "no
 sense" (unfitted or failed divider) and keeps the normal `LOW` tier, so a
 broken sense line never silences a unit.
 
@@ -247,9 +248,19 @@ python Tools/naiad_station.py --port COM5 --flash build/argos-smd-at-kineis-firm
 4. Last resort: BOOT0 test pad high at power-up + `Tools/rom_uart_flash.py`,
    or SWD (`make flash-full`).
 
+**Self-healing** — 3 cycles in a row whose frame never completes (MAC
+timeout, abort, error, queue refused) or 3 MAC init failures reset the unit
+instead of idling at full power; before every STOP2 the RTC must prove it is
+ticking (a dead 32 kHz crystal resets onto the LSI fallback rather than
+sleeping forever).
+
 **Power** — `Tools/naiad_power_model.py` ranks the consumers from a tagged
 assumption table (replace with rail measurements). GPS acquisition and the
-27 dBm TX dominate once the MCU sleeps in STOP2 between phases.
+27 dBm TX dominate once the MCU sleeps in STOP2 between phases. A console
+RX edge wakes a sleeping unit for 5 s, a console line keeps it awake 30 s;
+6 edge wakes without a line (noise on an unconnected RX) disarm the RX wake
+for 30 min, doubling to 4 h, so a floating console can't hold it out of
+STOP2.
 
 ## Board Variants
 

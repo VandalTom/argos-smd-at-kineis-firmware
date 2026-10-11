@@ -463,6 +463,18 @@ uint32_t CC_HW_rand32(void)
 	RNG_HandleTypeDef hrng = {0};
 	uint32_t v = 0;
 
+	/* RNG kernel clock: RNGSEL resets to PLLQ, an output this firmware never
+	 * enables (and at PLLQ/2 = 64 MHz it would exceed the RNG's 48 MHz).
+	 * MSI (4 MHz, on from reset and the STOP2 wake clock) is in range and
+	 * above HCLK/32 as clock-error detection requires. */
+	if (!__HAL_RCC_GET_FLAG(RCC_FLAG_MSIRDY)) {
+		uint32_t t0 = HAL_GetTick();
+
+		__HAL_RCC_MSI_ENABLE();
+		while (!__HAL_RCC_GET_FLAG(RCC_FLAG_MSIRDY) && HAL_GetTick() - t0 < 3u)
+			;
+	}
+	__HAL_RCC_RNG_CONFIG(RCC_RNGCLKSOURCE_MSI);
 	__HAL_RCC_RNG_CLK_ENABLE();
 	hrng.Instance = RNG;
 	hrng.Init.ClockErrorDetection = RNG_CED_ENABLE;

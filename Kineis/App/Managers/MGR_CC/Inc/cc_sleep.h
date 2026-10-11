@@ -7,8 +7,10 @@
  *
  * Wake sources: the RTC wake-up timer (the deadline) and a falling edge on
  * PA3 = console RX (the first byte is lost — the host sends a CR/LF
- * preamble). After a console wake, or any console line, the unit stays out
- * of STOP2 for CC_CONSOLE_AWAKE_MS so a dialogue stays interactive.
+ * preamble). A console wake holds the unit awake CC_CONSOLE_EDGE_HOLD_MS for
+ * the host's line; every console line holds it CC_CONSOLE_AWAKE_MS so a
+ * dialogue stays interactive. Edge wakes that never bring a line (noise on
+ * an unconnected RX) trip the storm guard in cc_rxwake.h.
  *
  * HAL_GetTick() is corrected from the RTC across the sleep (lpm.c
  * LPM_saveRtcTime / LPM_compensateTick), so every tick-based timer in the
@@ -34,6 +36,11 @@ bool CC_SLEEP_stop2Until(uint32_t deadline);
 
 /** Keep the unit out of STOP2 for @p ms (console activity). */
 void CC_SLEEP_holdAwake(uint32_t ms);
+
+/** A console line arrived: a host is present. Holds the unit awake
+ *  CC_CONSOLE_AWAKE_MS and clears the RX-wake storm guard (cc_rxwake.h);
+ *  a bare RX-edge wake alone only holds CC_CONSOLE_EDGE_HOLD_MS. */
+void CC_SLEEP_consoleLine(void);
 
 /** STOP2 accounting since boot (RTC-measured). */
 uint32_t CC_SLEEP_totalMs(void);

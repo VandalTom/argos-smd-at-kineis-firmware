@@ -121,6 +121,10 @@ static uint32_t cycle_start_tick;   /**< period is measured from cycle start */
 static uint32_t cycle_period_ms;    /**< this cycle's tier base + jitter */
 static uint8_t  mac_init_retries;
 static uint32_t tx_count;           /**< TX attempts since boot (GPS schedule) */
+static uint8_t  tx_fail_streak;     /**< cycles in a row whose frame never completed */
+static bool     tx_queue_refused;   /**< last push_tx failed at the MAC queue */
+static bool     tx_since_boot;      /**< a frame went out since boot */
+static uint32_t last_tx_cycle;      /**< cycle_start_tick of that frame's cycle */
 
 static cc_tier_state_t tier;
 static uint32_t cycle_base_ms = CC_TX_PERIOD_MS; /**< tier base from this cycle's reading */
@@ -163,6 +167,7 @@ static cc_comm_t comm;
 
 static void after_mac_ready(void);
 static void tx_finished(void);
+static void tx_outcome(bool ok);
 
 /* ---- Wall clock (GPS time anchored to the RTC calendar; see cc_clock.h) ----
  * Unix = anchor + RTC seconds. The anchor and its complement live in TAMP
@@ -211,6 +216,17 @@ static void clock_restore(void)
 	clk_anchor = a;
 	clk_valid = true;
 	MGR_LOG_INFO("[CLK] kept across reset: unix %lu\r\n", (unsigned long)clock_now());
+}
+
+/** Time since power-up, not since the last reset: the RTC calendar starts at
+ *  2000-01-01 00:00 when the backup domain powers up and runs through every
+ *  reset (the commissioning windows are defined from power-up). Saturates
+ *  instead of wrapping at 49.7 days. */
+static uint32_t powerup_ms(void)
+{
+	uint32_t s = rtc_seconds();
+
+	return (s >= 0xFFFFFFFFUL / 1000UL) ? 0xFFFFFFFFUL : s * 1000UL;
 }
 
 /* ---- Freshness-gated caches (WS85-Tracker Cached<T> pattern) ---- */
@@ -324,10 +340,12 @@ static bool process_mac_events(void)
 		case KNS_MAC_TX_DONE:
 			MGR_LOG_DEBUG("[CC] TX done (#%lu)\r\n", (unsigned long)tx_count);
 			MGR_EVTLOG_log(EVT_TX_DONE, (uint16_t)tx_count);
-			if (cc_state == CC_ST_SELFTEST)
+			if (cc_state == CC_ST_SELFTEST) {
 				st_tx_evt = 1;
-			else if (cc_state == CC_ST_WAIT_TX_DONE)
+			} else if (cc_state == CC_ST_WAIT_TX_DONE) {
+				tx_outcome(true);
 				tx_finished();
+			}
 			break;
 
 		case KNS_MAC_TX_TIMEOUT:
@@ -336,10 +354,12 @@ static bool process_mac_events(void)
 				(evt.id == KNS_MAC_TX_ABORT) ? "abort" : "timeout");
 			MGR_ERR_log(ERR_TX_TIMEOUT);
 			MGR_EVTLOG_log(EVT_TX_TIMEOUT, (uint16_t)tx_count);
-			if (cc_state == CC_ST_SELFTEST)
+			if (cc_state == CC_ST_SELFTEST) {
 				st_tx_evt = (evt.id == KNS_MAC_TX_ABORT) ? -2 : -1;
-			else if (cc_state == CC_ST_WAIT_TX_DONE)
+			} else if (cc_state == CC_ST_WAIT_TX_DONE) {
+				tx_outcome(false);
 				tx_finished();
+			}
 			break;
 
 		case KNS_MAC_ERROR:
@@ -348,10 +368,18 @@ static bool process_mac_events(void)
 			if (cc_state == CC_ST_SELFTEST) {
 				st_tx_evt = -3;
 				st_tx_status = evt.status;
-			} else if (cc_state == CC_ST_WAIT_TX_DONE)
+			} else if (cc_state == CC_ST_WAIT_TX_DONE) {
+				tx_outcome(false);
 				tx_finished();
-			else if (cc_state == CC_ST_WAIT_MAC_READY)
+			} else if (cc_state == CC_ST_WAIT_MAC_READY) {
+				/* Counted like an init timeout: a deterministic init
+				 * error must end in a reset, not an INIT<->ERROR spin
+				 * that never idles */
+				MGR_ERR_log(ERR_MAC_INIT_FAIL);
+				if (++mac_init_retries >= CC_MAC_INIT_MAX_RETRIES)
+					MGR_ERR_logAndReset(ERR_MAC_INIT_FAIL);
 				transition_to(CC_ST_INIT_MAC);
+			}
 			break;
 
 		default:
@@ -656,8 +684,10 @@ static bool push_tx(const uint8_t payload[CC_PAYLOAD_BYTES])
 	memcpy(appEvt.data_ctxt.usrdata, payload, CC_PAYLOAD_BYTES);
 	appEvt.data_ctxt.usrdata_bitlen = CC_PAYLOAD_BYTES * 8; /* 192 = LDA2 */
 
+	tx_queue_refused = false;
 	if (KNS_Q_push(KNS_Q_DL_APP2MAC, (void *)&appEvt) != KNS_STATUS_OK) {
 		MGR_LOG_DEBUG("[CC] TX push failed\r\n");
+		tx_queue_refused = true;
 		return false;
 	}
 	return true;
@@ -727,9 +757,42 @@ static void tx_finished(void)
 	transition_to(CC_ST_CYCLE_WAIT);
 }
 
+/** A cycle's frame completed (TX_DONE) or never did (timeout, abort, MAC
+ *  error, queue refused). A MAC that keeps failing is wedged — and a stuck
+ *  modemOn also refuses STOP2 — so reset rather than idle at full power
+ *  until the 14-day reboot. Radio-config refusals (not LDA2) don't count:
+ *  a reset can't fix those. */
+static void tx_outcome(bool ok)
+{
+	if (ok) {
+		tx_fail_streak = 0;
+		return;
+	}
+	if (++tx_fail_streak >= CC_TX_FAIL_RESET_COUNT) {
+		MGR_LOG_ERR("[CC] %u TX failures in a row - resetting the radio stack\r\n",
+			(unsigned)tx_fail_streak);
+		MGR_ERR_logAndReset(ERR_TX_TIMEOUT);
+	}
+}
+
+/** CRIT tier: at most one frame per CC_TX_PERIOD_CRIT_MS, measured between
+ *  cycle starts, with boot counting as a frame — a flat pack that browned
+ *  out under PA load must not transmit again straight after the reset. */
+static bool crit_tx_due(void)
+{
+	return cycle_start_tick - (tx_since_boot ? last_tx_cycle : 0u) >= CC_TX_PERIOD_CRIT_MS;
+}
+
+static void note_tx(void)
+{
+	tx_since_boot = true;
+	last_tx_cycle = cycle_start_tick;
+}
+
 /* ---- Self-test ---- */
 
 static bool st_tx_pushed; /**< this run put a frame on the air (counts as the cycle's TX) */
+static bool st_resume_cycle; /**< this run interrupted a cycle before its TX */
 
 static uint32_t st_elapsed(void)
 {
@@ -781,6 +844,9 @@ static void fmt_env(char *d, size_t n, float tc, float hpa, float rh)
 
 static void selftest_start(uint8_t mask, bool at_boot)
 {
+	/* Started mid-cycle (before its TX): that cycle resumes afterwards */
+	st_resume_cycle = cc_state == CC_ST_SAMPLE_WS85 || cc_state == CC_ST_SAMPLE_ENV ||
+	                  cc_state == CC_ST_SAMPLE_GPS || cc_state == CC_ST_TX_SEND;
 	quiesce_sessions();
 	cc_selftest_begin(&st, mask, at_boot);
 	st_tx_pushed = false;
@@ -815,6 +881,12 @@ static void selftest_finish(void)
 		/* The self-test frame was this cycle's transmission. */
 		cycle_start_tick = HAL_GetTick();
 		cycle_period_ms = 0;
+		note_tx();
+	} else if (st_resume_cycle) {
+		/* It interrupted a cycle before its TX: finish that cycle (caches
+		 * are fresh from the test; an interrupted GPS window restarts) */
+		transition_to(CC_ST_SAMPLE_WS85);
+		return;
 	}
 	transition_to(CC_ST_CYCLE_WAIT);
 }
@@ -1100,7 +1172,7 @@ static void send_commission(void)
 {
 	char line[80];
 
-	cc_comm_format(line, sizeof(line), &comm, HAL_GetTick(), HAL_GetTick(),
+	cc_comm_format(line, sizeof(line), &comm, HAL_GetTick(), powerup_ms(),
 		CC_COMM_FAST_GPS_MS, CC_COMM_BURST_MS, CC_COMM_BURST_PERIOD_MS);
 	MCU_AT_CONSOLE_send("%s", line);
 	bMGR_AT_CMD_logSucceedMsg();
@@ -1150,7 +1222,7 @@ static void console_poll(void)
 	while ((line = MGR_AT_CMD_popNextAt()) != NULL) {
 		const char *l = (const char *)line;
 
-		CC_SLEEP_holdAwake(CC_CONSOLE_AWAKE_MS);
+		CC_SLEEP_consoleLine();
 
 		switch (cc_console_classify(l)) {
 		case CC_CON_BOOT:
@@ -1456,6 +1528,8 @@ void KNS_APP_cc_tracker_loop(void)
 			env_sample(); /* single blocking pass (~300 ms) */
 		else
 			MGR_LOG_DEBUG("[ENV] caches fresh — skipping sample\r\n");
+#elif CC_ENABLE_ADC_SENSE
+		adc_sample(NULL, NULL); /* the battery tier needs it every cycle */
 #endif
 		cycle_snapshot();
 		transition_to(CC_ST_SAMPLE_GPS);
@@ -1465,7 +1539,7 @@ void KNS_APP_cc_tracker_loop(void)
 #if CC_ENABLE_GPS
 		/* Schedule gates, evaluated once on entry (budget==0 marks entry) */
 		if (gps_budget_ms == 0) {
-			cc_comm_gps_t pol = cc_comm_gps_policy(&comm, HAL_GetTick(), CC_COMM_FAST_GPS_MS);
+			cc_comm_gps_t pol = cc_comm_gps_policy(&comm, powerup_ms(), CC_COMM_FAST_GPS_MS);
 
 			if (tier.tier == CC_TIER_CRIT) {
 				MGR_LOG_DEBUG("[GPS] skipped (battery critical)\r\n");
@@ -1578,6 +1652,13 @@ void KNS_APP_cc_tracker_loop(void)
 		cc_payload_fields_t f;
 		uint8_t payload[CC_PAYLOAD_BYTES];
 
+		if (tier.tier == CC_TIER_CRIT && !crit_tx_due()) {
+			MGR_LOG_INFO("[BAT] critical: TX held (one per %lu min, boot counts as one)\r\n",
+				(unsigned long)(CC_TX_PERIOD_CRIT_MS / 60000UL));
+			transition_to(CC_ST_CYCLE_WAIT);
+			return;
+		}
+
 		f = cycle_fields;
 		fields_late(&f);
 		cc_payload_pack(payload, &f);
@@ -1587,8 +1668,11 @@ void KNS_APP_cc_tracker_loop(void)
 
 		if (push_tx(payload)) {
 			tx_count++;
+			note_tx();
 			transition_to(CC_ST_WAIT_TX_DONE);
 		} else {
+			if (tx_queue_refused)
+				tx_outcome(false);
 			tx_finished();
 		}
 		return;
@@ -1602,6 +1686,7 @@ void KNS_APP_cc_tracker_loop(void)
 			MGR_LOG_DEBUG("[CC] TX result timeout\r\n");
 			MGR_ERR_log(ERR_TX_TIMEOUT);
 			MGR_EVTLOG_log(EVT_TIMEOUT, (uint16_t)CC_ST_WAIT_TX_DONE);
+			tx_outcome(false);
 			tx_finished();
 		}
 		return;
