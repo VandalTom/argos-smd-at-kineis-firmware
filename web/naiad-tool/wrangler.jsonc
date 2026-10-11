@@ -10,6 +10,13 @@
     // domain) is HTTPS, so the tool can open serial ports from there.
     "name": "naiad-tool",
     "compatibility_date": "2026-07-01",
+    // Public address (custom domain: Cloudflare creates the DNS record and
+    // certificate on deploy; the zone is in the same account). The
+    // workers.dev address stays on as a fallback.
+    "routes": [
+        { "pattern": "arribada.siliconvandals.com", "custom_domain": true }
+    ],
+    "workers_dev": true,
     "assets": {
         "directory": "./dist"
     }
