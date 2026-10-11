@@ -91,13 +91,14 @@ typedef enum {
 	CC_ST_WAIT_TX_DONE,
 	CC_ST_CYCLE_WAIT,
 	CC_ST_SELFTEST,      /**< appended: keeps the evtlog/err numbering stable */
+	CC_ST_RESCUE,        /**< console-only after repeated failed boots */
 } cc_state_t;
 
 static const char *const cc_state_names[] = {
 	"BOOT", "INIT_MAC", "WAIT_MAC_READY", "SAMPLE_WS85", "SAMPLE_ENV",
-	"SAMPLE_GPS", "TX_SEND", "WAIT_TX_DONE", "CYCLE_WAIT", "SELFTEST",
+	"SAMPLE_GPS", "TX_SEND", "WAIT_TX_DONE", "CYCLE_WAIT", "SELFTEST", "RESCUE",
 };
-_Static_assert(sizeof(cc_state_names) / sizeof(cc_state_names[0]) == CC_ST_SELFTEST + 1,
+_Static_assert(sizeof(cc_state_names) / sizeof(cc_state_names[0]) == CC_ST_RESCUE + 1,
 	"cc_state_names must list every cc_state_t");
 
 static cc_state_t cc_state;
@@ -128,6 +129,8 @@ typedef enum {
 static cc_act_t pending_act;        /**< AT+RESET / AT+BOOT waiting for radio idle */
 static bool mac_ready;              /**< MAC init OK at least once since boot */
 static bool boot_selftest_done;
+static bool boot_stable;            /**< up CC_BOOT_STABLE_MS: failed-boot counter cleared */
+static bool rescue;                 /**< console-only boot (see cc_conf.h rescue mode) */
 
 typedef enum {
 	STS_GPS, STS_WS85, STS_ENV, STS_ADC, STS_TX, STS_TX_WAIT, STS_DONE,
@@ -650,6 +653,21 @@ static void comm_flag_write(bool done)
 	TAMP->BKP12R = done ? CC_COMM_DONE_MAGIC : 0u;
 }
 
+/* ---- Failed-boot counter (TAMP BKP13R; see cc_conf.h rescue mode) ---- */
+
+static uint32_t boot_attempts_read(void)
+{
+	uint32_t v = TAMP->BKP13R;
+
+	return ((v & 0xFFFF0000UL) == CC_BOOT_COUNT_MAGIC) ? (v & 0xFFFFUL) : 0u;
+}
+
+static void boot_attempts_write(uint32_t n)
+{
+	HAL_PWR_EnableBkUpAccess();
+	TAMP->BKP13R = CC_BOOT_COUNT_MAGIC | (n & 0xFFFFUL);
+}
+
 /** The cycle's TX attempt ended (done, timeout, error or push failure). */
 static void tx_finished(void)
 {
@@ -978,6 +996,7 @@ static void after_mac_ready(void)
 static void enter_dfu(void)
 {
 	quiesce_sessions();
+	boot_attempts_write(0); /* deliberate: not a failed boot */
 	MCU_MISC_turn_off_pa(); /* bootloader never drives PA_PSU_EN (upstream 9e0ef44) */
 	MGR_LOG_INFO("[CC] entering UART DFU bootloader\r\n");
 	MGR_EVTLOG_log(EVT_SHUTDOWN, 0xDFU);
@@ -993,6 +1012,7 @@ static void enter_dfu(void)
 static void do_reset(void)
 {
 	quiesce_sessions();
+	boot_attempts_write(0); /* deliberate: not a failed boot */
 	MGR_LOG_INFO("[CC] reset requested from console\r\n");
 	MGR_EVTLOG_log(EVT_SHUTDOWN, 0x5EU);
 	MGR_LOG_flush_all();
@@ -1082,7 +1102,7 @@ static void console_poll(void)
 		case CC_CON_SELFTEST: {
 			uint8_t m = cc_selftest_parse_mask(cc_console_params(l));
 
-			if (!m) {
+			if (!m || rescue) {
 				bMGR_AT_CMD_logFailedMsg(ERROR_UNKNOWN_AT_CMD);
 			} else if (cc_state == CC_ST_SELFTEST) {
 				MCU_AT_CONSOLE_send("+SELFTEST=RUNNING\r\n");
@@ -1184,6 +1204,27 @@ void KNS_APP_cc_tracker_init(void)
 	MGR_EVTLOG_log(EVT_BOOT, 0);
 	MGR_ERR_init();
 
+	{
+		uint32_t attempts = boot_attempts_read() + 1;
+
+		boot_attempts_write(attempts);
+		if (attempts > CC_RESCUE_AFTER_FAILED_BOOTS) {
+			/* Repeated failed boots: skip everything that could be what
+			 * crashes (sensor bring-up, ADC, MAC) and keep only the console,
+			 * so the unit stays updatable over UART. */
+			rescue = true;
+			MGR_LOG_ERR("[CC] %lu failed boots in a row - RESCUE: console only for %lu min\r\n",
+				(unsigned long)(attempts - 1),
+				(unsigned long)(CC_RESCUE_WINDOW_MS / 60000UL));
+			MCU_AT_CONSOLE_send("+RESCUE=failed_boots=%lu,window_s=%lu\r\n",
+				(unsigned long)(attempts - 1),
+				(unsigned long)(CC_RESCUE_WINDOW_MS / 1000UL));
+			cc_comm_init(&comm, comm_flag_read());
+			transition_to(CC_ST_RESCUE);
+			return;
+		}
+	}
+
 	CC_HW_init();
 	MGR_BAT_init();
 	cc_tier_init(&tier);
@@ -1213,7 +1254,21 @@ void KNS_APP_cc_tracker_loop(void)
 	console_poll();
 	service_requests();
 
+	if (!boot_stable && HAL_GetTick() >= CC_BOOT_STABLE_MS) {
+		boot_stable = true;
+		boot_attempts_write(0);
+	}
+
 	switch (cc_state) {
+
+	case CC_ST_RESCUE:
+		if (HAL_GetTick() >= CC_RESCUE_WINDOW_MS) {
+			MGR_LOG_INFO("[CC] rescue window over - rebooting for a normal attempt\r\n");
+			boot_attempts_write(0);
+			MGR_LOG_flush_all();
+			NVIC_SystemReset();
+		}
+		return;
 
 	case CC_ST_SELFTEST:
 		selftest_run();

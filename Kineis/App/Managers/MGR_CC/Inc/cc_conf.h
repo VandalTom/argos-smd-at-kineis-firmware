@@ -110,6 +110,18 @@
 #define CC_COMM_GPS_WINDOW_MS    120000UL  /**< fixed window per fast attempt */
 #define CC_COMM_DONE_MAGIC       0xC0331551UL /**< TAMP BKP12R value = commissioned */
 
+/* ---- Rescue mode (keeps the UART update path alive through a bad build) ----
+ * Every boot bumps a counter in TAMP BKP13R; a boot that stays up
+ * CC_BOOT_STABLE_MS clears it, and so do deliberate resets (AT+RESET, DFU
+ * entry). After CC_RESCUE_AFTER_FAILED_BOOTS failed boots in a row the next
+ * boot skips sensors and radio and runs only the console (AT+BOOT, AT+RESET,
+ * queries, credential writes) for CC_RESCUE_WINDOW_MS, then retries normally.
+ * Power loss clears the counter. */
+#define CC_BOOT_STABLE_MS            90000UL
+#define CC_RESCUE_AFTER_FAILED_BOOTS 3
+#define CC_RESCUE_WINDOW_MS          (10UL * 60UL * 1000UL)
+#define CC_BOOT_COUNT_MAGIC          0xB0070000UL /**< BKP13R high half; low half = count */
+
 /* ---- Payload timestamp epoch --------------------------------------------- */
 #define CC_TS_EPOCH_UNIX        1735689600UL /**< 2025-01-01T00:00:00Z */
 #define CC_TZ_OFFSET_MIN        0            /**< 0 = UTC */

@@ -23,7 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>  /* snprintf in HardFault_Handler */
-#if defined(USE_UW_DOPPLER_APP) || defined(USE_DOPPLER_APP)
+#if defined(USE_UW_DOPPLER_APP) || defined(USE_DOPPLER_APP) || defined(USE_CC_TRACKER_APP)
 #include "mgr_err.h"
 #include "mgr_log.h"
 extern volatile uint32_t g_uw_doppler_state_for_err;
@@ -64,8 +64,9 @@ extern volatile uint32_t g_uw_doppler_state_for_err;
   */
 static void Core_Error_Handler(void)
 {
-#if defined(USE_UW_DOPPLER_APP)
-  /* Tracker must always reset — never stay stuck */
+#if defined(USE_UW_DOPPLER_APP) || defined(USE_CC_TRACKER_APP)
+  /* Tracker must always reset — never stay stuck (a field unit has no reset
+   * button, and a hang locks out the UART update path too) */
   __disable_irq();
   NVIC_SystemReset();
 #elif defined(DEBUG)
@@ -128,7 +129,7 @@ void NMI_Handler(void)
  * pattern in LR: bit 2 = 1 → PSP was active, 0 → MSP. Bare-metal builds
  * almost always use MSP, but the runtime check is cheap. */
 
-#if defined(USE_UW_DOPPLER_APP) || defined(USE_DOPPLER_APP)
+#if defined(USE_UW_DOPPLER_APP) || defined(USE_DOPPLER_APP) || defined(USE_CC_TRACKER_APP)
 
 static void fault_handler_c(uint32_t *frame, uint8_t fault_type, const char *tag)
 {
