@@ -298,6 +298,30 @@ make flash-bl
 make flash-full
 ```
 
+#### Over UART (console pads P5/P4 = PA2/PA3)
+Updates go through the DFU bootloader: `AT+BOOT` hands over to it, then the
+app region is rewritten and CRC-checked. Needs `pip install pyserial`.
+```bash
+python Tools/uart_dfu_check.py --port COM3                      # read-only: enter DFU and come back
+python Tools/uart_dfu_check.py --port COM3 --backup app_old.bin  # also save the current app
+python Tools/uart_dfu_check.py --port COM3 --flash build/argos-smd-at-kineis-firmware.bin
+```
+- Works with GUI builds (9600 baud) and CC_TRACKER builds (115200; `AT+BOOT`
+  waits for any TX in progress and replies `+BOOT=PENDING` meanwhile).
+- UART GUI builds must use `LPM=STOP` (or lighter): with the default
+  `LPM=SHUTDOWN` the module idles into shutdown, where the UART cannot wake it.
+- First time only, a module without the DFU bootloader (e.g. factory firmware
+  without `AT+BOOT`) needs the full image (`make ... full`) once, either with
+  `make flash-full` (J-Link) or over the same UART through ST's ROM bootloader:
+  hold the module's BOOT0 test pad (top side, next to R3) at VDD through ~1 kΩ
+  while powering up, run
+  `python Tools/rom_uart_flash.py --port COM3 --wait 240 --flash build/argos-smd-at-kineis-firmware_full.bin`,
+  then release BOOT0 and power-cycle. FLASH_USER (credentials) is never erased.
+- Both flashers write the vector table (first 240 B) **last**. If an update is
+  interrupted (power loss), the first flash word is still erased, so at the next
+  power-up the STM32WL boots ST's ROM bootloader by itself (empty-flash rule) —
+  recover with the `rom_uart_flash.py` command above, no BOOT0 needed.
+
 #### Using VS Code Tasks
 - **Build Full (App + Bootloader)** - Compile everything
 - **Flash Full (App + Bootloader)** - Build and flash combined image

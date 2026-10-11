@@ -21,6 +21,8 @@ Tools/*
 !Tools/merge_firmware.py
 !Tools/create_dfu.py
 !Tools/dfu_tool.py
+!Tools/uart_dfu_check.py
+!Tools/rom_uart_flash.py
 Bootloader/build/*
 Tests/report/
 .cache/
