@@ -170,7 +170,7 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
   </div>
 </header>
 <noscript><div class="banner">This tool needs JavaScript.</div></noscript>
-<div id="noSerial" class="banner" hidden>Web Serial is not available in this browser. Use Chrome or Edge on a desktop computer, at <a href="https://naiad-tool.seb-f80.workers.dev">naiad-tool.seb-f80.workers.dev</a> (or this file opened from file:// or http://localhost). The Simulator still works here.</div>
+<div id="noSerial" class="banner" hidden>Web Serial is not available in this browser. Use Chrome or Edge on a desktop computer, at <a href="https://arribada.siliconvandals.com">arribada.siliconvandals.com</a> (or this file opened from file:// or http://localhost). The Simulator still works here.</div>
 <div id="rescueBanner" class="banner act" hidden role="alert">
   <span id="rescueText">Unit is in rescue mode: reflash the firmware.</span>
   <button class="btn small" id="btnGoFlash">Go to Flash</button>
@@ -252,7 +252,7 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
     <details class="help">
       <summary>Help: browser, adapter, wiring, recovery</summary>
       <ul>
-        <li><b>Browser:</b> Chrome or Edge on a desktop computer (Web Serial), at <a href="https://naiad-tool.seb-f80.workers.dev">naiad-tool.seb-f80.workers.dev</a>. Offline, open this file directly (file://) or serve it with <code>python -m http.server</code> and use http://localhost. Firefox and Safari don't support Web Serial.</li>
+        <li><b>Browser:</b> Chrome or Edge on a desktop computer (Web Serial), at <a href="https://arribada.siliconvandals.com">arribada.siliconvandals.com</a>. Offline, open this file directly (file://) or serve it with <code>python -m http.server</code> and use http://localhost. Firefox and Safari don't support Web Serial.</li>
         <li><b>Adapter:</b> a 3.3 V USB-UART adapter (CP2102, CH340 or FT232). Prolific PL2303TA/HXA clone adapters don't work on Windows 11, because the driver blocks them.</li>
         <li><b>Wiring:</b> adapter TX → module P4 (PA3), adapter RX ← module P5 (PA2), GND ↔ GND. Never use 5 V signalling.</li>
         <li><b>Baud:</b> the app console runs at 115200 (older builds 9600). The bootloader may run at 9600 or 115200. Auto mode tries both.</li>

@@ -247,6 +247,7 @@ locked after 15 min idle; exports: encrypted vault file (move between
 stations / backup), CSV without keys, CSV with keys (confirmed). The hosted
 page's Content-Security-Policy forbids all network requests
 (`connect-src 'none'`), so nothing typed or imported can leave the browser.
+Live at **https://arribada.siliconvandals.com** (fallback https://naiad-tool.seb-f80.workers.dev).
 Hosted on Cloudflare Workers (static assets, `web/naiad-tool/`): Workers
 Builds deploys every push to `naiad` (root `web/naiad-tool`, build
 `npm run build`, deploy `npx wrangler deploy`).
