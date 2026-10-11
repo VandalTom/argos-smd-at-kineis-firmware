@@ -37,10 +37,9 @@
     // Variables added in the dashboard (e.g. ACCESS_*) survive deploys.
     "keep_vars": true,
     // The team vault's database (Storage & Databases > D1 > naiad-vault).
-    // Until it is bound the vault answers 503 "not set up"; the tables are
-    // created by the Worker on first use.
-    // "d1_databases": [
-    //     { "binding": "DB", "database_name": "naiad-vault", "database_id": "<id>" }
-    // ],
+    // The tables are created by the Worker on first use.
+    "d1_databases": [
+        { "binding": "DB", "database_name": "naiad-vault", "database_id": "666f75f1-3262-4f77-b1d2-1d39dc02dca7" }
+    ],
     "observability": { "enabled": true }
 }

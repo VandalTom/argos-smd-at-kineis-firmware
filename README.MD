@@ -272,8 +272,8 @@ JWT check). Workers Builds deploys every push to `naiad` (root
 `npm test` there runs the Worker against mocked GitHub/Access and SQLite.
 The page's CSP allows network requests to its own origin only.
 Vault setup, once (Cloudflare account admin):
-1. Storage & Databases → D1 → create `naiad-vault`; put its ID in
-   `wrangler.jsonc` (`d1_databases`, binding `DB`).
+1. Storage & Databases → D1 → `naiad-vault` (done 2026-10-11; bound in
+   `wrangler.jsonc` as `DB`).
 2. Zero Trust → Integrations → Identity providers → add Google (OAuth client
    from Google Cloud Console; redirect URI
    `https://<team>.cloudflareaccess.com/cdn-cgi/access/callback`).
