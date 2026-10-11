@@ -125,6 +125,15 @@ jobs:
           - { name: doppler-op-uart,       app: DOPPLER, board: SMD_OP,       comm: UART, mac: BASIC, debug: 0, extra: LPM=SHUTDOWN }
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # tags + history: the Naiad firmware ID counts commits since v<NAIAD_VERSION>
+      - name: Naiad release tag matches NAIAD_VERSION
+        if: matrix.app == 'CC_TRACKER' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          want="v$(tr -d '[:space:]' < NAIAD_VERSION)"
+          if [ "${GITHUB_REF_NAME}" != "$want" ]; then
+            echo "::error::release tag ${GITHUB_REF_NAME} does not match NAIAD_VERSION ($want)"; exit 1
+          fi
       - uses: ./.github/actions/setup-arm-gcc
       - name: Build (app + bootloader, merged image)
         run: |

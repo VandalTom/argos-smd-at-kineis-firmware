@@ -742,6 +742,19 @@ echo WARN_LOGFILE=$(DOXY_WARN_LOGFILE)) \
 
 #######################################
 # build the application
+# Naiad (APP=CC_TRACKER): a short, human firmware ID instead of the long build
+# matrix string. Version from NAIAD_VERSION; the release tag is v<version>.
+#   Naiad v1.0.1 (abc1234)        built at the v1.0.1 tag
+#   Naiad v1.0.1+3 (def5678)      3 commits after it
+#   Naiad v1.0.2-dev (def5678)    version bumped, not tagged yet
+# '*' after the hash = uncommitted changes; ' bench' = DEBUG=1 build.
+ifeq ($(APP),CC_TRACKER)
+NAIAD_VER := $(strip $(shell cat NAIAD_VERSION 2>/dev/null))
+NAIAD_AHEAD := $(strip $(shell git rev-list --count v$(NAIAD_VER)..HEAD 2>/dev/null || echo dev))
+NAIAD_SUFFIX := $(if $(filter 0,$(NAIAD_AHEAD)),,$(if $(filter dev,$(NAIAD_AHEAD)),-dev,+$(NAIAD_AHEAD)))
+NAIAD_FW_ID := Naiad v$(NAIAD_VER)$(NAIAD_SUFFIX) ($(current_repo_commit)$(if $(current_repo_status),*))$(if $(filter 1,$(DEBUG)), bench)
+endif
+
 #######################################
 # list of objects from C files
 OBJECTS = $(addprefix $(BUILD_DIR)/,$(notdir $(C_SOURCES:.c=.o)))
@@ -756,6 +769,11 @@ $(BUILD_INFO_FILE): $(OBJECTS)
 	@echo "-- Build file build_info.c --"
 	@echo '#include "build_info.h"'                            > $(BUILD_INFO_FILE)
 	@echo ''                                                   >> $(BUILD_INFO_FILE)
+ifeq ($(APP),CC_TRACKER)
+	@printf 'const char uc_fw_vers_commit_id[] = "%s";' '$(NAIAD_FW_ID)' >> $(BUILD_INFO_FILE)
+	@echo '' >> $(BUILD_INFO_FILE)
+	@echo "FW ID: $(NAIAD_FW_ID)"
+else
 	@printf 'const char uc_fw_vers_commit_id[] = "'           >> $(BUILD_INFO_FILE)
 	@printf '$(current_repo_commit)'                          >> $(BUILD_INFO_FILE)
 	@echo "!$(current_repo_status)!"
@@ -770,6 +788,7 @@ $(BUILD_INFO_FILE): $(OBJECTS)
 	fi
 	@printf ',$(BUILD_DATE)'                                  >> $(BUILD_INFO_FILE)
 	@echo '";'                                                 >> $(BUILD_INFO_FILE)
+endif
 
 
 $(BUILD_DIR)/%.o: %.c $(current_makefile) | $(BUILD_DIR)
