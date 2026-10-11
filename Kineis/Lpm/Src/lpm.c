@@ -302,6 +302,22 @@ void LPM_compensateTick(void)
 {
 	RTC_TimeTypeDef sTime;
 	RTC_DateTypeDef sDate;
+
+	/* After a Stop-mode wakeup the calendar shadow registers still hold their
+	 * pre-sleep values until the next RTCCLK resync (RM0453: clear RSF after
+	 * wakeup and wait for it to set again before reading SSR/TR/DR). Read stale,
+	 * the slept time comes out as ~0: HAL_GetTick() stops advancing across
+	 * sleeps and tick deadlines (cycle period, TX schedule) are never reached —
+	 * seen on a Naiad bench unit (slp stayed 0, uptime lagged real time).
+	 * RSF is write-protected (HAL note on HAL_RTC_WaitForSynchro). Bounded spin,
+	 * not HAL_GetTick(): callers run this with interrupts masked. A live clock
+	 * resyncs within ~2 RTCCLK cycles (~61 us). */
+	__HAL_RTC_WRITEPROTECTION_DISABLE(&hrtc);
+	CLEAR_BIT(RTC->ICSR, RTC_ICSR_RSF);
+	__HAL_RTC_WRITEPROTECTION_ENABLE(&hrtc);
+	for (uint32_t n = 0; n < 200000UL && READ_BIT(RTC->ICSR, RTC_ICSR_RSF) == 0U; n++)
+		;
+
 	HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
 	HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 
