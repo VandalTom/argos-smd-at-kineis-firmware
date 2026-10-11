@@ -301,18 +301,18 @@ JWT check). Workers Builds deploys every push to `naiad` (root
 `web/naiad-tool`, build `npm run build`, deploy `npx wrangler deploy`);
 `npm test` there runs the Worker against mocked GitHub/Access and SQLite.
 The page's CSP allows network requests to its own origin only.
-Vault setup, once (Cloudflare account admin):
-1. Storage & Databases → D1 → `naiad-vault` (done 2026-10-11; bound in
-   `wrangler.jsonc` as `DB`).
-2. Zero Trust → Integrations → Identity providers → add Google (OAuth client
-   from Google Cloud Console; redirect URI
-   `https://<team>.cloudflareaccess.com/cdn-cgi/access/callback`).
-3. Zero Trust → Access → Applications → self-hosted, domain
-   `arribada.siliconvandals.com`, path `api/vault`, Google login only,
-   policy "Allow: emails ending in @siliconvandals.com".
-4. Set `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) and `ACCESS_AUD`
-   (the application's AUD tag) in `wrangler.jsonc` `vars`.
-Until all four are done the vault answers "not set up" and stays closed.
+Vault setup (done 2026-10-12): D1 database `naiad-vault` (binding `DB`);
+Zero Trust Free, team `siliconvandals` (siliconvandals.cloudflareaccess.com);
+Access application "Naiad team vault" on `arribada.siliconvandals.com/api/vault`
+with policy "siliconvandals staff" (Allow: emails ending in
+@siliconvandals.com), accepting every login method; `ACCESS_TEAM_DOMAIN` and
+`ACCESS_AUD` in `wrangler.jsonc`. Login methods: email one-time PIN now;
+Google once its OAuth client is added: Google Cloud Console → APIs & Services
+→ Credentials → OAuth client ID (Web application), authorised JavaScript
+origin `https://siliconvandals.cloudflareaccess.com`, redirect URI
+`https://siliconvandals.cloudflareaccess.com/cdn-cgi/access/callback`; then
+Zero Trust → Integrations → Identity providers → Add → Google (or Google
+Workspace) with that client ID and secret.
 
 **Production line** — `Tools/naiad_station.py` does one unit per command:
 flash (optional), firmware check, provisioning with read-back and key CRC,

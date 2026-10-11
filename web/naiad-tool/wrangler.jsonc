@@ -28,11 +28,13 @@
     },
     "vars": {
         "GITHUB_REPO": "VandalTom/argos-smd-at-kineis-firmware",
-        "ALLOWED_EMAIL_DOMAIN": "siliconvandals.com"
-        // Set once the Cloudflare Access application exists (Zero Trust >
-        // Access > Applications > naiad vault): both are public identifiers.
-        //   "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
-        //   "ACCESS_AUD": "<Application Audience (AUD) tag>"
+        "ALLOWED_EMAIL_DOMAIN": "siliconvandals.com",
+        // Cloudflare Access (Zero Trust team "siliconvandals"), application
+        // "Naiad team vault" on arribada.siliconvandals.com/api/vault, policy
+        // "siliconvandals staff" (emails ending in @siliconvandals.com). Both
+        // are public identifiers; the Worker checks every token against them.
+        "ACCESS_TEAM_DOMAIN": "siliconvandals.cloudflareaccess.com",
+        "ACCESS_AUD": "67b385d84b52a1343076f9dc64ae45c73890fb242c00e44940add8156b50c8ad"
     },
     // Variables added in the dashboard (e.g. ACCESS_*) survive deploys.
     "keep_vars": true,
