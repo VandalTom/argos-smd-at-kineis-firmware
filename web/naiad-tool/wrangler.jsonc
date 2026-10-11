@@ -1,23 +1,46 @@
 {
-    // Cloudflare Workers config — static-assets-only deployment of the Naiad
-    // commissioning tool (Tools/naiad_tool.html, one self-contained page).
-    // Same pattern as the Samara / Floodmate dashboards: deployed by Workers
-    // Builds on push to naiad. Build settings in the Cloudflare dashboard:
+    // Cloudflare Workers config for the Naiad commissioning tool: the static
+    // page (Tools/naiad_tool.html, copied to dist/ by build.mjs) plus a small
+    // API in src/worker.js (firmware releases, the team credentials vault).
+    // Deployed by Workers Builds on push to naiad. Build settings in the
+    // Cloudflare dashboard:
     //   root directory  web/naiad-tool
     //   build command   npm run build
     //   deploy command  npx wrangler deploy
-    // Web Serial needs a secure context: the workers.dev URL (or a custom
-    // domain) is HTTPS, so the tool can open serial ports from there.
+    // Web Serial needs a secure context: the custom domain (and workers.dev)
+    // are HTTPS, so the tool can open serial ports from there.
     "name": "naiad-tool",
+    "main": "src/worker.js",
     "compatibility_date": "2026-07-01",
     // Public address (custom domain: Cloudflare creates the DNS record and
     // certificate on deploy; the zone is in the same account). The
-    // workers.dev address stays on as a fallback.
+    // workers.dev address stays on as a fallback (the vault refuses requests
+    // that did not come through Cloudflare Access, so it is closed there).
     "routes": [
         { "pattern": "arribada.siliconvandals.com", "custom_domain": true }
     ],
     "workers_dev": true,
+    // Static files are served before the Worker runs; only /api/* (no such
+    // file) reaches src/worker.js.
     "assets": {
-        "directory": "./dist"
-    }
+        "directory": "./dist",
+        "binding": "ASSETS"
+    },
+    "vars": {
+        "GITHUB_REPO": "VandalTom/argos-smd-at-kineis-firmware",
+        "ALLOWED_EMAIL_DOMAIN": "siliconvandals.com"
+        // Set once the Cloudflare Access application exists (Zero Trust >
+        // Access > Applications > naiad vault): both are public identifiers.
+        //   "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
+        //   "ACCESS_AUD": "<Application Audience (AUD) tag>"
+    },
+    // Variables added in the dashboard (e.g. ACCESS_*) survive deploys.
+    "keep_vars": true,
+    // The team vault's database (Storage & Databases > D1 > naiad-vault).
+    // Until it is bound the vault answers 503 "not set up"; the tables are
+    // created by the Worker on first use.
+    // "d1_databases": [
+    //     { "binding": "DB", "database_name": "naiad-vault", "database_id": "<id>" }
+    // ],
+    "observability": { "enabled": true }
 }

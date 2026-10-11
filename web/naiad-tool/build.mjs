@@ -17,15 +17,15 @@ copyFileSync(src, join(dist, 'index.html'));
 
 // Workers static assets honour a _headers file. Serial access stays limited
 // to this origin; the page needs no other powerful features. The CSP lets
-// the single-file page run but forbids every network request (connect-src
-// 'none', no forms, no framing): the credentials vault and anything typed
-// into the page cannot be sent anywhere, even by injected content.
+// the single-file page run and talk to its own Worker API only (connect-src
+// 'self': release list/images, team credentials store); no other host, no
+// forms, no framing, so nothing typed into the page can be sent elsewhere.
 const csp = [
 	"default-src 'none'",
 	"script-src 'self' 'unsafe-inline'",
 	"style-src 'self' 'unsafe-inline'",
 	"img-src 'self' data:",
-	"connect-src 'none'",
+	"connect-src 'self'",
 	"form-action 'none'",
 	"base-uri 'none'",
 	"frame-ancestors 'none'",

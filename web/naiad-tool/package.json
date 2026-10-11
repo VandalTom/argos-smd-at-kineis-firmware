@@ -2,11 +2,12 @@
   "name": "naiad-tool",
   "private": true,
   "version": "1.0.0",
-  "description": "Naiad commissioning web tool, static deploy to Cloudflare Workers",
+  "description": "Naiad commissioning web tool: static page + release/credentials API on Cloudflare Workers",
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
     "dev": "node build.mjs && npx wrangler dev",
-    "deploy": "node build.mjs && npx wrangler deploy"
+    "deploy": "node build.mjs && npx wrangler deploy",
+    "test": "node --no-warnings test/worker.test.mjs"
   }
 }

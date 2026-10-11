@@ -850,6 +850,59 @@ await test('Vault: merging another vault keeps status and history', async () => 
   assert(got.history.some(h => h.ev === 'provisioned') && got.history.some(h => h.ev === 'merged'), 'history kept and the merge logged');
 });
 
+await test('Team vault: import preview by key CRC (new / identical / conflicts, duplicates within the file)', async () => {
+  const k1 = '00112233445566778899AABBCCDDEEFF', k2 = 'FFEEDDCCBBAA99887766554433221100';
+  const store = [{ id: '100001', addr: '0A1B2C3D', key_crc: P.seckeyCrc(k1), status: 'in use' }];
+  const m = P.teamImportPreview(store, [
+    { id: '100001', addr: '0A1B2C3D', key: k1 },                 // same set
+    { id: '100001', addr: '0A1B2C3D', key: k2 },                 // same ID, other key
+    { id: '100002', addr: '0A1B2C3D', key: k2 },                 // ADDR taken
+    { id: '100003', addr: '0A1B2C3E', key: k2 },                 // new
+    { id: '100004', addr: '0A1B2C3E', key: k1 },                 // ADDR of the new one above
+    { id: '100003', addr: '0A1B2C3E', key: k2 },                 // repeated row
+  ]);
+  eq(m.identical.join(), '100001,100003', 'identical');
+  eq(m.added.join(), '100003', 'added'); eq(m.send.length, 1, 'sent once'); eq(m.send[0].key, k2, 'the key goes with it');
+  eq(m.conflicts.map(c => `${c.id}: ${c.why}`).join(' | '), '100001: KEY differs from the team vault | 100002: ADDR 0A1B2C3D already belongs to ID 100001 | 100004: ADDR 0A1B2C3E already belongs to ID 100003', 'conflicts');
+});
+
+await test('Team vault: passphrase crypto (create, unlock, wrong passphrase, keys bound to their ID, server formats)', async () => {
+  const n = await P.teamVaultNew('correct horse battery staple', 1000);
+  // the formats the Worker accepts (web/naiad-tool/src/worker.js validKdf / isSealed)
+  assert(/^[A-Za-z0-9+/]{22}==$/.test(n.kdf.salt) && n.kdf.alg === 'PBKDF2-SHA256' && n.kdf.iter === 1000, 'kdf format');
+  const sealedRe = /^v1:[A-Za-z0-9+/]{16}:[A-Za-z0-9+/]{64}$/;
+  assert(sealedRe.test(n.kdf.check), 'check format');
+  const o = await P.teamVaultUnlock(n.kdf, 'correct horse battery staple');
+  await rejects(P.teamVaultUnlock(n.kdf, 'correct horse battery stapler'), e => /Wrong team passphrase/.test(e.message), 'wrong passphrase');
+  const key = '00112233445566778899AABBCCDDEEFF';
+  const [rec] = await P.teamSealRecords(n.key, [{ id: '100001', addr: '0A1B2C3D', key, status: 'in use', sn: 'SMD1' }]);
+  assert(sealedRe.test(rec.key_enc) && !('key' in rec), 'sealed, no clear key');
+  eq(rec.key_crc, P.seckeyCrc(key), 'CRC'); eq(rec.status, 'in use', 'tracking fields kept');
+  eq(await P.teamOpenKey(o.key, '100001', rec.key_enc), key, 'opens with the unlocked key');
+  await rejects(P.teamOpenKey(o.key, '100002', rec.key_enc), e => /does not open/.test(e.message), 'bound to its ID');
+  const other = await P.teamVaultNew('another passphrase', 1000);
+  await rejects(P.teamOpenKey(other.key, '100001', rec.key_enc), e => /does not open/.test(e.message), 'other passphrase');
+  assert(rec.key_enc !== (await P.teamSealKey(n.key, '100001', key)), 'fresh IV each time');
+  // an offline copy sealed with the team key opens as an offline vault with the same passphrase
+  const data = P.vaultNewData(); P.vaultMerge(data, [{ id: '100001', addr: '0A1B2C3D', key, rconf: '', status: 'free' }], { commit: true });
+  const blob = await P.vaultSeal(data, o.key, o.salt, o.iter);
+  eq((await P.vaultOpen(blob, 'correct horse battery staple')).data.records[0].key, key, 'offline copy opens with the team passphrase');
+});
+
+await test('Releases: the image offered first is the newest field build without a warning', async () => {
+  const a = v => ({ name: `naiad-carrier-${v}__argos-smd-at-kineis-firmware.bin`, variant: v });
+  const list = [
+    { tag: 'v1.2.0', prerelease: true, warn: '', assets: [a('release')] },
+    { tag: 'v1.1.0', warn: '', date: '2026-11-02T10:00:00Z', assets: [a('bench'), a('release')] },
+    { tag: 'v1.0.0', warn: 'Do not deploy', assets: [a('release')] },
+  ];
+  const d = P.defaultRelease(list);
+  eq(`${d.release.tag} ${d.asset.variant}`, 'v1.1.0 release', 'default');
+  eq(P.defaultRelease([list[2]]), null, 'nothing safe to offer');
+  eq(P.releaseLabel(list[1], list[1].assets[1]), 'v1.1.0 · field build · 2026-11-02', 'label');
+  assert(/bench build.*DO NOT DEPLOY/.test(P.releaseLabel({ ...list[2], date: '' }, a('bench'))), 'warning in the label');
+});
+
 const realBin = path.join(here, '..', 'build', 'argos-smd-at-kineis-firmware.bin');
 if (existsSync(realBin)) {
   await test('Flash the real build/argos-smd-at-kineis-firmware.bin into the simulator', async () => {

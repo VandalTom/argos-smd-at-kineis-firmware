@@ -227,30 +227,62 @@ by itself (`+PROV=OK`) once ID, ADDR and SECKEY are present. Build with
 `CC_ALLOW_TEST_CREDS=1` (cc_conf.h) to transmit under the test identity on a
 bench.
 
-**Commissioning web tool** — `Tools/naiad_tool.html` (open the file in Chrome
-or Edge; Web Serial, no install, no network): connect, unit info (FW, ID,
-state, battery tier, device UTC), flash with progress and the vector-table-
-last order, self-test, credential entry from a CLS paste (key masked, checked
-by CRC), commissioning controls, console, JSON/CSV reports, and a guided
-"Commission unit" wizard. A built-in simulator runs everything without
-hardware; `node Tools/naiad_tool_selftest.mjs` tests the protocol layer
-against it. Windows blocks PL2303 clones: use a CP2102/CH340/FTDI adapter.
-**Credentials vault** (panel in the web tool): import the CLS credential
-file (CSV with comma/semicolon/tab, or .xlsx; header row optional), edit the
-sets in a spreadsheet-style table and track their use — free / in use (with
-the unit's serial number, firmware and date) / retired, plus a per-set
-history. "Use" or "Use next free set" fills the credentials panel; a verified
-provisioning marks the set in use, `AT+PROV=ERASE` frees it. The vault is
-encrypted in the browser (AES-256-GCM, key from PBKDF2-SHA256 with 600,000
-iterations, fresh IV per save), decrypted only in memory while unlocked,
-locked after 15 min idle; exports: encrypted vault file (move between
-stations / backup), CSV without keys, CSV with keys (confirmed). The hosted
-page's Content-Security-Policy forbids all network requests
-(`connect-src 'none'`), so nothing typed or imported can leave the browser.
-Live at **https://arribada.siliconvandals.com** (fallback https://naiad-tool.seb-f80.workers.dev).
-Hosted on Cloudflare Workers (static assets, `web/naiad-tool/`): Workers
-Builds deploys every push to `naiad` (root `web/naiad-tool`, build
-`npm run build`, deploy `npx wrangler deploy`).
+**Commissioning web tool** — `Tools/naiad_tool.html`, live at
+**https://arribada.siliconvandals.com** (fallback https://naiad-tool.seb-f80.workers.dev;
+the file also works opened locally, without the release list and the team vault).
+Chrome or Edge (Web Serial), no install: connect, unit info (FW, ID, state,
+battery tier, device UTC), flash with progress and the vector-table-last
+order, self-test, credential entry (key masked, checked by CRC),
+commissioning controls, console, JSON/CSV reports, and a guided "Commission
+unit" wizard. A built-in simulator runs everything without hardware;
+`node Tools/naiad_tool_selftest.mjs` tests the protocol layer against it.
+Windows blocks PL2303 clones: use a CP2102/CH340/FTDI adapter.
+
+*Released firmware*: the Flash panel lists the Naiad images attached to the
+GitHub Releases (field and bench builds) and loads one with a click; the
+flash is then verified against the release's firmware ID (`Naiad vX.Y.Z (`).
+Releases with a known problem carry a warning (v1.0.0: do not deploy).
+
+*Team vault* (Team credentials panel): one shared table of the CLS
+credential sets for the whole team. Sign in with a @siliconvandals.com
+Google account (Cloudflare Access), then unlock with the team passphrase.
+Keys are encrypted and decrypted in the browser with that passphrase
+(PBKDF2-SHA256, 600,000 iterations → AES-256-GCM, the set's ID bound in), so
+the server only ever holds ciphertext and each key's CRC-32. Import the CLS
+file (CSV with comma/semicolon/tab, or .xlsx; header row optional), edit in
+a spreadsheet-style table (concurrent edits are detected, nothing is
+overwritten), track use: free / in use (with the unit's serial number,
+firmware and date) / retired, with a per-set history of who did what.
+"Use next free set" fills the credentials panel; a verified provisioning
+marks the set in use and `AT+PROV=ERASE` frees it (tracking works while the
+vault is locked; changes made while signed out are sent at the next
+sign-in). Every key fetch is logged with the user's email. Locks after 15 min
+idle. Exports: CSV without keys, encrypted backup file. The passphrase can be
+changed (every key re-encrypted in the browser). A lost passphrase cannot be
+recovered: re-import from CLS.
+
+*Offline vault* (this browser): an encrypted copy of the team vault ("Save
+offline copy here", or a downloaded backup file) for when the server cannot
+be reached; it opens with the team passphrase.
+
+Hosting: Cloudflare Workers (`web/naiad-tool/`): the page as static assets
+plus `src/worker.js` (release list and image proxy, vault API on D1, Access
+JWT check). Workers Builds deploys every push to `naiad` (root
+`web/naiad-tool`, build `npm run build`, deploy `npx wrangler deploy`);
+`npm test` there runs the Worker against mocked GitHub/Access and SQLite.
+The page's CSP allows network requests to its own origin only.
+Vault setup, once (Cloudflare account admin):
+1. Storage & Databases → D1 → create `naiad-vault`; put its ID in
+   `wrangler.jsonc` (`d1_databases`, binding `DB`).
+2. Zero Trust → Integrations → Identity providers → add Google (OAuth client
+   from Google Cloud Console; redirect URI
+   `https://<team>.cloudflareaccess.com/cdn-cgi/access/callback`).
+3. Zero Trust → Access → Applications → self-hosted, domain
+   `arribada.siliconvandals.com`, path `api/vault`, Google login only,
+   policy "Allow: emails ending in @siliconvandals.com".
+4. Set `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) and `ACCESS_AUD`
+   (the application's AUD tag) in `wrangler.jsonc` `vars`.
+Until all four are done the vault answers "not set up" and stays closed.
 
 **Production line** — `Tools/naiad_station.py` does one unit per command:
 flash (optional), firmware check, provisioning with read-back and key CRC,

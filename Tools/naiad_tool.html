@@ -144,7 +144,7 @@ table.vault { font-size: 12.5px; min-width: 980px; }
 table.vault th { position: sticky; top: 0; z-index: 1; background: var(--panel2); border: 1px solid var(--border); padding: 4px 6px; cursor: pointer; user-select: none; white-space: nowrap; }
 table.vault th[data-sort=asc]::after { content: " \25B2"; } table.vault th[data-sort=desc]::after { content: " \25BC"; }
 table.vault td { padding: 0; border: 1px solid var(--border); }
-table.vault td.num { padding: 0 6px; color: var(--muted); text-align: right; width: 1%; }
+table.vault td.num { padding: 0 6px; color: var(--muted); text-align: right; width: 1%; white-space: nowrap; }
 table.vault td.act { padding: 2px 4px; white-space: nowrap; width: 1%; }
 table.vault td.act .btn { margin-right: 2px; }
 table.vault input, table.vault select { width: 100%; min-width: 60px; border: 0; border-radius: 0; background: transparent; padding: 4px 6px; font-family: var(--mono); font-size: 12.5px; }
@@ -320,6 +320,12 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
 <details class="card" id="cardFlash" open>
   <summary><h2>Firmware flash</h2><span class="sumstat" id="flashSum"></span></summary>
   <div class="body">
+    <div class="row">
+      <label class="field" style="flex:1;min-width:260px"><span class="lbl">Released firmware (GitHub Releases)</span>
+        <select id="relSelect" aria-label="Released firmware"><option value="">Looking for releases…</option></select></label>
+      <button class="btn" id="btnRelLoad" type="button" disabled>Load release</button>
+    </div>
+    <div id="relMsg" class="msg small"></div>
     <div class="drop" id="fwDrop">
       <div class="row">
         <button class="btn" id="btnChooseBin" type="button">Choose .bin…</button>
@@ -387,7 +393,7 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
       </div>
     </label>
     <div class="row">
-      <button id="btnCredPick" class="btn" title="Fill the fields with the first free set in the credentials vault">Use next free set from the vault</button>
+      <button id="btnCredPick" class="btn" title="Fill the fields with the first free set: from the team vault when unlocked, otherwise from this browser's offline vault">Use next free set</button>
       <span id="credVault" class="muted small"></span>
     </div>
     <div class="grid2">
@@ -423,12 +429,74 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
   </div>
 </details>
 
-<!-- ======================= Credentials vault ======================= -->
+<!-- ======================= Team credentials store ======================= -->
+<details class="card" id="cardTeam" open>
+  <summary><h2>Team credentials</h2><span class="sumstat" id="teamSum"></span></summary>
+  <div class="body">
+    <div id="teamOut">
+      <p class="muted small" style="margin:0">One vault for the whole team: the CLS credential sets (ID, ADDR, KEY, RCONF) and which unit has which. Sign in with your @siliconvandals.com Google account, then unlock it with the team passphrase. Keys are encrypted and decrypted in this page with that passphrase: the server only ever holds them encrypted, and logs every key fetch with your email.</p>
+      <div class="row">
+        <button id="btnTeamLogin" class="btn primary" hidden>Sign in with Google</button>
+        <span id="teamState" class="msg" aria-live="polite"></span>
+      </div>
+      <div class="row" id="teamCreateRow" hidden>
+        <input type="password" id="teamNewPass" autocomplete="new-password" placeholder="Team passphrase (12+ characters)" aria-label="New team passphrase">
+        <input type="password" id="teamNewPass2" autocomplete="new-password" placeholder="Repeat it" aria-label="Repeat the team passphrase">
+        <button id="btnTeamCreate" class="btn primary">Create the team vault</button>
+      </div>
+      <div class="row" id="teamUnlockRow" hidden>
+        <input type="password" id="teamPass" autocomplete="current-password" placeholder="Team passphrase" aria-label="Team passphrase">
+        <button id="btnTeamUnlock" class="btn primary">Unlock</button>
+      </div>
+      <div class="row small" id="teamOutWho" hidden>
+        <span id="teamWho2" class="muted"></span>
+        <button id="btnTeamLogout2" class="btn small">Sign out</button>
+      </div>
+    </div>
+    <div id="teamIn" hidden>
+      <div class="row">
+        <button id="btnTeamImport" class="btn primary">Import CLS file…</button>
+        <input type="file" id="teamFile" accept=".csv,.tsv,.txt,.xlsx" hidden>
+        <button id="btnTeamAdd" class="btn">Add set</button>
+        <input type="search" id="teamSearch" placeholder="Search ID, ADDR, SN, notes" aria-label="Search the team vault">
+        <select id="teamFilter" aria-label="Filter by status"><option value="">All</option><option>free</option><option>in use</option><option>retired</option></select>
+        <span class="spacer"></span>
+        <span id="teamWho" class="muted small"></span>
+        <button id="btnTeamReload" class="btn small">Reload</button>
+        <button id="btnTeamLock" class="btn small">Lock</button>
+        <button id="btnTeamLogout" class="btn small">Sign out</button>
+      </div>
+      <div id="teamPreview" class="callout" hidden></div>
+      <div class="vaultwrap">
+        <table class="vault"><thead><tr id="teamHead"><th>#</th><th data-f="id">ID</th><th data-f="addr">ADDR</th><th data-f="key_crc">Key</th><th data-f="rconf">RCONF</th><th data-f="status">Status</th><th data-f="sn">Device SN</th><th data-f="assigned">Assigned</th><th data-f="note">Notes</th><th data-f="updated">Changed</th><th></th></tr></thead>
+        <tbody id="teamBody"></tbody></table>
+      </div>
+      <div class="row small">
+        <span id="teamCounts" class="muted"></span>
+        <span id="teamSaved" class="msg" aria-live="polite"></span>
+        <span class="spacer"></span>
+        <button id="btnTeamCsv" class="btn small" title="IDs, ADDRs and their use; no keys">Export CSV (no keys)</button>
+        <button id="btnTeamCopy" class="btn small" title="An encrypted copy of the whole vault in this browser, opened with the team passphrase when the server cannot be reached">Save offline copy here</button>
+        <button id="btnTeamFile" class="btn small" title="The whole vault as an encrypted file (team passphrase)">Download encrypted backup</button>
+        <button id="btnTeamUpload" class="btn small" title="Add the sets of the offline vault below (unlock it first) to the team vault">Upload the offline vault</button>
+        <button id="btnTeamPass" class="btn small">Change passphrase…</button>
+      </div>
+      <div class="row" id="teamChRow" hidden>
+        <input type="password" id="teamChPass" autocomplete="new-password" placeholder="New team passphrase (12+ characters)" aria-label="New team passphrase">
+        <input type="password" id="teamChPass2" autocomplete="new-password" placeholder="Repeat it" aria-label="Repeat the new team passphrase">
+        <button id="btnTeamChPass" class="btn">Re-encrypt every key</button>
+      </div>
+      <p class="muted small" style="margin:0">Edits save to the server as soon as a cell is left (Enter = next row, Esc = undo the cell); if someone else changed the same set meanwhile, the table reloads and nothing is overwritten. Keys stay hidden (only their CRC-32 is listed): "Key" shows one for 30 s, and typing into a key cell replaces that key. "Use next free set" in the Kineis credentials panel takes the first free set here; a verified "Write, reset &amp; verify" marks it in use with the unit's serial number, and "Erase credentials" frees it again (this works while the vault is locked too; changes made while signed out are kept in this browser and sent at the next sign-in). The vault locks after 15 minutes without use. A lost team passphrase cannot be recovered: keep it in the team's password manager.</p>
+    </div>
+  </div>
+</details>
+
+<!-- ======================= Offline vault (this browser) ======================= -->
 <details class="card" id="cardVault">
-  <summary><h2>Credentials vault</h2><span class="sumstat" id="vaultSum"></span></summary>
+  <summary><h2>Offline vault (this browser)</h2><span class="sumstat" id="vaultSum"></span></summary>
   <div class="body">
     <div id="vaultLocked">
-      <p class="muted small" style="margin:0">CLS credential sets (ID, ADDR, KEY, RCONF) with their use: which unit has which ID, and which are still free. The vault is encrypted in this browser with your passphrase (AES-256-GCM, key from PBKDF2-SHA256 with 600,000 iterations) and is only decrypted in memory while unlocked. It locks after 15 minutes without use. Nothing is sent anywhere: this page makes no network requests. A lost passphrase cannot be recovered, so keep the CLS originals or an encrypted export.</p>
+      <p class="muted small" style="margin:0">For when the team vault cannot be reached. Save a copy with "Save offline copy here" (or load a downloaded backup file), then unlock it here with the team passphrase. It stays encrypted in this browser (AES-256-GCM, key from PBKDF2-SHA256 with 600,000 iterations), is only decrypted in memory while unlocked, and locks after 15 minutes without use. Changes made here stay in this browser: upload them to the team vault when back online.</p>
       <div class="row" id="vaultCreateRow" hidden>
         <input type="password" id="vaultNewPass" autocomplete="new-password" placeholder="New passphrase (10+ characters)" aria-label="New vault passphrase">
         <input type="password" id="vaultNewPass2" autocomplete="new-password" placeholder="Repeat it" aria-label="Repeat the passphrase">
@@ -562,7 +630,7 @@ pre.lines { margin: 0; font: 12px/1.4 var(--mono); background: var(--panel2); pa
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.0.0';
+const TOOL_VERSION = '1.1.0';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -2761,6 +2829,80 @@ function vaultCsv(data, { keys = false } = {}) {
   return [cols.join(','), ...data.records.map(r => cols.map(c => esc(r[c])).join(','))].join('\r\n') + '\r\n';
 }
 
+/** Import preview against the team vault's list, which carries key CRC-32s instead of keys.
+ *  Same rules as vaultMerge(); `send` = the new sets, ready for POST /api/vault/import. */
+function teamImportPreview(teamRecords, records) {
+  const res = { added: [], identical: [], conflicts: [], send: [] };
+  const byId = new Map(teamRecords.map(r => [String(r.id), r])), byAddr = new Map(teamRecords.map(r => [r.addr, r]));
+  for (const rec of records) {
+    const cur = byId.get(rec.id), crc = seckeyCrc(rec.key);
+    if (cur) {
+      if (cur.addr === rec.addr && cur.key_crc === crc) res.identical.push(rec.id);
+      else res.conflicts.push({ id: rec.id, why: cur.addr !== rec.addr ? 'ADDR differs from the team vault' : 'KEY differs from the team vault' });
+      continue;
+    }
+    const other = byAddr.get(rec.addr);
+    if (other) { res.conflicts.push({ id: rec.id, why: `ADDR ${rec.addr} already belongs to ID ${other.id}` }); continue; }
+    byId.set(rec.id, { id: rec.id, addr: rec.addr, key_crc: crc }); byAddr.set(rec.addr, { id: rec.id });
+    res.added.push(rec.id); res.send.push(rec);
+  }
+  return res;
+}
+
+/* Team vault crypto. The server keeps only what these produce: each SECKEY sealed with a key derived
+ * from the team passphrase (PBKDF2-SHA256 -> AES-256-GCM, the set's ID as associated data, so a
+ * sealed key cannot be moved to another set), plus a sealed check value that tells a wrong
+ * passphrase apart. The same derived key opens offline copies (vaultSeal format). */
+const TEAM_CHECK_ID = 'check', TEAM_CHECK_TEXT = '0'.repeat(32);
+async function teamSealKey(key, id, hex) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(String(id)) }, key, new TextEncoder().encode(hex)));
+  return `v1:${b64enc(iv)}:${b64enc(ct)}`;
+}
+async function teamOpenKey(key, id, sealed) {
+  const [v, iv, ct] = String(sealed || '').split(':');
+  if (v !== 'v1' || !iv || !ct) throw new ProtocolError(`ID ${id}: unknown key format`);
+  try { return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64dec(iv), additionalData: new TextEncoder().encode(String(id)) }, key, b64dec(ct))); }
+  catch (e) { throw new ProtocolError(`ID ${id}: the key does not open with this passphrase`); }
+}
+/** A new team vault (or new passphrase): { key, salt, iter, kdf } where kdf is what the server stores. */
+async function teamVaultNew(pass, iter = VAULT_KDF_ITER) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await vaultDeriveKey(pass, salt, iter);
+  return { key, salt, iter, kdf: { alg: 'PBKDF2-SHA256', iter, salt: b64enc(salt), check: await teamSealKey(key, TEAM_CHECK_ID, TEAM_CHECK_TEXT) } };
+}
+/** The server's kdf + a passphrase -> { key, salt, iter }; a wrong passphrase -> ProtocolError. */
+async function teamVaultUnlock(kdf, pass) {
+  if (!kdf || kdf.alg !== 'PBKDF2-SHA256' || !kdf.salt || !kdf.check) throw new ProtocolError('Unknown team vault format');
+  const salt = b64dec(kdf.salt), key = await vaultDeriveKey(pass, salt, kdf.iter);
+  let text = '';
+  try { text = await teamOpenKey(key, TEAM_CHECK_ID, kdf.check); } catch (e) { text = ''; }
+  if (text !== TEAM_CHECK_TEXT) throw new ProtocolError('Wrong team passphrase');
+  return { key, salt, iter: kdf.iter };
+}
+/** Plain sets (CLS file, offline vault) -> what POST /api/vault/import takes: keys sealed here, never sent in clear. */
+async function teamSealRecords(key, records) {
+  const out = [];
+  for (const r of records) {
+    out.push({ id: r.id, addr: r.addr, key_enc: await teamSealKey(key, r.id, r.key), key_crc: seckeyCrc(r.key), rconf: r.rconf || '',
+      status: r.status || 'free', sn: r.sn || '', fw: r.fw || '', assigned: r.assigned || '', note: r.note || '' });
+  }
+  return out;
+}
+
+/** /api/releases entries: the image offered first = newest field build without a warning. */
+function defaultRelease(releases) {
+  for (const r of releases || []) {
+    if (r.warn || r.prerelease) continue;
+    const a = r.assets.find(x => x.variant === 'release');
+    if (a) return { release: r, asset: a };
+  }
+  return null;
+}
+function releaseLabel(r, a) {
+  return `${r.tag} · ${a.variant === 'bench' ? 'bench build (debug log)' : 'field build'}${r.date ? ` · ${r.date.slice(0, 10)}` : ''}${r.prerelease ? ' · pre-release' : ''}${r.warn ? ' · DO NOT DEPLOY' : ''}`;
+}
+
 function b64enc(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); }
 function b64dec(s) { const bin = atob(s); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
 
@@ -2812,6 +2954,7 @@ const NaiadProtocol = {
   VAULT_STATUSES, VAULT_KDF_ITER, parseDelimited, unzipEntries, xlsxRows, credentialRowsToRecords, readCredentialFile,
   vaultNormalize, vaultNewData, vaultFind, vaultMerge, vaultNextFree, vaultMarkInUse, vaultMarkFreed, vaultCounts, vaultCsv,
   vaultDeriveKey, vaultSeal, vaultOpen, vaultCreate, b64enc, b64dec,
+  teamImportPreview, teamSealKey, teamOpenKey, teamVaultNew, teamVaultUnlock, teamSealRecords, defaultRelease, releaseLabel,
 };
 // ==== PROTOCOL END ====
 
@@ -3179,9 +3322,11 @@ async function afterReboot() {
 
 async function loadImageFile(file) {
   if (!file) return;
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const analysis = analyzeImage(bytes, file.name);
-  ui.image = { bytes, name: file.name, analysis };
+  setImage(new Uint8Array(await file.arrayBuffer()), file.name, null);
+  setMsg('#relMsg', '');
+}
+function setImage(bytes, name, release) {
+  ui.image = { bytes, name, analysis: analyzeImage(bytes, name), release };
   renderImage(); updateControls();
 }
 function renderImage() {
@@ -3190,7 +3335,8 @@ function renderImage() {
   if (!img) { kv.hidden = true; $('#fwErrors').textContent = ''; return; }
   const a = img.analysis;
   const add = (k, v, cls) => { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); if (v instanceof Node) dd.append(v); else dd.textContent = v; if (cls) dd.className = cls; kv.append(dt, dd); };
-  add('File', img.name);
+  add(img.release ? 'Release' : 'File', img.name);
+  if (img.release && img.release.warn) add('Warning', img.release.warn, 'err');
   add('Size', fmtBytes(a.size));
   add('CRC-32/MPEG-2', `0x${hex8(a.crc)} (file order)`);
   add('VERIFY CRC', `0x${hex8(a.verifyCrc)} (send order, vector table last)`);
@@ -3241,14 +3387,64 @@ function renderFlashResult(res, err) {
   box.append(div);
 }
 
+/* -- released images, listed and served by the site's Worker (same origin) from GitHub Releases -- */
+const rel = { list: [] };
+function onSite() { return /^https?:$/.test(location.protocol); }
+function relPicked() {
+  const [tag, name] = $('#relSelect').value.split('|');
+  const r = rel.list.find(x => x.tag === tag);
+  return { r, a: r && r.assets.find(x => x.name === name) };
+}
+function relOnly(text) { const sel = $('#relSelect'); sel.innerHTML = ''; sel.append(new Option(text, '')); sel.disabled = true; $('#btnRelLoad').disabled = true; }
+async function relInit() {
+  if (!onSite()) { relOnly('Open the tool from arribada.siliconvandals.com to list releases'); return; }
+  try {
+    const res = await fetch('/api/releases', { headers: { accept: 'application/json' } });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    rel.list = j.releases || [];
+  } catch (e) { relOnly(`Releases unavailable (${e.message}): choose a .bin file`); return; }
+  if (!rel.list.length) { relOnly('No Naiad release published yet'); return; }
+  const sel = $('#relSelect'); sel.innerHTML = ''; sel.disabled = false;
+  for (const r of rel.list) for (const a of r.assets) sel.append(new Option(releaseLabel(r, a), `${r.tag}|${a.name}`));
+  const d = defaultRelease(rel.list);
+  if (d) sel.value = `${d.release.tag}|${d.asset.name}`;
+  relSelected();
+}
+function relSelected() {
+  const { r, a } = relPicked();
+  $('#btnRelLoad').disabled = !a;
+  if (r && r.warn) setMsg('#relMsg', r.warn, 'err');
+  else if (a && a.variant === 'bench') setMsg('#relMsg', 'Bench build: verbose debug log on the console, for the lab only.', 'warn');
+  else setMsg('#relMsg', '');
+}
+async function relLoad() {
+  const { r, a } = relPicked();
+  if (!a) return;
+  $('#btnRelLoad').disabled = true;
+  setMsg('#relMsg', `Downloading ${r.tag}…`);
+  try {
+    const res = await fetch(a.url);
+    if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || `HTTP ${res.status}`); }
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (a.size && bytes.length !== a.size) throw new Error(`got ${bytes.length} bytes, GitHub lists ${a.size}`);
+    setImage(bytes, `${r.tag} ${a.variant === 'bench' ? 'bench' : 'field'} build`, { tag: r.tag, variant: a.variant, warn: r.warn, url: r.url });
+    const exp = $('#expectFw');
+    if (!exp.value.trim() || exp.dataset.auto === '1') { exp.value = r.fwId || ''; exp.dataset.auto = r.fwId ? '1' : ''; }
+    setMsg('#relMsg', r.warn || `Loaded ${r.tag} (${a.variant} build)${r.fwId ? `: the flash is verified against "${r.fwId}…"` : ''}.`, r.warn ? 'err' : 'ok');
+  } catch (e) { setMsg('#relMsg', `${r.tag}: ${e.message}`, 'err'); }
+  finally { $('#btnRelLoad').disabled = false; }
+}
+
 async function doFlash() {
   const img = ui.image;
   if (!img || !img.analysis.ok) return;
   const fromBl = ui.mode === 'bl';
   const body = `Write ${img.name}\n${fmtBytes(img.analysis.size)}, CRC 0x${hex8(img.analysis.crc)}\n\n`
     + (fromBl ? 'The unit is already in the bootloader.' : `The unit currently runs: ${valText(ui.unit.fw)}`)
-    + '\n\nThe unit restarts into the new firmware when done. Keep it powered and connected.';
-  if (!(await confirmDialog('Flash firmware?', body, 'Flash'))) return;
+    + '\n\nThe unit restarts into the new firmware when done. Keep it powered and connected.'
+    + (img.release && img.release.warn ? `\n\nWARNING: ${img.release.warn}` : '');
+  if (!(await confirmDialog('Flash firmware?', body, img.release && img.release.warn ? 'Flash anyway' : 'Flash', { focusCancel: !!(img.release && img.release.warn) }))) return;
   hideRecovery('#flashRecovery');
   renderFlashResult(null, null);
   $('#flashBar').value = 0;
@@ -3630,14 +3826,17 @@ function vaultApplyEvent(ev) {
   const r = ev.kind === 'provisioned' ? vaultMarkInUse(vault.data, ev.id, ev) : vaultMarkFreed(vault.data, ev.id, ev);
   note(r ? `Vault: ID ${ev.id} marked ${r.status}${r.sn ? ' on ' + r.sn : ''}` : `Vault: ID ${ev.id} is not in the vault (not tracked)`, r ? 'info' : 'warn');
 }
+/** A set was provisioned on / erased from a unit: tell the team vault, and the offline vault if this browser has one. */
 function vaultTrack(kind, id, info = {}) {
   if (!id) return;
   const ev = { kind, id: String(id), sn: info.sn || '', fw: info.fw || '', by: vaultBy(), t: new Date().toISOString() };
+  void teamTrack(ev);
   if (vault.open) { vaultApplyEvent(ev); vaultDirty(); renderVault(); vaultTouch(); return; }
+  if (!vaultStored()) return;
   let q = [];
   try { q = JSON.parse(storeGet(VAULT_PENDING) || '[]'); } catch (e) { q = []; }
   q.push(ev); storeSet(VAULT_PENDING, JSON.stringify(q));
-  note(`Vault locked: ID ${id} ${kind} recorded, applied at the next unlock`, 'warn');
+  note(`Offline vault locked: ID ${id} ${kind} recorded, applied at the next unlock`, team.state === 'in' ? 'info' : 'warn');
 }
 function vaultApplyPending() {
   let q = [];
@@ -3734,7 +3933,7 @@ function vaultRows() {
 function renderVault() {
   const stored = !!vaultStored();
   $('#vaultLocked').hidden = vault.open; $('#vaultOpen').hidden = !vault.open;
-  $('#vaultCreateRow').hidden = vault.open || stored; $('#vaultUnlockRow').hidden = vault.open || !stored;
+  $('#vaultCreateRow').hidden = vault.open || stored || !['offline', 'unconfigured', 'error'].includes(team.state); $('#vaultUnlockRow').hidden = vault.open || !stored;
   if (!vault.open) { $('#vaultSum').innerHTML = ''; $('#vaultSum').append(badge(stored ? 'LOCKED' : 'NO VAULT', 'idle')); renderCredVault(); return; }
   renderVaultPreview(); renderVaultCounts(); renderCredVault();
   const body = $('#vaultBody');
@@ -3819,14 +4018,24 @@ async function vaultUse(uid) {
   $('#credId').value = r.id; $('#credAddr').value = r.addr; $('#credKey').value = r.key; $('#credRconf').value = r.rconf || '';
   credValidateUi(false);
   ui.vaultPick = r.id;
-  setMsg('#credMsg', `Filled from the vault: ID ${r.id}. "Write, reset & verify" provisions it; the vault marks it in use once verified.`, 'ok');
+  setMsg('#credMsg', `Filled from the offline vault: ID ${r.id}. "Write, reset & verify" provisions it; the vault marks it in use once verified.`, 'ok');
   goTo('#cardCred', '#btnProvision');
 }
 
 async function vaultPickNext() {
-  if (!vault.open) { setMsg('#credMsg', 'Unlock the credentials vault first.', 'warn'); goTo('#cardVault', vaultStored() ? '#vaultPass' : '#vaultNewPass'); return; }
+  if (team.state === 'in' && (team.key || !vault.open)) {
+    if (!team.key) { setMsg('#credMsg', team.kdf ? 'Unlock the team vault with the team passphrase first.' : 'Create the team vault first.', 'warn'); goTo('#cardTeam', team.kdf ? '#teamPass' : '#teamNewPass'); return; }
+    await teamReload();                               // another station may have taken a set meanwhile
+    const r = team.records.find(x => x.status === 'free');
+    if (r) { await teamUse(r.id); return; }
+    if (!vault.open) { setMsg('#credMsg', 'The team vault has no free credential set: import a CLS file there.', 'warn'); return; }
+  }
+  if (!vault.open) {
+    if (team.state === 'out') { setMsg('#credMsg', 'Sign in to the team vault first.', 'warn'); goTo('#cardTeam', '#btnTeamLogin'); return; }
+    setMsg('#credMsg', 'Unlock the offline vault first.', 'warn'); goTo('#cardVault', vaultStored() ? '#vaultPass' : '#vaultNewPass'); return;
+  }
   const r = vault.data.records.find(x => x.status === 'free' && vaultRecValid(x));
-  if (!r) { setMsg('#credMsg', 'The vault has no free credential set: import a CLS file.', 'warn'); return; }
+  if (!r) { setMsg('#credMsg', 'The offline vault has no free credential set.', 'warn'); return; }
   await vaultUse(r.uid);
 }
 
@@ -3862,7 +4071,20 @@ function renderCredVault() {
   const box = $('#credVault');
   if (!box) return;
   const id = realId(ui.unit);
-  if (!vault.open) { box.textContent = vaultStored() ? 'Vault locked.' : ''; box.className = 'muted small'; return; }
+  if (team.state === 'in') {
+    const free = team.records.filter(r => r.status === 'free').length;
+    const r = id && team.records.find(x => x.id === id);
+    let text = `Team vault: ${free} free set(s).`, cls = 'muted small';
+    if (id && !r) { text = `Team vault: ID ${id} is not in the vault.`; cls = 'msg warn small'; }
+    if (r) {
+      const snOk = !r.sn || !ui.unit.sn || r.sn === ui.unit.sn;
+      text = `Team vault: ID ${id} is ${r.status}${r.sn ? ` on ${r.sn}` : ''}.${r.status !== 'in use' ? ' Not marked in use.' : ''}${!snOk ? ' This unit is ' + ui.unit.sn + '!' : ''}`;
+      cls = r.status === 'in use' && snOk ? 'msg ok small' : 'msg warn small';
+    }
+    box.textContent = text; box.className = cls;
+    return;
+  }
+  if (!vault.open) { box.textContent = vaultStored() ? 'Offline vault locked.' : team.state === 'out' ? 'Sign in to the team vault to pick a set.' : ''; box.className = 'muted small'; return; }
   if (!id) { box.textContent = ''; return; }
   const r = vaultFind(vault.data, id);
   let text = `Vault: ID ${id} is not in the vault.`, cls = 'msg warn small';
@@ -3872,6 +4094,546 @@ function renderCredVault() {
     cls = r.status === 'in use' && snOk ? 'msg ok small' : 'msg warn small';
   }
   box.textContent = text; box.className = cls;
+}
+
+/* ---------- team vault (UI) ----------
+ * One vault for the whole team, kept by the site's Worker behind Cloudflare Access (Google sign-in,
+ * @siliconvandals.com only) and unlocked here with the team passphrase. The server holds each key
+ * sealed with that passphrase (teamSealKey) next to its CRC-32; keys are opened only in this page
+ * and each fetch is logged on the server with the signed-in email. IDs, ADDRs and tracking fields
+ * are plain, so provisioning/erase tracking works while the vault is locked. Tracking events that
+ * cannot reach the server (signed out, offline) wait in this browser (IDs and serial numbers only)
+ * and are sent at the next sign-in. */
+
+const TEAM_PENDING = 'naiad.team.pending.v1', TEAM_CHUNK = 200, TEAM_IDLE_MS = 15 * 60000;
+const team = {
+  state: 'unknown', email: '', msg: '', kdf: null, key: null, salt: null, iter: 0, records: [], sort: { col: null, dir: 1 },
+  keys: new Map(), hist: new Map(), preview: null, poll: null, loadedAt: 0, idleTimer: null,
+};
+const TEAM_COLS = ['id', 'addr', 'key', 'rconf', 'status', 'sn', 'assigned', 'note'];
+class TeamAuthError extends Error {}
+const teamOpen = () => team.state === 'in' && !!team.key;
+
+async function teamApi(path, { method = 'GET', body } = {}) {
+  let res;
+  try {
+    res = await fetch('/api/vault/' + path, {
+      method, redirect: 'manual', credentials: 'same-origin', cache: 'no-store',
+      headers: body !== undefined ? { 'content-type': 'application/json' } : {}, body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) { throw new Error(`team vault unreachable (${e.message})`); }
+  // Access answers a missing/expired login with a redirect to its sign-in page
+  if (res.type === 'opaqueredirect' || res.status === 401) { if (team.state === 'in') teamSignedOut('Your sign-in expired: sign in again.'); throw new TeamAuthError('not signed in'); }
+  const j = await res.json().catch(() => ({}));
+  if (res.status === 503 && j.code === 'not_configured') { teamSetState('unconfigured', j.error); throw new Error(j.error); }
+  if (res.status === 403) { teamSignedOut(j.error || 'This account may not use the team vault.'); throw new TeamAuthError(j.error || 'forbidden'); }
+  if (res.status === 409 && j.code === 'rekeyed') { teamLock('The team passphrase was changed on another station: unlock with the new one.'); }
+  if (!res.ok) { const e = new Error(j.error || `HTTP ${res.status}`); e.status = res.status; e.data = j; throw e; }
+  return j;
+}
+
+function teamSetState(state, msg = '') {
+  team.state = state; team.msg = msg;
+  renderTeam(); renderCredVault(); renderVault();
+}
+function teamSignedOut(msg) {
+  teamDropKey();
+  Object.assign(team, { email: '', kdf: null, records: [], preview: null });
+  teamSetState('out', msg || '');
+}
+function teamDropKey() {
+  clearTimeout(team.idleTimer);
+  Object.assign(team, { key: null, salt: null, iter: 0, preview: null });
+  team.keys.clear();
+}
+function teamLock(msg) {
+  teamDropKey();
+  team.msg = msg || '';
+  renderTeam(); renderCredVault();
+}
+function teamTouch() {
+  clearTimeout(team.idleTimer);
+  if (team.key) team.idleTimer = setTimeout(() => teamLock('Locked after 15 minutes without use.'), TEAM_IDLE_MS);
+}
+async function teamSignedIn(me) {
+  clearInterval(team.poll); team.poll = null;
+  Object.assign(team, { email: me.email, kdf: me.kdf || null, state: 'in', msg: '' });
+  await teamReload();
+  await teamFlushPending();
+  renderVault();
+  const f = $(team.kdf ? '#teamPass' : '#teamNewPass');
+  if (f && document.activeElement === document.body) f.focus({ preventScroll: true });
+}
+async function teamInit() {
+  if (!onSite()) { teamSetState('offline', 'The team vault is available when the tool is opened from arribada.siliconvandals.com.'); return; }
+  try { await teamSignedIn(await teamApi('me')); }
+  catch (e) {
+    if (e instanceof TeamAuthError) { if (team.state !== 'out') teamSignedOut(); }
+    else if (team.state !== 'unconfigured') teamSetState('error', `Team vault: ${e.message}`);
+  }
+}
+function teamLogin() {
+  const w = window.open('/api/vault/login', 'naiad-login', 'popup,width=520,height=720');
+  setMsg('#teamState', w ? 'Finish signing in in the pop-up window…' : 'The pop-up was blocked: allow pop-ups for this site and try again.', w ? '' : 'err');
+  clearInterval(team.poll);
+  const t0 = Date.now();
+  team.poll = setInterval(() => { if (Date.now() - t0 > 5 * 60000) { clearInterval(team.poll); team.poll = null; } else void teamCheckLogin(); }, 3000);
+}
+async function teamCheckLogin() {
+  if (team.state === 'in' || team.checking) return;           // pop-up message, channel and polling may all fire
+  team.checking = true;
+  try { await teamSignedIn(await teamApi('me')); }
+  catch (e) { /* not yet */ }
+  finally { team.checking = false; }
+}
+function teamLogout() {
+  window.open('/cdn-cgi/access/logout', 'naiad-logout', 'popup,width=520,height=520');
+  teamSignedOut('Signed out.');
+}
+
+/* -- passphrase -- */
+async function teamCreate() {
+  const p1 = $('#teamNewPass').value, p2 = $('#teamNewPass2').value;
+  if (p1.length < 12) { setMsg('#teamState', 'Use at least 12 characters: a few random words works well.', 'err'); return; }
+  if (p1 !== p2) { setMsg('#teamState', 'The two passphrases differ.', 'err'); return; }
+  setMsg('#teamState', 'Creating…');
+  const n = await teamVaultNew(p1);
+  let j;
+  try { j = await teamApi('setup', { method: 'POST', body: { kdf: n.kdf } }); }
+  catch (e) {
+    if (e.status === 409 && e.data && e.data.kdf) { team.kdf = e.data.kdf; setMsg('#teamState', 'Someone created the team vault meanwhile: unlock it with their passphrase.', 'warn'); renderTeam(); }
+    else if (!(e instanceof TeamAuthError)) setMsg('#teamState', e.message, 'err');
+    return;
+  }
+  $('#teamNewPass').value = ''; $('#teamNewPass2').value = '';
+  Object.assign(team, { kdf: j.kdf, key: n.key, salt: n.salt, iter: n.iter, msg: '' });
+  teamTouch(); await teamReload();
+  setMsg('#teamSaved', 'Team vault created. Share the passphrase with the team through your password manager, then import the CLS file.', 'ok');
+}
+async function teamUnlock() {
+  const pass = $('#teamPass').value;
+  setMsg('#teamState', 'Unlocking…');
+  try {
+    if (!team.kdf) team.kdf = (await teamApi('me')).kdf;
+    const o = await teamVaultUnlock(team.kdf, pass);
+    Object.assign(team, { key: o.key, salt: o.salt, iter: o.iter, msg: '' });
+  } catch (e) { if (!(e instanceof TeamAuthError)) setMsg('#teamState', e.message, 'err'); return; }
+  finally { $('#teamPass').value = ''; }
+  teamTouch(); await teamReload();
+}
+async function teamChangePass() {
+  teamTouch();
+  const p1 = $('#teamChPass').value, p2 = $('#teamChPass2').value;
+  if (p1.length < 12) { setMsg('#teamSaved', 'New passphrase: at least 12 characters.', 'err'); return; }
+  if (p1 !== p2) { setMsg('#teamSaved', 'The two new passphrases differ.', 'err'); return; }
+  if (!(await confirmDialog('Change the team passphrase?', `Every key (${team.records.length}) is re-encrypted with the new passphrase. Every station then needs the new one; offline copies and backup files keep opening with the old one.`, 'Change it', { focusCancel: true }))) return;
+  setMsg('#teamSaved', 'Re-encrypting…');
+  try {
+    const j = await teamApi('export?why=passphrase%20change');
+    const n = await teamVaultNew(p1), keys = [];
+    for (const r of j.records) keys.push({ id: r.id, version: r.version, key_enc: await teamSealKey(n.key, r.id, await teamOpenKey(team.key, r.id, r.key_enc)) });
+    const res = await teamApi('rekey', { method: 'POST', body: { version: j.kdf.version, kdf: n.kdf, keys } });
+    Object.assign(team, { kdf: res.kdf, key: n.key, salt: n.salt, iter: n.iter });
+  } catch (e) { if (!(e instanceof TeamAuthError)) setMsg('#teamSaved', `Passphrase not changed: ${e.message}`, 'err'); await teamReload(); return; }
+  $('#teamChPass').value = ''; $('#teamChPass2').value = ''; $('#teamChRow').hidden = true;
+  await teamReload();
+  setMsg('#teamSaved', 'Passphrase changed: every key was re-encrypted. Tell the team the new passphrase.', 'ok');
+}
+
+function teamUpsert(rec) {
+  const i = team.records.findIndex(r => r.id === rec.id);
+  if (i < 0) team.records.push(rec); else team.records[i] = rec;
+}
+async function teamReload() {
+  if (team.state !== 'in') return;
+  try {
+    if (!team.kdf) team.kdf = (await teamApi('me')).kdf;             // created on another station meanwhile?
+    if (!team.kdf) { team.records = []; renderTeam(); renderCredVault(); return; }
+    const j = await teamApi('creds');
+    team.records = j.records; team.email = j.email || team.email; team.loadedAt = Date.now();
+    if (team.kdf && j.kdfVersion !== team.kdf.version) { team.kdf = (await teamApi('me')).kdf; if (team.key) teamLock('The team passphrase was changed on another station: unlock with the new one.'); }
+  } catch (e) {
+    if (e.data && e.data.code === 'no_vault') { team.kdf = null; team.records = []; }
+    else if (!(e instanceof TeamAuthError)) setMsg('#teamSaved', e.message, 'err');
+  }
+  renderTeam(); renderCredVault();
+}
+
+/* -- tracking (needs the sign-in, not the passphrase) -- */
+function teamQueue(ev) {
+  let q = [];
+  try { q = JSON.parse(storeGet(TEAM_PENDING) || '[]'); } catch (e) { q = []; }
+  q.push(ev); storeSet(TEAM_PENDING, JSON.stringify(q));
+}
+async function teamTrack(ev) {
+  if (team.state === 'offline' || team.state === 'unconfigured') return;
+  if (team.state === 'in') {
+    try {
+      const j = await teamApi(`creds/${ev.id}/track`, { method: 'POST', body: ev });
+      teamUpsert(j.record); renderTeam(); renderCredVault();
+      note(`Team vault: ID ${ev.id} marked ${j.record.status}${j.record.sn ? ' on ' + j.record.sn : ''}`, 'info');
+      return;
+    } catch (e) {
+      if (e.data && (e.data.code === 'unknown_id' || e.data.code === 'no_vault')) { note(`Team vault: ID ${ev.id} is not in the vault (not tracked)`, 'warn'); return; }
+      if (!(e instanceof TeamAuthError) && e.status) { note(`Team vault: ${e.message}`, 'error'); return; }
+    }
+  }
+  teamQueue(ev);
+  note(`Team vault: ID ${ev.id} ${ev.kind} kept in this browser, sent at the next sign-in`, 'warn');
+}
+async function teamFlushPending() {
+  let q = [];
+  try { q = JSON.parse(storeGet(TEAM_PENDING) || '[]'); } catch (e) { q = []; }
+  if (!q.length) return;
+  const left = [];
+  for (const ev of q) {
+    try { await teamApi(`creds/${ev.id}/track`, { method: 'POST', body: ev }); }
+    catch (e) { if (!(e.data && (e.data.code === 'unknown_id' || e.data.code === 'no_vault'))) left.push(ev); }
+  }
+  if (left.length) storeSet(TEAM_PENDING, JSON.stringify(left)); else storeDel(TEAM_PENDING);
+  await teamReload();
+  setMsg('#teamSaved', `Sent ${q.length - left.length} unit change(s) recorded while signed out${left.length ? `; ${left.length} still waiting` : ''}.`, left.length ? 'warn' : 'ok');
+}
+
+/* -- using / showing keys -- */
+async function teamFetchKey(id, why) {
+  const j = await teamApi(`creds/${id}/key?why=${encodeURIComponent(why)}`);
+  return teamOpenKey(team.key, id, j.key_enc);
+}
+async function teamUse(id) {
+  teamTouch();
+  const r = team.records.find(x => x.id === id);
+  if (!r) return;
+  if (r.status !== 'free' && !(await confirmDialog(`ID ${r.id} is ${r.status}`, `${r.sn ? `The team vault has it on ${r.sn}. ` : ''}Use it for this unit anyway?`, 'Use it', { focusCancel: true }))) return;
+  let key;
+  try { key = await teamFetchKey(id, 'provision'); }
+  catch (e) { if (!(e instanceof TeamAuthError)) setMsg('#credMsg', `Team vault: ${e.message}`, 'err'); return; }
+  $('#credId').value = r.id; $('#credAddr').value = r.addr; $('#credKey').value = key; $('#credRconf').value = r.rconf || '';
+  key = '';
+  credValidateUi(false);
+  ui.vaultPick = r.id;
+  setMsg('#credMsg', `Filled from the team vault: ID ${r.id}. "Write, reset & verify" provisions it; the vault marks it in use once verified.`, 'ok');
+  goTo('#cardCred', '#btnProvision');
+}
+async function teamToggleKey(id) {
+  teamTouch();
+  if (team.keys.has(id)) { team.keys.delete(id); renderTeam(); return; }
+  try { team.keys.set(id, await teamFetchKey(id, 'shown')); }
+  catch (e) { if (!(e instanceof TeamAuthError)) setMsg('#teamSaved', `ID ${id}: ${e.message}`, 'err'); return; }
+  setTimeout(() => { if (team.keys.delete(id)) renderTeam(); }, 30000);
+  renderTeam();
+}
+async function teamToggleHist(id) {
+  teamTouch();
+  if (team.hist.has(id)) { team.hist.delete(id); renderTeam(); return; }
+  try { team.hist.set(id, (await teamApi(`creds/${id}/history`)).history); }
+  catch (e) { if (!(e instanceof TeamAuthError)) setMsg('#teamSaved', `ID ${id}: ${e.message}`, 'err'); return; }
+  renderTeam();
+}
+
+/* -- editing -- */
+async function teamCellChanged(el) {
+  teamTouch();
+  const id = el.dataset.id, f = el.dataset.f;
+  const r = team.records.find(x => x.id === id);
+  if (!r || f === 'id' || !team.key) return;
+  const val = el.value.trim();
+  if (f === 'key' ? (!val || val.toUpperCase() === (team.keys.get(id) || '')) : val === (r[f] || '')) return;
+  const td = el.closest('td');
+  const fail = msg => { td.classList.add('bad'); el.title = msg; setMsg('#teamSaved', `ID ${id}: ${msg}. Not saved.`, 'err'); };
+  let patch = { version: r.version, [f]: val };
+  if (f === 'key') {
+    const k = vaultNormalize({ ...r, key: val }).rec.key;
+    if (!isHex(k, 32)) { fail('KEY: 32 hex'); return; }
+    patch = { version: r.version, key_enc: await teamSealKey(team.key, id, k), key_crc: seckeyCrc(k), kdfVersion: team.kdf.version };
+  }
+  try {
+    const j = await teamApi(`creds/${id}`, { method: 'PATCH', body: patch });
+    teamUpsert(j.record);
+    td.classList.remove('bad'); el.title = '';
+    if (f === 'key') team.keys.delete(id);
+    setMsg('#teamSaved', `ID ${id}: saved · ${new Date().toLocaleTimeString()}`, 'ok');
+  } catch (e) {
+    if (e instanceof TeamAuthError) return;
+    fail(e.message);
+    if (e.status === 409) await teamReload();
+    return;
+  }
+  if (f === 'status' || f === 'key') renderTeam(); else { renderTeamCounts(); renderCredVault(); }
+}
+async function teamDelete(id) {
+  teamTouch();
+  const r = team.records.find(x => x.id === id);
+  if (!r) return;
+  if (!(await confirmDialog(`Delete ID ${r.id} from the team vault?`, `${r.status === 'in use' ? `It is in use${r.sn ? ' on ' + r.sn : ''}. ` : ''}The set is removed for every station (its history stays on the server; CLS still has it).`, 'Delete', { focusCancel: true }))) return;
+  try { await teamApi(`creds/${id}?version=${r.version}`, { method: 'DELETE' }); }
+  catch (e) { if (!(e instanceof TeamAuthError)) setMsg('#teamSaved', `ID ${id}: ${e.message}`, 'err'); if (e.status === 409) await teamReload(); return; }
+  team.records = team.records.filter(x => x !== r);
+  setMsg('#teamSaved', `ID ${id} deleted.`, 'ok');
+  renderTeam(); renderCredVault();
+}
+
+/* -- import / add -- */
+async function teamImportFile(file) {
+  if (!file) return;
+  teamTouch();
+  try {
+    const parsed = await readCredentialFile(file.name, new Uint8Array(await file.arrayBuffer()));
+    await teamReload();
+    team.preview = { kind: 'file', name: file.name, parsed, merge: teamImportPreview(team.records, parsed.records) };
+  } catch (e) { setMsg('#teamSaved', `${file.name}: ${e.message}`, 'err'); return; }
+  renderTeamPreview();
+}
+async function teamUploadLocal() {
+  teamTouch();
+  if (!vault.open) { setMsg('#teamSaved', 'Unlock the offline vault below first.', 'warn'); goTo('#cardVault', '#vaultPass'); return; }
+  await teamReload();
+  const records = vault.data.records.filter(vaultRecValid).map(r => ({ id: r.id, addr: r.addr, key: r.key, rconf: r.rconf || '', status: r.status, sn: r.sn || '', fw: r.fw || '', assigned: r.assigned || '', note: r.note || '' }));
+  team.preview = { kind: 'local', name: "this browser's offline vault", parsed: { records, invalid: [], notes: [] }, merge: teamImportPreview(team.records, records) };
+  renderTeamPreview();
+}
+async function teamSend(records, source) {
+  const out = { added: [], conflicts: [] };
+  for (let i = 0; i < records.length; i += TEAM_CHUNK) {
+    const sealed = await teamSealRecords(team.key, records.slice(i, i + TEAM_CHUNK));
+    const j = await teamApi('import', { method: 'POST', body: { source, kdfVersion: team.kdf.version, records: sealed } });
+    out.added.push(...j.added);
+    out.conflicts.push(...j.conflicts, ...j.invalid.map(x => ({ id: x.id, why: Object.entries(x.errors).map(([k, v]) => `${k.toUpperCase()} ${v}`).join(', ') })));
+  }
+  return out;
+}
+async function teamCommitPreview() {
+  teamTouch();
+  const p = team.preview;
+  if (!p) return;
+  let res;
+  try { res = await teamSend(p.merge.send, p.name); }
+  catch (e) { setMsg('#teamPreviewMsg', e.message, 'err'); await teamReload(); return; }
+  team.preview = null;
+  await teamReload();
+  setMsg('#teamSaved', `Added ${res.added.length} set(s) from ${p.name}${res.conflicts.length ? `; ${res.conflicts.length} skipped (${res.conflicts.map(c => `${c.id}: ${c.why}`).join('; ')})` : ''}.`, res.conflicts.length ? 'warn' : 'ok');
+}
+async function teamAddOne() {
+  teamTouch();
+  const v = id => ($('#' + id) || {}).value || '';
+  const { rec, errors } = vaultNormalize({ id: v('teamAddId'), addr: v('teamAddAddr'), key: v('teamAddKey'), rconf: v('teamAddRconf'), note: v('teamAddNote') });
+  if (Object.keys(errors).length) { setMsg('#teamPreviewMsg', Object.entries(errors).map(([k, e]) => `${k.toUpperCase()}: ${e}`).join(' · '), 'err'); return; }
+  let res;
+  try { res = await teamSend([rec], 'added by hand'); }
+  catch (e) { setMsg('#teamPreviewMsg', e.message, 'err'); return; }
+  if (!res.added.length) { setMsg('#teamPreviewMsg', res.conflicts.map(c => c.why).join('; ') || 'Already in the vault.', 'err'); return; }
+  team.preview = null;
+  await teamReload();
+  setMsg('#teamSaved', `ID ${rec.id} added.`, 'ok');
+}
+
+/* -- offline copies (same format as the offline vault, opened with the team passphrase) -- */
+async function teamBackupBlob(why) {
+  const j = await teamApi('export?why=' + encodeURIComponent(why));
+  const recs = [];
+  for (const r of j.records) recs.push({ id: r.id, addr: r.addr, key: await teamOpenKey(team.key, r.id, r.key_enc), rconf: r.rconf || '', status: r.status, sn: r.sn || '', fw: r.fw || '', assigned: r.assigned || '', note: r.note || '', source: r.source || '' });
+  const data = vaultNewData();
+  vaultMerge(data, recs, { commit: true, source: 'team vault', by: team.email });
+  recs.length = 0;
+  return { blob: await vaultSeal(data, team.key, team.salt, team.iter), n: data.records.length };
+}
+async function teamOfflineCopy(toFile) {
+  teamTouch();
+  if (!toFile && vaultStored() && !(await confirmDialog('Replace the offline vault in this browser?', 'The offline vault stored in this browser is replaced by a copy of the team vault. If it holds sets or changes the team vault lacks, cancel and use "Upload the offline vault" first.', 'Replace', { focusCancel: true }))) return;
+  let b;
+  try { b = await teamBackupBlob(toFile ? 'backup file' : 'offline copy'); }
+  catch (e) { if (!(e instanceof TeamAuthError)) setMsg('#teamSaved', e.message, 'err'); return; }
+  if (toFile) {
+    download(`naiad-team-vault_${stamp()}.json`, JSON.stringify(b.blob), 'application/json');
+    setMsg('#teamSaved', `Encrypted backup of ${b.n} set(s) downloaded: it opens with the team passphrase ("Load an encrypted vault file" below).`, 'ok');
+    return;
+  }
+  if (vault.open) await vaultLock('');
+  if (!storeSet(VAULT_STORE, JSON.stringify(b.blob))) { setMsg('#teamSaved', 'This browser blocks storage: download an encrypted backup instead.', 'err'); return; }
+  storeDel(VAULT_PENDING);
+  renderVault();
+  setMsg('#teamSaved', `Offline copy of ${b.n} set(s) saved in this browser: when the server cannot be reached, unlock it in "Offline vault" with the team passphrase.`, 'ok');
+}
+
+/* -- rendering -- */
+function renderTeamPreview() {
+  const box = $('#teamPreview'), p = team.preview;
+  box.innerHTML = ''; box.hidden = !p;
+  if (!p) return;
+  const h = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+  const cancel = h('button', 'Cancel', 'btn'); cancel.addEventListener('click', () => { team.preview = null; renderTeamPreview(); });
+  const msg = h('div', '', 'msg small'); msg.id = 'teamPreviewMsg';
+  if (p.kind === 'add') {
+    box.append(h('div', 'New credential set (from CLS):'));
+    const row = h('div', null, 'row');
+    for (const [id, ph, w] of [['teamAddId', 'ID (decimal)', 110], ['teamAddAddr', 'ADDR (8 hex)', 110], ['teamAddKey', 'KEY (32 hex)', 280], ['teamAddRconf', 'RCONF (optional)', 280], ['teamAddNote', 'Note', 160]]) {
+      const inp = h('input'); inp.id = id; inp.placeholder = ph; inp.autocomplete = 'off'; inp.spellcheck = false; inp.className = 'mono'; inp.style.width = w + 'px';
+      if (id === 'teamAddKey') inp.type = 'password';
+      row.append(inp);
+    }
+    const ok = h('button', 'Add', 'btn primary'); ok.addEventListener('click', () => void teamAddOne());
+    row.append(ok, cancel); box.append(row, msg);
+    $('#teamAddId').focus();
+    return;
+  }
+  const m = p.merge, inv = p.parsed.invalid;
+  box.append(h('div', `${p.name}: ${p.parsed.records.length + inv.length} set(s) read · ${m.added.length} new · ${m.identical.length} already in the vault · ${m.conflicts.length} conflict(s) · ${inv.length} invalid`));
+  const ul = h('ul', null, 'small');
+  for (const n of p.parsed.notes) ul.append(h('li', n));
+  for (const c of m.conflicts) ul.append(h('li', `Skipped ID ${c.id}: ${c.why}`));
+  for (const x of inv) ul.append(h('li', `Row ${x.line}${x.id ? ` (ID ${x.id})` : ''}: ${Object.entries(x.errors).map(([k, v]) => `${k.toUpperCase()} ${v}`).join(', ')}`));
+  if (ul.children.length) box.append(ul);
+  const row = h('div', null, 'row');
+  const ok = h('button', `Add ${m.added.length} new set(s) to the team vault`, 'btn primary'); ok.disabled = !m.added.length; ok.addEventListener('click', () => void teamCommitPreview());
+  row.append(ok, cancel); box.append(row, msg);
+}
+
+function renderTeamCounts() {
+  const c = { total: team.records.length, free: 0, 'in use': 0, retired: 0 };
+  for (const r of team.records) c[r.status] = (c[r.status] || 0) + 1;
+  $('#teamCounts').textContent = `${c.total} set(s): ${c.free} free · ${c['in use']} in use · ${c.retired} retired`;
+  $('#teamSum').innerHTML = ''; $('#teamSum').append(badge(`${c.free} FREE`, c.free ? 'pass' : 'warn'));
+}
+
+function teamRows() {
+  const q = $('#teamSearch').value.trim().toLowerCase(), f = $('#teamFilter').value;
+  let rows = team.records.filter(r => (!f || r.status === f) &&
+    (!q || [r.id, r.addr, r.sn, r.note, r.source, r.status, r.updated_by].some(x => String(x || '').toLowerCase().includes(q))));
+  const { col, dir } = team.sort;
+  if (col) rows = rows.slice().sort((a, b) => {
+    const x = a[col] || '', y = b[col] || '';
+    return (col === 'id' ? Number(x) - Number(y) : String(x).localeCompare(String(y))) * dir;
+  });
+  return rows;
+}
+
+function renderTeam() {
+  const open = teamOpen(), signedIn = team.state === 'in';
+  $('#teamOut').hidden = open; $('#teamIn').hidden = !open;
+  if (!open) {
+    $('#btnTeamLogin').hidden = !(team.state === 'out' || team.state === 'error');
+    $('#teamCreateRow').hidden = !(signedIn && !team.kdf);
+    $('#teamUnlockRow').hidden = !(signedIn && team.kdf);
+    $('#teamOutWho').hidden = !signedIn; $('#teamWho2').textContent = signedIn ? `Signed in as ${team.email}` : '';
+    const label = signedIn ? (team.kdf ? 'LOCKED' : 'NOT CREATED') : { out: 'SIGNED OUT', unconfigured: 'NOT SET UP', offline: 'OFFLINE', error: 'UNREACHABLE' }[team.state] || '…';
+    $('#teamSum').innerHTML = ''; $('#teamSum').append(badge(label, team.state === 'error' ? 'warn' : 'idle'));
+    const text = team.msg || {
+      out: 'Sign in with your @siliconvandals.com Google account.', unknown: 'Checking the team vault…',
+      in: team.kdf ? `Unlock with the team passphrase${team.records.length ? ` (${team.records.length} set(s))` : ''}.` : 'No team vault yet: choose the team passphrase to create it. Everyone in the team unlocks the vault with it.',
+    }[team.state] || '';
+    if (!team.poll || team.msg || signedIn) setMsg('#teamState', text, team.state === 'error' || team.state === 'unconfigured' ? 'warn' : '');
+    return;
+  }
+  $('#teamWho').textContent = team.email;
+  renderTeamPreview(); renderTeamCounts();
+  const body = $('#teamBody');
+  const fa = document.activeElement && document.activeElement.dataset ? [document.activeElement.dataset.id, document.activeElement.dataset.f] : null;
+  body.innerHTML = '';
+  const rows = teamRows();
+  rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    tr.dataset.id = r.id; tr.className = 'st-' + r.status.replace(' ', '');
+    const num = document.createElement('td'); num.className = 'num'; num.textContent = String(i + 1); tr.append(num);
+    for (const f of TEAM_COLS) {
+      const td = document.createElement('td');
+      let el;
+      if (f === 'status') {
+        el = document.createElement('select');
+        for (const s of VAULT_STATUSES) el.append(new Option(s, s));
+        el.value = r.status;
+      } else {
+        el = document.createElement('input');
+        el.autocomplete = 'off'; el.spellcheck = false;
+        if (f === 'key') {
+          const k = team.keys.get(r.id);
+          el.type = k ? 'text' : 'password'; el.value = k || ''; el.placeholder = `CRC ${r.key_crc}`;
+          el.title = k ? 'Shown for 30 s' : `Hidden (CRC-32 ${r.key_crc}). Type a new key to replace it.`;
+        } else {
+          el.type = 'text'; el.value = r[f] || '';
+          if (f === 'id') el.readOnly = true;
+          if (f === 'assigned') el.placeholder = 'YYYY-MM-DD';
+        }
+      }
+      el.dataset.id = r.id; el.dataset.f = f; el.setAttribute('aria-label', `${f} of ID ${r.id}`);
+      td.append(el); tr.append(td);
+    }
+    const ch = document.createElement('td'); ch.className = 'num';
+    ch.textContent = `${String(r.updated || '').slice(0, 10)} ${String(r.updated_by || '').split('@')[0]}`;
+    ch.title = `${r.updated || ''} by ${r.updated_by || '?'}${r.source ? `\nsource: ${r.source}` : ''}`;
+    tr.append(ch);
+    const act = document.createElement('td'); act.className = 'act';
+    const mk = (txt, title, fn) => { const b = document.createElement('button'); b.className = 'btn small'; b.type = 'button'; b.textContent = txt; b.title = title; b.addEventListener('click', fn); return b; };
+    act.append(
+      mk('Use', 'Fill the Kineis credentials fields with this set (the key fetch is logged)', () => void teamUse(r.id)),
+      mk(team.keys.has(r.id) ? 'Hide' : 'Key', 'Show or hide this key (hidden again after 30 s; the key fetch is logged)', () => void teamToggleKey(r.id)),
+      mk('Log', 'History of this set', () => void teamToggleHist(r.id)),
+      mk('✕', 'Delete this set from the team vault', () => void teamDelete(r.id)));
+    tr.append(act);
+    body.append(tr);
+    if (team.hist.has(r.id)) {
+      const hr = document.createElement('tr'); hr.className = 'hist';
+      const td = document.createElement('td'); td.colSpan = TEAM_COLS.length + 3;
+      td.textContent = team.hist.get(r.id).map(h => `${h.t.slice(0, 16).replace('T', ' ')}  ${h.ev}${h.note ? ': ' + h.note : ''}${h.by ? '  (' + h.by + ')' : ''}`).join('\n') || 'No history';
+      hr.append(td); body.append(hr);
+    }
+  });
+  if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = TEAM_COLS.length + 3; td.className = 'muted'; td.textContent = team.records.length ? 'No set matches the filter.' : 'Empty: import a CLS file, add a set, or upload an offline vault.'; tr.append(td); body.append(tr); }
+  for (const th of $$('#teamHead th[data-f]')) th.dataset.sort = team.sort.col === th.dataset.f ? (team.sort.dir > 0 ? 'asc' : 'desc') : '';
+  if (fa && fa[0]) { const el = body.querySelector(`[data-id="${fa[0]}"][data-f="${fa[1]}"]`); if (el) el.focus(); }
+}
+
+function initTeam() {
+  $('#btnTeamLogin').addEventListener('click', teamLogin);
+  for (const id of ['#btnTeamLogout', '#btnTeamLogout2']) $(id).addEventListener('click', teamLogout);
+  $('#btnTeamCreate').addEventListener('click', () => void teamCreate());
+  $('#teamNewPass2').addEventListener('keydown', e => { if (e.key === 'Enter') void teamCreate(); });
+  $('#btnTeamUnlock').addEventListener('click', () => void teamUnlock());
+  $('#teamPass').addEventListener('keydown', e => { if (e.key === 'Enter') void teamUnlock(); });
+  $('#btnTeamLock').addEventListener('click', () => teamLock('Locked.'));
+  $('#btnTeamReload').addEventListener('click', () => { teamTouch(); void teamReload(); });
+  $('#btnTeamImport').addEventListener('click', () => $('#teamFile').click());
+  $('#teamFile').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; void teamImportFile(f); });
+  const drop = $('#teamIn');
+  drop.addEventListener('dragover', e => { e.preventDefault(); });
+  drop.addEventListener('drop', e => { e.preventDefault(); if (teamOpen() && e.dataTransfer.files[0]) void teamImportFile(e.dataTransfer.files[0]); });
+  $('#btnTeamAdd').addEventListener('click', () => { teamTouch(); team.preview = { kind: 'add' }; renderTeamPreview(); });
+  $('#btnTeamCsv').addEventListener('click', () => download(`naiad-credentials_team_${stamp()}.csv`, vaultCsv({ records: team.records }), 'text/csv'));
+  $('#btnTeamCopy').addEventListener('click', () => void teamOfflineCopy(false));
+  $('#btnTeamFile').addEventListener('click', () => void teamOfflineCopy(true));
+  $('#btnTeamUpload').addEventListener('click', () => void teamUploadLocal());
+  $('#btnTeamPass').addEventListener('click', () => { teamTouch(); $('#teamChRow').hidden = !$('#teamChRow').hidden; });
+  $('#btnTeamChPass').addEventListener('click', () => void teamChangePass());
+  $('#teamSearch').addEventListener('input', () => { teamTouch(); renderTeam(); });
+  $('#teamFilter').addEventListener('change', () => { teamTouch(); renderTeam(); });
+  for (const th of $$('#teamHead th[data-f]')) th.addEventListener('click', () => {
+    const f = th.dataset.f;
+    team.sort = team.sort.col === f ? { col: f, dir: -team.sort.dir } : { col: f, dir: 1 };
+    renderTeam();
+  });
+  const body = $('#teamBody');
+  body.addEventListener('change', e => { if (e.target.dataset && e.target.dataset.f) void teamCellChanged(e.target); });
+  body.addEventListener('keydown', e => {
+    const el = e.target;
+    if (!el.dataset || !el.dataset.f) return;
+    if (e.key === 'Escape') {
+      const r = team.records.find(x => x.id === el.dataset.id);
+      if (r) { el.value = el.dataset.f === 'key' ? (team.keys.get(r.id) || '') : (r[el.dataset.f] || ''); el.closest('td').classList.remove('bad'); }
+      return;
+    }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const tr = el.closest('tr'); let next = e.shiftKey ? tr.previousElementSibling : tr.nextElementSibling;
+    while (next && !next.dataset.id) next = e.shiftKey ? next.previousElementSibling : next.nextElementSibling;
+    const t = next && next.querySelector(`[data-f="${el.dataset.f}"]`);
+    if (t) t.focus(); else el.blur();          // leaving the cell commits it ('change')
+  });
+  // The sign-in pop-up reports back (BroadcastChannel survives the trip through Google's pages)
+  const loggedIn = () => void teamCheckLogin();
+  try { new BroadcastChannel('naiad-login').onmessage = loggedIn; } catch (e) { /* old browser: polling covers it */ }
+  window.addEventListener('message', e => { if (e.origin === location.origin && e.data && e.data.naiadLogin) loggedIn(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && team.state === 'in' && Date.now() - team.loadedAt > 30000) void teamReload(); });
+  renderTeam();
+  void teamInit();
 }
 
 function initVault() {
@@ -4341,6 +5103,10 @@ function init() {
 
   $('#btnChooseBin').addEventListener('click', () => $('#fwFile').click());
   $('#fwFile').addEventListener('change', e => loadImageFile(e.target.files[0]));
+  $('#relSelect').addEventListener('change', relSelected);
+  $('#btnRelLoad').addEventListener('click', () => void relLoad());
+  $('#expectFw').addEventListener('input', e => { e.target.dataset.auto = ''; });
+  void relInit();
   $('#btnGoFlash').addEventListener('click', () => goTo('#cardFlash', ui.image && ui.image.analysis.ok ? '#btnFlash' : '#btnChooseBin'));
   $('#btnGoCreds').addEventListener('click', () => goTo('#cardCred', '#credId'));
   $('#btnWiz').addEventListener('click', doWizard);
@@ -4373,6 +5139,7 @@ function init() {
   $('#btnCredRead').addEventListener('click', doCredRead);
   $('#btnCredErase').addEventListener('click', doCredErase);
   initVault();
+  initTeam();
 
   $('#btnCommRefresh').addEventListener('click', () => doComm(null));
   $('#btnCommStart').addEventListener('click', () => doComm('START'));
