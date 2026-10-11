@@ -135,6 +135,73 @@ void test_noise_immunity(void)
 	TEST_PASS();
 }
 
+/* ---- GSV sky view ---- */
+
+/** Indoors: satellites listed but weak or untracked -> no sky after 45 s. */
+void test_gsv_indoor_no_sky(void)
+{
+	cc_nmea_parser_t p;
+
+	cc_nmea_init(&p);
+	feed_sentence(&p, "GPGSV,2,1,06,02,45,120,18,05,30,200,,12,60,045,15,15,10,300,");
+	feed_sentence(&p, "GPGSV,2,2,06,24,20,080,21,29,05,150,");
+	feed_sentence(&p, "GLGSV,1,1,02,65,40,100,,72,25,210,12");
+	ASSERT_EQ(1, cc_nmea_sky_strong(&p));          /* only the 21 dBHz one */
+	ASSERT_EQ(21, p.max_cno);
+	ASSERT_FALSE(cc_nmea_no_sky(&p, 30000, 45000, 2)); /* too early to judge */
+	ASSERT_TRUE(cc_nmea_no_sky(&p, 45000, 45000, 2));
+	TEST_PASS();
+}
+
+/** Outdoors: several strong satellites across constellations -> keep going. */
+void test_gsv_outdoor_sky(void)
+{
+	cc_nmea_parser_t p;
+
+	cc_nmea_init(&p);
+	feed_sentence(&p, "GPGSV,2,1,05,02,45,120,38,05,30,200,33,12,60,045,41,15,10,300,");
+	feed_sentence(&p, "GPGSV,2,2,05,24,20,080,29");
+	feed_sentence(&p, "GLGSV,1,1,02,65,40,100,35,72,25,210,19");
+	ASSERT_EQ(5, cc_nmea_sky_strong(&p));          /* 4 GP + 1 GL */
+	ASSERT_FALSE(cc_nmea_no_sky(&p, 120000, 45000, 2));
+	TEST_PASS();
+}
+
+/** A fresh group replaces that constellation's count (sky improved). */
+void test_gsv_group_replaces(void)
+{
+	cc_nmea_parser_t p;
+
+	cc_nmea_init(&p);
+	feed_sentence(&p, "GPGSV,1,1,02,02,45,120,,05,30,200,");
+	ASSERT_EQ(0, cc_nmea_sky_strong(&p));
+	feed_sentence(&p, "GPGSV,1,1,02,02,45,120,31,05,30,200,27");
+	ASSERT_EQ(2, cc_nmea_sky_strong(&p));
+	TEST_PASS();
+}
+
+/** NMEA 4.1: trailing signal id after the last block is ignored. */
+void test_gsv_nmea41_signal_id(void)
+{
+	cc_nmea_parser_t p;
+
+	cc_nmea_init(&p);
+	feed_sentence(&p, "GPGSV,1,1,03,02,45,120,30,05,30,200,25,12,60,045,10,1");
+	ASSERT_EQ(2, cc_nmea_sky_strong(&p));
+	TEST_PASS();
+}
+
+/** No GSV from this receiver: never cut a window short. */
+void test_gsv_absent_never_aborts(void)
+{
+	cc_nmea_parser_t p;
+
+	cc_nmea_init(&p);
+	feed_sentence(&p, GGA_GOOD);
+	ASSERT_FALSE(cc_nmea_no_sky(&p, 600000, 45000, 2));
+	TEST_PASS();
+}
+
 int main(void)
 {
 	TEST_SUITE_START("CC_TRACKER NMEA parser");
@@ -144,6 +211,11 @@ int main(void)
 	RUN_TEST(test_bad_checksum_dropped);
 	RUN_TEST(test_hemispheres);
 	RUN_TEST(test_noise_immunity);
+	RUN_TEST(test_gsv_indoor_no_sky);
+	RUN_TEST(test_gsv_outdoor_sky);
+	RUN_TEST(test_gsv_group_replaces);
+	RUN_TEST(test_gsv_nmea41_signal_id);
+	RUN_TEST(test_gsv_absent_never_aborts);
 	TEST_SUITE_END();
 	return tests_failed ? 1 : 0;
 }

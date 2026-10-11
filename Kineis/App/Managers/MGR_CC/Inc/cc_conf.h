@@ -70,6 +70,14 @@
 #define CC_GPS_MAX_DURATIONS    6         /**< adaptive ramp: max chained windows
                                            *   (6 x 90 s = 9 min ephemeris download) */
 #define CC_GPS_FIX_EVERY_N_TX   3         /**< scheduled fix every Nth transmit */
+/* Sky check (power): GPS is the dominant consumer, and indoors a window can
+ * never succeed. After CC_GPS_SKY_CHECK_MS, if the receiver's GSV reports
+ * fewer than CC_GPS_SKY_MIN_SATS satellites at >= CC_GPS_SKY_MIN_CNO dBHz, the
+ * window ends early (counted as a miss). Receivers that send no GSV are never
+ * cut short. Outdoors several satellites exceed 20 dBHz within seconds. */
+#define CC_GPS_SKY_CHECK_MS     45000UL
+#define CC_GPS_SKY_MIN_SATS     2
+#define CC_GPS_SKY_MIN_CNO      20        /**< dBHz */
 
 /* ---- Env sensors (I2C2) -------------------------------------------------- */
 #define CC_ENV_MAX_AGE_MS       60000UL   /**< shared cache max age (TESTING: 1 min) */

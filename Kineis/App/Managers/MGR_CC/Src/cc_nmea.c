@@ -1,11 +1,12 @@
 /**
  * @file    cc_nmea.c
- * @brief   NMEA RMC+GGA parser — port of WS85-Tracker GpsNmea.h.
+ * @brief   NMEA RMC+GGA+GSV parser — port of WS85-Tracker GpsNmea.h.
  */
 
 #include <string.h>
 #include <stdlib.h>
 #include "cc_nmea.h"
+#include "cc_conf.h"
 
 void cc_nmea_init(cc_nmea_parser_t *p)
 {
@@ -145,6 +146,63 @@ static bool parse_rmc(cc_nmea_parser_t *p)
 	return nf.valid;
 }
 
+/* GSV: numMsg,msgNum,numSV, then per satellite svid,elev,az,cno (cno may be
+ * empty when not tracked). NMEA 4.1 appends a signal id after the last
+ * block; the 4-field stride ignores it. */
+static int talker_slot(const char *t)
+{
+	if (t[0] == 'G' && t[1] == 'P')
+		return 0;
+	if (t[0] == 'G' && t[1] == 'L')
+		return 1;
+	if (t[0] == 'G' && t[1] == 'A')
+		return 2;
+	if ((t[0] == 'G' && t[1] == 'B') || (t[0] == 'B' && t[1] == 'D'))
+		return 3;
+	return 4;
+}
+
+static void parse_gsv(cc_nmea_parser_t *p)
+{
+	char *f[24];
+	int slot = talker_slot(p->line);
+	int n = split(p, f, 24);
+
+	if (n < 4)
+		return;
+	int num = atoi(f[1]);
+	int idx = atoi(f[2]);
+
+	if (idx == 1)
+		p->gsv_cur = 0;
+	for (int k = 4; k + 3 < n; k += 4) {
+		int cno = f[k + 3][0] ? atoi(f[k + 3]) : 0;
+
+		if (cno > p->max_cno)
+			p->max_cno = (uint8_t)cno;
+		if (cno >= CC_GPS_SKY_MIN_CNO && p->gsv_cur < 255)
+			p->gsv_cur++;
+	}
+	if (idx == num)
+		p->gsv_strong[slot] = p->gsv_cur;
+	p->gsv_msgs++;
+}
+
+uint8_t cc_nmea_sky_strong(const cc_nmea_parser_t *p)
+{
+	unsigned sum = 0;
+
+	for (int i = 0; i < 5; i++)
+		sum += p->gsv_strong[i];
+	return (uint8_t)(sum > 255 ? 255 : sum);
+}
+
+bool cc_nmea_no_sky(const cc_nmea_parser_t *p, uint32_t elapsed_ms, uint32_t check_ms,
+                    uint8_t min_strong)
+{
+	return elapsed_ms >= check_ms && p->gsv_msgs > 0 && cc_nmea_sky_strong(p) < min_strong;
+}
+
 static bool parse(cc_nmea_parser_t *p)
 {
 	p->line[p->len] = 0;
@@ -159,6 +217,8 @@ static bool parse(cc_nmea_parser_t *p)
 		return parse_rmc(p);
 	if (!strncmp(t, "GGA", 3))
 		parse_gga(p);
+	else if (!strncmp(t, "GSV", 3))
+		parse_gsv(p);
 	return false;
 }
 

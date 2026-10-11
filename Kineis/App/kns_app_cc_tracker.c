@@ -1428,9 +1428,16 @@ void KNS_APP_cc_tracker_loop(void)
 				return;
 			}
 		}
-		if (state_elapsed_ms() > gps_budget_ms) {
+		bool no_sky = cc_nmea_no_sky(&nmea, state_elapsed_ms(), CC_GPS_SKY_CHECK_MS,
+			CC_GPS_SKY_MIN_SATS);
+
+		if (no_sky || state_elapsed_ms() > gps_budget_ms) {
+			if (no_sky)
+				MGR_LOG_INFO("[GPS] no sky after %lus (%u strong sats, best %u dBHz) - window ended early\r\n",
+					(unsigned long)(state_elapsed_ms() / 1000),
+					cc_nmea_sky_strong(&nmea), nmea.max_cno);
 			MGR_LOG_DEBUG("[GPS] no fix in %lus (%lu sentences, %lu cs-err) — backoff %u\r\n",
-				(unsigned long)(gps_budget_ms / 1000),
+				(unsigned long)(state_elapsed_ms() / 1000),
 				(unsigned long)nmea.sentences,
 				(unsigned long)nmea.cs_errors, gps_durations);
 			CC_HW_uartClose();
