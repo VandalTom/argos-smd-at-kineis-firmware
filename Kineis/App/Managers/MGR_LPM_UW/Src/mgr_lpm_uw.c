@@ -904,8 +904,14 @@ void MGR_LPM_UW_enterStop2TimedMs(uint32_t ms)
 		 * — RSF re-sets within ~2 RTCCLK cycles (~60 us) when alive, and times
 		 * out only when RTCCLK is dead, right before we reset. The reset re-runs
 		 * SystemClock_Config which fails LSE and comes up on LSI (~±5% timing).
-		 * MGR_ERR_logAndReset leaves a TAMP forensic marker (readable post-mortem). */
-		if (HAL_RTC_WaitForSynchro(&hrtc) != HAL_OK) {
+		 * MGR_ERR_logAndReset leaves a TAMP forensic marker (readable post-mortem).
+		 * RSF only clears with the RTC write protection off (HAL note on
+		 * HAL_RTC_WaitForSynchro; RTC_ICSR is write-protected): with it on the
+		 * clear is ignored, RSF stays set and a dead clock passed this gate. */
+		__HAL_RTC_WRITEPROTECTION_DISABLE(&hrtc);
+		HAL_StatusTypeDef rtc_sync = HAL_RTC_WaitForSynchro(&hrtc);
+		__HAL_RTC_WRITEPROTECTION_ENABLE(&hrtc);
+		if (rtc_sync != HAL_OK) {
 			/* Latch LSI for the recovery boot so a MARGINAL crystal (OK at boot,
 			 * dead in cold STOP2) can't be re-selected into a reset loop. */
 			extern void SystemClock_armLsiFallback(void);

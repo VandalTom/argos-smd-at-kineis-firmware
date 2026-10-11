@@ -861,7 +861,17 @@ void LPM_shutdownWithAutoWake(uint32_t wakeup_seconds)
 	 * out only when RTCCLK is dead; reset so the boot LSE->LSI fallback
 	 * (brick #2) re-inits the RTC on LSI. The wakeup_seconds==0 magnet-only
 	 * true-off path uses the HW reed latch (no RTC) and is exempt. */
-	if (wakeup_seconds > 0 && HAL_RTC_WaitForSynchro(&hrtc) != HAL_OK) {
+	HAL_StatusTypeDef rtc_sync = HAL_OK;
+
+	if (wakeup_seconds > 0) {
+		/* RSF only clears with the RTC write protection off (HAL note on
+		 * HAL_RTC_WaitForSynchro): with it on the clear is ignored, RSF
+		 * stays set and a dead clock passed this gate */
+		__HAL_RTC_WRITEPROTECTION_DISABLE(&hrtc);
+		rtc_sync = HAL_RTC_WaitForSynchro(&hrtc);
+		__HAL_RTC_WRITEPROTECTION_ENABLE(&hrtc);
+	}
+	if (rtc_sync != HAL_OK) {
 		extern void SystemClock_armLsiFallback(void);
 		SystemClock_armLsiFallback();   /* force LSI on the recovery boot */
 		NVIC_SystemReset();             /* boot re-inits the RTC on LSI (brick #2) */
