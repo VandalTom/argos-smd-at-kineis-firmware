@@ -9,6 +9,7 @@ on:
     branches: ['**']
     tags: ['v*']
   pull_request:
+  workflow_dispatch:        # "Run workflow" button on the Actions tab
 
 permissions:
   contents: write          # release job needs to create/upload a Release
