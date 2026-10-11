@@ -121,6 +121,13 @@ static uint8_t  mac_init_retries;
 static uint32_t tx_count;           /**< TX attempts since boot (GPS schedule) */
 
 static cc_tier_state_t tier;
+static uint32_t cycle_base_ms = CC_TX_PERIOD_MS; /**< tier base from this cycle's reading */
+
+/** This cycle's sensor fields, frozen at the end of SAMPLE_ENV (the original
+ *  fills each group straight after its refresh): freshness is judged there,
+ *  so a long GPS window can't age wind/env/battery out of the packet or the
+ *  battery out of the tier. TX_SEND adds position, time and wake counter. */
+static cc_payload_fields_t cycle_fields;
 
 /* ---- Console requests, self-test, commissioning ---- */
 
@@ -499,16 +506,22 @@ static bool env_stale(void)
 
 /* ---- Payload ---- */
 
-static void build_fields(cc_payload_fields_t *f)
+/** The fields that move after the sample phases: position (a fix lands in
+ *  SAMPLE_GPS), time and the wake counter. */
+static void fields_late(cc_payload_fields_t *f)
 {
-	memset(f, 0, sizeof(*f));
-
 #if CC_ENABLE_GPS
 	f->lat = gps_lat; /* last-known fix; (0,0) until the first ever */
 	f->lon = gps_lon;
 #endif
 	f->epoch = clock_now();
 	f->wake16 = (uint16_t)(HAL_GetTick() >> 16); /* 65.5 s ticks since boot */
+}
+
+static void build_fields(cc_payload_fields_t *f)
+{
+	memset(f, 0, sizeof(*f));
+	fields_late(f);
 
 #if CC_ENABLE_WS85
 	f->ws_valid = cache_fresh(&ws_cache.meta, CC_WS85_MAX_AGE_MS);
@@ -575,18 +588,17 @@ static void build_fields(cc_payload_fields_t *f)
 #endif
 }
 
-/** This cycle's battery view for the tier machine: the NiMH pack when it was
- *  measured this cycle, else 0 (failed read lands LOW — conservative). */
-static uint16_t battery_for_tier(bool *nimh)
+/** End of SAMPLE_ENV: freeze this cycle's sensor fields and move the battery
+ *  tier on the NiMH reading (0 = not measured this cycle -> LOW, conservative). */
+static void cycle_snapshot(void)
 {
-#if CC_ENABLE_ADC_SENSE
-	if (cache_fresh(&adc_cache.meta, CC_ENV_MAX_AGE_MS)) {
-		*nimh = true;
-		return adc_cache.nimh_mv;
-	}
-#endif
-	*nimh = true;
-	return 0;
+	cc_tier_t was = tier.tier;
+
+	build_fields(&cycle_fields);
+	cycle_base_ms = cc_tier_update(&tier, cycle_fields.batt_mv, true);
+	if (tier.tier != was)
+		MGR_LOG_INFO("[BAT] %umV: tier %s -> %s\r\n", cycle_fields.batt_mv,
+			cc_tier_name(was), cc_tier_name(tier.tier));
 }
 
 static bool push_tx(const uint8_t payload[CC_PAYLOAD_BYTES])
@@ -917,6 +929,13 @@ static void selftest_run(void)
 			uint8_t payload[CC_PAYLOAD_BYTES];
 
 			build_fields(&f);
+			if (st.at_boot && cc_tier_is_critical(f.batt_mv, true)) {
+				/* Every reboot would transmit at once on a flat pack
+				 * (brownout loop); AT+SELFTEST still forces it. */
+				st_report(CC_STI_TX, CC_STV_SKIP, "batt_crit");
+				st_goto(STS_DONE);
+				return;
+			}
 			cc_payload_pack(payload, &f);
 			st_tx_evt = 0;
 			if (!mac_ready) {
@@ -1036,11 +1055,13 @@ static void send_state(void)
 	const char *st_name = st.running ? "RUNNING" : !st.done ? "NONE" :
 	                      cc_selftest_passed(&st) ? "PASS" : "FAIL";
 
-	MCU_AT_CONSOLE_send("+STATE=%s,up=%lu,tx=%lu,mac=%u,comm=%s,st=%s,slp=%lu,prov=%u\r\n",
+	MCU_AT_CONSOLE_send("+STATE=%s,up=%lu,tx=%lu,mac=%u,comm=%s,st=%s,slp=%lu,prov=%u,"
+		"bat=%u,tier=%s\r\n",
 		cc_state_names[cc_state], (unsigned long)(HAL_GetTick() / 1000UL),
 		(unsigned long)tx_count, mac_ready ? 1u : 0u,
 		cc_comm_phase_name(comm.phase), st_name,
-		(unsigned long)(CC_SLEEP_totalMs() / 1000UL), creds_ok ? 1u : 0u);
+		(unsigned long)(CC_SLEEP_totalMs() / 1000UL), creds_ok ? 1u : 0u,
+		cycle_fields.batt_mv, cc_tier_name(tier.tier));
 	bMGR_AT_CMD_logSucceedMsg();
 }
 
@@ -1404,6 +1425,7 @@ void KNS_APP_cc_tracker_loop(void)
 		else
 			MGR_LOG_DEBUG("[ENV] caches fresh — skipping sample\r\n");
 #endif
+		cycle_snapshot();
 		transition_to(CC_ST_SAMPLE_GPS);
 		return;
 
@@ -1413,6 +1435,11 @@ void KNS_APP_cc_tracker_loop(void)
 		if (gps_budget_ms == 0) {
 			cc_comm_gps_t pol = cc_comm_gps_policy(&comm, HAL_GetTick(), CC_COMM_FAST_GPS_MS);
 
+			if (tier.tier == CC_TIER_CRIT) {
+				MGR_LOG_DEBUG("[GPS] skipped (battery critical)\r\n");
+				transition_to(CC_ST_TX_SEND);
+				return;
+			}
 			if (pol == CC_COMM_GPS_SKIP) {
 				MGR_LOG_DEBUG("[GPS] skipped (deployment burst)\r\n");
 				transition_to(CC_ST_TX_SEND);
@@ -1519,7 +1546,8 @@ void KNS_APP_cc_tracker_loop(void)
 		cc_payload_fields_t f;
 		uint8_t payload[CC_PAYLOAD_BYTES];
 
-		build_fields(&f);
+		f = cycle_fields;
+		fields_late(&f);
 		cc_payload_pack(payload, &f);
 
 		MGR_EVTLOG_log(EVT_BAT, f.batt_mv);
@@ -1550,17 +1578,18 @@ void KNS_APP_cc_tracker_loop(void)
 	{
 		/* Compute this cycle's period once, on entry (marked by 0) */
 		if (cycle_period_ms == 0) {
-			bool nimh;
-			uint16_t batt = battery_for_tier(&nimh);
-			uint32_t base = cc_tier_update(&tier, batt, nimh);
+			bool crit = (tier.tier == CC_TIER_CRIT);
+			uint32_t normal = cc_tier_jittered_period_ms(cycle_base_ms,
+				CC_TX_JITTER_PCT, CC_HW_rand32());
 
-			cycle_period_ms = cc_comm_period_ms(&comm,
-				cc_tier_jittered_period_ms(base, CC_TX_JITTER_PCT, CC_HW_rand32()),
+			/* A critical pack sits the deployment burst out too */
+			cycle_period_ms = crit ? normal : cc_comm_period_ms(&comm, normal,
 				CC_COMM_BURST_PERIOD_MS, CC_COMM_BURST_JITTER_MS, CC_HW_rand32());
-			MGR_LOG_INFO("[SLP] batt %umV -> base %lus, period %lus%s\r\n",
-				batt, (unsigned long)(base / 1000),
+			MGR_LOG_INFO("[SLP] batt %umV (%s) -> base %lus, period %lus%s\r\n",
+				cycle_fields.batt_mv, cc_tier_name(tier.tier),
+				(unsigned long)(cycle_base_ms / 1000),
 				(unsigned long)(cycle_period_ms / 1000),
-				comm.phase == CC_COMM_BURST ? " (deployment burst)" : "");
+				(!crit && comm.phase == CC_COMM_BURST) ? " (deployment burst)" : "");
 		}
 
 		process_mac_events(); /* drain strays */

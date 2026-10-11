@@ -90,6 +90,73 @@ void test_nimh_set(void)
 	TEST_PASS();
 }
 
+/** A measured-and-flat pack drops to CRIT from any tier, immediately. */
+void test_crit_entry(void)
+{
+	cc_tier_state_t s;
+
+	cc_tier_init(&s);
+	ASSERT_EQ(CC_TX_PERIOD_CRIT_MS, cc_tier_update(&s, CC_BATT_NIMH_CRIT_MV - 1, true));
+	ASSERT_EQ(CC_TIER_CRIT, s.tier);
+
+	cc_tier_init(&s);
+	(void)cc_tier_update(&s, CC_BATT_NIMH_MID_MV - 1, true); /* -> LOW */
+	ASSERT_EQ(CC_TIER_LOW, s.tier);
+	ASSERT_EQ(CC_TX_PERIOD_CRIT_MS, cc_tier_update(&s, CC_BATT_SENSE_MIN_MV, true));
+
+	/* VBAT set has its own threshold */
+	cc_tier_init(&s);
+	ASSERT_EQ(CC_TX_PERIOD_CRIT_MS, cc_tier_update(&s, CC_BATT_CRIT_MV - 1, false));
+	TEST_PASS();
+}
+
+/** A failed or unfitted sense is never taken for a flat pack: LOW, not CRIT. */
+void test_crit_needs_plausible_reading(void)
+{
+	cc_tier_state_t s;
+
+	cc_tier_init(&s);
+	ASSERT_EQ(CC_TX_PERIOD_LOW_MS, cc_tier_update(&s, 0, true));
+	ASSERT_EQ(CC_TX_PERIOD_LOW_MS, cc_tier_update(&s, CC_BATT_SENSE_MIN_MV - 1, true));
+	ASSERT_FALSE(cc_tier_is_critical(0, true));
+	ASSERT_FALSE(cc_tier_is_critical(CC_BATT_SENSE_MIN_MV - 1, true));
+	ASSERT_TRUE(cc_tier_is_critical(CC_BATT_SENSE_MIN_MV, true));
+	ASSERT_FALSE(cc_tier_is_critical(CC_BATT_NIMH_CRIT_MV, true));
+
+	/* ...and a failed read while CRIT is not evidence of a flat pack */
+	(void)cc_tier_update(&s, CC_BATT_NIMH_CRIT_MV - 1, true);
+	ASSERT_EQ(CC_TIER_CRIT, s.tier);
+	ASSERT_EQ(CC_TX_PERIOD_LOW_MS, cc_tier_update(&s, 0, true));
+	TEST_PASS();
+}
+
+/** Recovery needs the margin, then promotes like LOW (straight to HIGH ok). */
+void test_crit_recovery_hysteresis(void)
+{
+	cc_tier_state_t s;
+
+	cc_tier_init(&s);
+	(void)cc_tier_update(&s, CC_BATT_NIMH_CRIT_MV - 1, true);
+	ASSERT_EQ(CC_TX_PERIOD_CRIT_MS, cc_tier_update(&s, CC_BATT_NIMH_CRIT_MV, true));
+	ASSERT_EQ(CC_TX_PERIOD_CRIT_MS,
+		cc_tier_update(&s, CC_BATT_NIMH_CRIT_MV + CC_BATT_NIMH_HYST_MV - 1, true));
+	ASSERT_EQ(CC_TX_PERIOD_LOW_MS,
+		cc_tier_update(&s, CC_BATT_NIMH_CRIT_MV + CC_BATT_NIMH_HYST_MV, true));
+
+	(void)cc_tier_update(&s, CC_BATT_NIMH_CRIT_MV - 1, true);
+	ASSERT_EQ(CC_TX_PERIOD_MS,
+		cc_tier_update(&s, CC_BATT_NIMH_HIGH_MV + CC_BATT_NIMH_HYST_MV, true));
+	TEST_PASS();
+}
+
+void test_tier_names(void)
+{
+	ASSERT_STR_EQ("HIGH", cc_tier_name(CC_TIER_HIGH));
+	ASSERT_STR_EQ("CRIT", cc_tier_name(CC_TIER_CRIT));
+	ASSERT_STR_EQ("?", cc_tier_name((cc_tier_t)9));
+	TEST_PASS();
+}
+
 /** Jitter: 0 at rand=0, capped at base*pct/100, base always included. */
 void test_jitter_bounds(void)
 {
@@ -116,6 +183,10 @@ int main(void)
 	RUN_TEST(test_low_to_high_direct);
 	RUN_TEST(test_failed_read_lands_low);
 	RUN_TEST(test_nimh_set);
+	RUN_TEST(test_crit_entry);
+	RUN_TEST(test_crit_needs_plausible_reading);
+	RUN_TEST(test_crit_recovery_hysteresis);
+	RUN_TEST(test_tier_names);
 	RUN_TEST(test_jitter_bounds);
 	TEST_SUITE_END();
 	return tests_failed ? 1 : 0;

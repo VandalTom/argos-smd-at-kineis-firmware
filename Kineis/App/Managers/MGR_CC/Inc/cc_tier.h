@@ -15,6 +15,11 @@
  * margin so a reading straddling a boundary can't flap the cadence. A failed
  * battery read (~0 mV) lands LOW — conservative.
  *
+ * CRIT sits below LOW: no GPS, one TX per CC_TX_PERIOD_CRIT_MS (still
+ * reporting the voltage) so a flat pack can recover instead of browning out
+ * under PA/GPS load. Only a plausible reading (>= CC_BATT_SENSE_MIN_MV) can
+ * enter it — a failed or unfitted sense lands LOW as before, never quieter.
+ *
  * Pure C, no MCU dependencies — unit-tested on the host.
  */
 
@@ -28,6 +33,7 @@ typedef enum {
 	CC_TIER_HIGH = 0,
 	CC_TIER_MID,
 	CC_TIER_LOW,
+	CC_TIER_CRIT,
 } cc_tier_t;
 
 /** Tier state — persists across cycles (resets to HIGH on reboot; the first
@@ -45,9 +51,17 @@ void cc_tier_init(cc_tier_state_t *s);
  * @param s      tier state
  * @param batt_mv this cycle's battery reading (0 = failed read -> LOW)
  * @param nimh   true = reading is the NiMH pack (NIMH threshold set)
- * @return base period in ms (CC_TX_PERIOD_MS / _MID_MS / _LOW_MS)
+ * @return base period in ms (CC_TX_PERIOD_MS / _MID_MS / _LOW_MS / _CRIT_MS)
  */
 uint32_t cc_tier_update(cc_tier_state_t *s, uint16_t batt_mv, bool nimh);
+
+/** @return true if this reading is measured-and-critical (the CRIT entry
+ *  test, without touching any state): gates one-off loads like the boot
+ *  self-test transmission. */
+bool cc_tier_is_critical(uint16_t batt_mv, bool nimh);
+
+/** Short name for logs and AT+STATE ("HIGH", "MID", "LOW", "CRIT"). */
+const char *cc_tier_name(cc_tier_t t);
 
 /**
  * @brief This cycle's jittered period: base + rand32 % (base*pct/100 + 1).

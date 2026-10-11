@@ -51,6 +51,16 @@
 #define CC_BATT_NIMH_HIGH_MV    2450      /**< NiMH set: above = full rate (plateau) */
 #define CC_BATT_NIMH_MID_MV     2250      /**< NiMH set: above = mid; below = low (knee) */
 #define CC_BATT_NIMH_HYST_MV    50        /**< NiMH set: smaller margin, flat plateau */
+/* CRIT tier (below LOW): no GPS, no deployment burst, one TX per
+ * CC_TX_PERIOD_CRIT_MS so the pack can recover (solar) instead of browning
+ * out under PA/GPS load — the packets keep reporting its voltage. Entered only
+ * on a plausible reading: below CC_BATT_SENSE_MIN_MV the sense is treated as
+ * failed/unfitted and the unit stays LOW, never quieter. Leaving needs the
+ * set's hysteresis margin. */
+#define CC_BATT_CRIT_MV         3400      /**< VBAT set: below = critical */
+#define CC_BATT_NIMH_CRIT_MV    2100      /**< NiMH set: 1.05 V/cell */
+#define CC_BATT_SENSE_MIN_MV    1000      /**< below = no reading, not a flat pack */
+#define CC_TX_PERIOD_CRIT_MS    (2UL * 3600UL * 1000UL) /**< 2 h base (CRIT tier) */
 
 /* ---- WS85 --------------------------------------------------------------- */
 #define CC_WS85_BAUD            115200UL  /**< sensor's stored link baud */
