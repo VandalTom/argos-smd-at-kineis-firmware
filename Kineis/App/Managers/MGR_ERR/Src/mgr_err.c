@@ -2,18 +2,20 @@
  * @file    mgr_err.c
  * @brief   Error tracker using TAMP backup registers
  *
- * Uses STM32WL TAMP backup registers BKP2R-BKP7R to persist
+ * Uses STM32WL TAMP backup registers BKP14R-BKP19R to persist
  * error context across system resets. These registers survive
  * all resets (NRST, software, watchdog, brown-out) and are only
  * cleared on VBAT removal.
  *
  * Register map:
- *   BKP2R = reset counter (incremented each boot)
- *   BKP3R = last RCC_CSR flags (reset cause snapshot)
- *   BKP4R = last error code (MGR_ERR_Code_t)
- *   BKP5R = last UW_DOPPLER state at time of error
- *   BKP6R = last HAL tick at time of error
- *   BKP7R = reserved
+ *   BKP14R = reset counter (incremented each boot)
+ *   BKP15R = last RCC_CSR flags (reset cause snapshot)
+ *   BKP16R = last error code (MGR_ERR_Code_t)
+ *   BKP17R = last app state at time of error
+ *   BKP18R = last HAL tick at time of error
+ *   BKP19R = consecutive crash counter
+ *
+ * (BKP0R-BKP5R belong to the linker's .rtc_bkpr section - see mgr_err.h.)
  *
  * Init sequence: read previous session data, log it, then clear
  * error code for this session and increment boot counter.
@@ -31,12 +33,16 @@
 #include "mgr_log.h"
 
 /* Use TAMP peripheral struct for backup register access */
-#define ERR_BKP_COUNT   (TAMP->BKP2R)   /* Reset counter */
-#define ERR_BKP_CSR     (TAMP->BKP3R)   /* Last RCC_CSR */
-#define ERR_BKP_CODE    (TAMP->BKP4R)   /* Last error code */
-#define ERR_BKP_STATE   (TAMP->BKP5R)   /* Last state */
-#define ERR_BKP_TICK    (TAMP->BKP6R)   /* Last tick */
-#define ERR_BKP_CRASH   (TAMP->BKP7R)   /* Consecutive crash counter */
+#define ERR_BKP_COUNT   (TAMP->BKP14R)  /* Reset counter */
+#define ERR_BKP_CSR     (TAMP->BKP15R)  /* Last RCC_CSR */
+#define ERR_BKP_CODE    (TAMP->BKP16R)  /* Last error code */
+#define ERR_BKP_STATE   (TAMP->BKP17R)  /* Last state */
+#define ERR_BKP_TICK    (TAMP->BKP18R)  /* Last tick */
+#define ERR_BKP_CRASH   (TAMP->BKP19R)  /* Consecutive crash counter */
+
+_Static_assert(&((TAMP_TypeDef *)0)->BKP16R == (volatile uint32_t *)(MGR_ERR_BKP_CODE_ADDR - TAMP_BASE)
+	&& &((TAMP_TypeDef *)0)->BKP18R == (volatile uint32_t *)(MGR_ERR_BKP_TICK_ADDR - TAMP_BASE),
+	"MGR_ERR fault-path addresses must match ERR_BKP_* registers");
 
 __attribute__((unused)) static const char *err_code_str(MGR_ERR_Code_t code)
 {

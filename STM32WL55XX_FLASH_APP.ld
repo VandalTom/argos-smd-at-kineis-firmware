@@ -263,6 +263,18 @@ SECTIONS
     _ertc_bkpr = .;
   } >RTC_BKPR
 
+  /* TAMP backup register map (BKPnR = 0x4000B100 + 4n, 20 registers; all
+   * survive resets, cleared by power loss):
+   *   BKP0R-BKP5R   this section: mcu_tim timer[] (BKP0R/1R double as the
+   *                 bootloader DFU flag), lpm_ctxt, MAC message-counter cache
+   *   BKP6R-BKP7R   free (room for this section to grow)
+   *   BKP8R-BKP9R   CC_TRACKER clock anchor
+   *   BKP10R        MGR_GESTURE mode
+   *   BKP11R        MGR_LPM_UW soft-off wake magic
+   *   BKP12R-BKP13R CC_TRACKER commissioning flag / failed-boot counter
+   *   BKP14R-BKP19R MGR_ERR */
+  ASSERT(_ertc_bkpr <= 0x4000B120, ".rtc_bkpr grew past TAMP BKP7R into registers owned by managers")
+
   /* Flash user data - at fixed address */
   .flash_user_data :
   {

@@ -3,8 +3,14 @@
  * @brief   Error tracker using TAMP backup registers
  *
  * Persists error context (reset count, last fault, last state) across
- * system resets using STM32WL TAMP backup registers BKP2R-BKP7R.
+ * system resets using STM32WL TAMP backup registers BKP14R-BKP19R.
  * These survive all resets except VBAT removal.
+ *
+ * NOT BKP0R-BKP5R: the linker maps .rtc_bkpr there (mcu_tim timer[] with
+ * the MAC's timer callbacks, lpm_ctxt's low-power-mode marker, and the MAC
+ * message-counter cache). MGR_ERR used to sit on BKP2R-BKP7R, so every boot
+ * and every MGR_ERR_log() overwrote a timer callback, the LPM marker and the
+ * message counter (repeating MCs on air after a logged TX/MAC timeout).
  *
  * Usage:
  *   - Call MGR_ERR_init() early in main() to log previous reset cause
@@ -18,21 +24,19 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* TAMP backup register addresses (STM32WL55) */
-#define TAMP_BKP2R_ADDR  0x4000B108UL
-#define TAMP_BKP3R_ADDR  0x4000B10CUL
-#define TAMP_BKP4R_ADDR  0x4000B110UL
-#define TAMP_BKP5R_ADDR  0x4000B114UL
-#define TAMP_BKP6R_ADDR  0x4000B118UL
-#define TAMP_BKP7R_ADDR  0x4000B11CUL
+/* TAMP backup register addresses (STM32WL55: BKPnR = 0x4000B100 + 4n).
+ * Full map: STM32WL55XX_FLASH_APP.ld, next to the .rtc_bkpr section. */
+#define MGR_ERR_BKP_CODE_ADDR   0x4000B140UL  /* BKP16R */
+#define MGR_ERR_BKP_STATE_ADDR  0x4000B144UL  /* BKP17R */
+#define MGR_ERR_BKP_TICK_ADDR   0x4000B148UL  /* BKP18R */
 
 /* Register layout:
- * BKP2R = reset counter (incremented each boot)
- * BKP3R = last reset cause (RCC_CSR flags snapshot)
- * BKP4R = last error code (MGR_ERR_Code_t)
- * BKP5R = last UW_DOPPLER state at time of error
- * BKP6R = last HAL tick at time of error
- * BKP7R = consecutive crash counter (resets after stable uptime)
+ * BKP14R = reset counter (incremented each boot)
+ * BKP15R = last reset cause (RCC_CSR flags snapshot)
+ * BKP16R = last error code (MGR_ERR_Code_t)
+ * BKP17R = last app state at time of error
+ * BKP18R = last HAL tick at time of error
+ * BKP19R = consecutive crash counter (resets after stable uptime)
  */
 
 /** Crash loop protection thresholds */
@@ -124,9 +128,9 @@ bool MGR_ERR_checkCrashLoop(void);
  */
 #define MGR_ERR_LOG_FAULT(code, state) do { \
 	extern volatile uint32_t uwTick; \
-	*((volatile uint32_t *)TAMP_BKP4R_ADDR) = (uint32_t)(code); \
-	*((volatile uint32_t *)TAMP_BKP5R_ADDR) = (uint32_t)(state); \
-	*((volatile uint32_t *)TAMP_BKP6R_ADDR) = uwTick; \
+	*((volatile uint32_t *)MGR_ERR_BKP_CODE_ADDR) = (uint32_t)(code); \
+	*((volatile uint32_t *)MGR_ERR_BKP_STATE_ADDR) = (uint32_t)(state); \
+	*((volatile uint32_t *)MGR_ERR_BKP_TICK_ADDR) = uwTick; \
 } while (0)
 
 /* ---- HardFault forensics ----------------------------------------------- */
