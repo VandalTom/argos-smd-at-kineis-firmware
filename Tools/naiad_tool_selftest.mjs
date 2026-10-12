@@ -1026,6 +1026,42 @@ await test('ST-Link: a sleeping unit needs the RST pin, a dead clone RST falls b
   eq(io.wl.log.erased.length, 0, 'nothing erased under RDP');
 });
 
+await test('SWD check (read-only): chip, protection, app/bootloader, firmware ID, credentials blank or not; nothing written, module running', async () => {
+  const put = (f, off, s) => { for (let i = 0; i < s.length; i++) f[off + i] = s.charCodeAt(i); };
+  // a provisioned Naiad unit: app + bootloader + firmware ID string + credentials
+  const naiad = new Uint8Array(P.WL.FLASH_SIZE).fill(0xFF);
+  naiad.set(swdImage(), 0);
+  put(naiad, 0x10000, 'Naiad v1.0.1 (3d54163)\0');
+  naiad.set([0x1A, 0x80, 0x04, 0x00, 0x08, 0xC5, 0x6B, 0x00], 0x3B000);
+  // a fresh factory module: upstream GUI build, no update bootloader, no credentials
+  const factory = new Uint8Array(P.WL.FLASH_SIZE).fill(0xFF);
+  factory.set(swdImage({ appSize: 66 * 1024, blSize: 0 }).subarray(0, 66 * 1024), 0);
+  put(factory, 0x9000, 'e511146*_Tx_gui_basic_Mp,v10.0.0_e9373c5_0x6Tx,v9.5.2_e9373c5_Tx,Aug 14 2025_10:00:00\0');
+  for (const [name, flash, kind] of [['naiad', naiad, 'dap'], ['naiad', naiad, 'stlink'], ['factory', factory, 'stlink']]) {
+    const before = flash.slice();
+    let dap, sim;
+    if (kind === 'stlink') { sim = new P.SimStLinkIo({ flash: flash.slice() }); dap = new P.StLinkProbe(sim); }
+    else { sim = new P.SimDapProbe({ flash: flash.slice() }); dap = new P.CmsisDap(sim); }
+    await dap.init();
+    const r = await P.swdInspect(dap);
+    const wl = sim.wl || sim;
+    eq(JSON.stringify([r.devId, r.flashKb, r.rdp, r.problems.length, r.underReset]), JSON.stringify([0x497, 256, 0xAA, 0, true]), `${name}/${kind}: chip`);
+    assert(r.app.ok, `${name}/${kind}: app vector table`);
+    if (name === 'naiad') {
+      assert(r.bootloader.ok, 'bootloader present');
+      eq(r.firmwareId, 'Naiad v1.0.1 (3d54163)', 'firmware ID');
+      eq(r.credentials, 'present', 'credentials present');
+    } else {
+      assert(r.bootloader.blank, 'no bootloader');
+      assert(/^e511146\*_Tx_gui/.test(r.firmwareId || ''), `factory ID: ${r.firmwareId}`);
+      eq(r.credentials, 'blank', 'no credentials');
+    }
+    assert(sameRange(wl.flash, before, 0, P.WL.FLASH_SIZE), `${name}/${kind}: flash untouched`);
+    eq(wl.log.erased.length + wl.log.programmed, 0, 'nothing erased or programmed');
+    assert(wl.running && !wl.halted && wl.fz === 0 && wl.dbgmcuCr === 0, `${name}/${kind}: module running, debug settings restored`);
+  }
+});
+
 await test('Releases: the image offered first is the newest field build without a warning', async () => {
   const a = v => ({ name: `naiad-carrier-${v}__argos-smd-at-kineis-firmware.bin`, variant: v });
   const list = [

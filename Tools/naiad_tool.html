@@ -472,6 +472,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
           <option value="sim">Simulated CMSIS-DAP probe (practice)</option>
         </select>
         <button type="button" id="btnSwdProbe" class="btn">Choose probe…</button>
+        <button type="button" id="btnSwdCheck" class="btn" title="Read-only: connects through the probe, identifies the chip and what is in its flash, then lets the module run again">Check connection</button>
         <span id="swdProbe" class="muted small"></span>
       </div>
       <div class="row">
@@ -779,7 +780,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.4.0';
+const TOOL_VERSION = '1.4.1';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -3409,6 +3410,62 @@ async function swdRelease(dap, t, { pulseReset }) {
  * word (initial SP + reset vector) is written LAST, so an interrupted flash leaves no bootable vector
  * table and the next boot reaches ST's ROM bootloader. Read-back verify, then reset into the firmware.
  */
+/** The firmware ID in a chunk of flash text: 'Naiad vX.Y.Z (sha)' or the upstream build-matrix string. */
+function swdFindFirmwareId(text) {
+  const naiad = /Naiad v\d+\.\d+\.\d+[^\x00-\x1F\x7F-\xFF]{0,40}/.exec(text);
+  if (naiad) return naiad[0].replace(/\s+$/, '');
+  const up = /[0-9a-f]{7}\*?_[A-Za-z]+_[A-Za-z0-9_]+,v\d+\.\d+\.\d+[^\x00-\x1F\x7F-\xFF]{0,80}/.exec(text);
+  return up ? up[0] : null;
+}
+
+/**
+ * Read-only look at a module over SWD: which chip, how it is protected, what is in flash (app, update
+ * bootloader, firmware ID) and whether credentials are stored (blank or not: never their values).
+ * Writes nothing to flash; the module is reset and left running.
+ */
+async function swdInspect(dap, { underReset = true, onStep = () => {}, signal = null } = {}) {
+  onStep('Connecting to the module over SWD…');
+  const c = await swdConnect(dap, { underReset, onStep });
+  const t = c.target;
+  const allPages = [];
+  for (let p = SWD_APP_PAGES[0]; p <= SWD_BL_PAGES[1]; p++) if (swdPageWritable(p)) allPages.push(p);
+  const out = {
+    dpidr: c.dpidr != null ? hex8(c.dpidr) : null, idcode: hex8(c.idcode), devId: c.idcode & 0xFFF, revId: (c.idcode >>> 16) & 0xFFFF,
+    flashKb: c.flashKb, rdp: c.rdp, underReset: c.underReset, c2boot: c.c2boot, problems: swdProtectionProblems(c, allPages),
+  };
+  try {
+    const vec = async addr => {
+      const [sp, pc] = await t.readBlock(addr, 2);
+      return { sp: hex8(sp), pc: hex8(pc), blank: sp === 0xFFFFFFFF && pc === 0xFFFFFFFF, ok: sp >= 0x20000000 && sp <= 0x20010000 && (pc & 0xFF000000) === 0x08000000 };
+    };
+    onStep('Reading the vector tables…');
+    out.app = await vec(WL.FLASH_BASE);
+    out.bootloader = await vec(WL.FLASH_BASE + SWD_BL_PAGES[0] * WL.PAGE);
+    out.firmwareId = null;
+    if (out.app.ok) {
+      onStep('Looking for the firmware ID…');
+      const CH = 1024, end = WL.FLASH_BASE + (SWD_APP_PAGES[1] + 1) * WL.PAGE;   // words per read; the app region only
+      let tail = '';
+      for (let a = WL.FLASH_BASE; a < end && !out.firmwareId; a += CH * 4) {
+        if (signal && signal.aborted) throw new CancelledError();
+        const words = await t.readBlock(a, Math.min(CH, (end - a) / 4));
+        let s = '';
+        for (const w of words) s += String.fromCharCode(w & 0xFF, (w >>> 8) & 0xFF, (w >>> 16) & 0xFF, w >>> 24);
+        out.firmwareId = swdFindFirmwareId(tail + s);
+        tail = s.slice(-160);
+        if (words.every(w => w === 0xFFFFFFFF)) break;                       // past the end of the app
+      }
+    }
+    // FLASH_USER page 0 starts with the Kineis ID/ADDR: blank (all 0xFF) or not; the values are not kept
+    const cred = await t.readBlock(0x0803B000, 4);
+    out.credentials = cred.every(w => w === 0xFFFFFFFF) ? 'blank' : 'present';
+  } finally {
+    onStep('Letting the module run again…');
+    await swdRelease(dap, t, { pulseReset: c.underReset });
+  }
+  return out;
+}
+
 async function swdFlashStm32wl(dap, bytes, opts = {}) {
   const { signal, onPhase = () => {}, onProgress = () => {}, underReset = true, verify = true, run = true } = opts;
   const plan = analyzeSwdImage(bytes);
@@ -3932,7 +3989,7 @@ const NaiadProtocol = {
   vaultDeriveKey, vaultSeal, vaultOpen, vaultCreate, b64enc, b64dec,
   teamImportPreview, teamSealKey, teamOpenKey, teamVaultNew, teamVaultUnlock, teamSealRecords, defaultRelease, releaseLabel,
   DAP_CMD, WL, SWD_APP_PAGES, SWD_BL_PAGES, DapError, CmsisDap, SwdTarget, swdConnect, swdProtectionProblems, analyzeSwdImage, swdFlashStm32wl, SimDapProbe,
-  STL, StLinkProbe, StLinkTarget, SimStLinkIo,
+  STL, StLinkProbe, StLinkTarget, SimStLinkIo, swdInspect, swdFindFirmwareId,
 };
 // ==== PROTOCOL END ====
 
@@ -6276,6 +6333,7 @@ function renderSwd() {
   const R = swdReleaseFor(null);
   $('#swdImg').textContent = swd.file ? `Image: ${swd.file.name}` : R && R.full ? `Image: ${R.release.tag} full image (app + bootloader) from GitHub Releases` : 'Image: choose a _full.bin file.';
   $('#btnSwdFlash').disabled = !!ui.op || !(swd.file || (R && R.full));
+  $('#btnSwdCheck').disabled = !!ui.op;
   $('#btnSwdForget').hidden = !swd.file;
 }
 function swdPhaseUi(p, msg) { $('#swdProg').hidden = false; $('#swdPhase').textContent = msg; if (p !== 'write' && p !== 'erase' && p !== 'verify') $('#swdBar').removeAttribute('value'); }
@@ -6306,7 +6364,54 @@ async function doSwdFlash() {
   $('#swdResult').append(div);
   $('#swdPhase').textContent = r.ok ? 'Done.' : 'Stopped.';
 }
+/** Pro view: read-only SWD check, shown as a short report with the next step. */
+async function doSwdCheck() {
+  $('#swdResult').innerHTML = '';
+  try { if (!swd.dap) await swdOpenProbe($('#swdKind').value); }
+  catch (e) { setMsg('#swdMsg', swdProbeError(e), 'err'); renderSwd(); return; }
+  setMsg('#swdMsg', '');
+  const r = await runSwdOp('Checking the SWD connection', signal => swdInspect(swd.dap, { underReset: $('#swdUnderReset').checked, signal, onStep: m => swdPhaseUi('check', m) }));
+  $('#swdProg').hidden = true;
+  const box = $('#swdResult');
+  const div = el('div', { class: 'verdict ' + (r.ok ? (r.value.devId === WL.DEV_ID && !r.value.problems.length ? 'pass' : 'warn') : 'fail') });
+  if (!r.ok) {
+    div.append(el('span', { class: 'big', text: 'No connection to the module' }),
+      el('ul', {}, el('li', { text: swdProbeError(r.error) }),
+        el('li', { text: 'Check: SWDIO → P26, SWCLK → P25, GND → GND, RST → P35 (NRST), and that the board is powered.' }),
+        el('li', { text: 'A sleeping module needs the reset line: if your probe\'s RST does not reach the STM32, power-cycle the module and check again right away.' })));
+    box.append(div);
+    note(`SWD check failed: ${swdProbeError(r.error)}`, 'error');
+    return;
+  }
+  const v = r.value, info = (swd.dap && swd.dap.info) || {};
+  const app = v.app.ok ? `present (reset vector 0x${v.app.pc})` : v.app.blank ? 'empty' : 'not a valid vector table';
+  const bl = v.bootloader.ok ? 'present (serial updates work)' : v.bootloader.blank ? 'missing: this module needs one SWD flash' : 'not a valid vector table';
+  const naiad = /^Naiad v/.test(v.firmwareId || '');
+  const L = defaultRelease(rel.list);
+  const current = naiad && L && L.release.fwId && v.firmwareId.includes(L.release.fwId);
+  const next = !v.bootloader.ok || !naiad ? `Next: Flash over SWD${L ? ` to install ${L.release.tag} (app + update bootloader)` : ''}; after that, everything else goes over the serial adapter.`
+    : current ? 'Already on the latest release: continue over the serial adapter (Voyage view, or the panels above).'
+      : `Next: update to ${L ? L.release.tag : 'the latest release'}, over the serial adapter or Flash over SWD.`;
+  div.append(el('span', { class: 'big', text: v.devId === WL.DEV_ID ? 'Connected: STM32WL55 found' : `Connected, but this is not an STM32WL55 (device ID 0x${v.devId.toString(16)})` }));
+  const rows = [
+    ['Probe', `${swd.label}${info.version ? `, firmware ${info.version}` : ''}${info.targetV != null ? `, target ${info.targetV} V` : ''}`],
+    ['Chip', `device 0x${v.devId.toString(16)} rev 0x${v.revId.toString(16)}, ${v.flashKb} KB flash, debug port 0x${v.dpidr || '?'}`],
+    ['Attach', v.underReset ? 'under reset (the reset line works)' : 'without the reset line (plain attach)'],
+    ['Protection', v.problems.length ? v.problems.join('; ') : `none (read protection off, RDP 0x${v.rdp.toString(16).toUpperCase()})`],
+    ['App', app], ['Update bootloader', bl],
+    ['Firmware', v.firmwareId || (v.app.ok ? 'not identified' : '—')],
+    ['Credentials', v.credentials === 'present' ? 'stored (values not read out)' : 'none stored yet'],
+  ];
+  if (v.c2boot) rows.push(['CPU2', 'boot enabled (PWR_CR4.C2BOOT)']);
+  div.append(el('dl', { class: 'kv', style: 'width:100%;font-weight:400' }, rows.flatMap(([k, val]) => [el('dt', { text: k }), el('dd', { text: val })])),
+    el('div', { class: 'small', style: 'font-weight:500', text: next }));
+  box.append(div);
+  note(`SWD check: STM32WL55 0x${v.devId.toString(16)}, RDP 0x${v.rdp.toString(16)}, app ${v.app.ok ? 'present' : 'missing'}, bootloader ${v.bootloader.ok ? 'present' : 'missing'}, firmware ${v.firmwareId || 'unknown'}, credentials ${v.credentials}`);
+  renderSwd();
+}
+
 function initSwd() {
+  $('#btnSwdCheck').addEventListener('click', () => void doSwdCheck());
   $('#btnSwdProbe').addEventListener('click', async () => {
     try { await swdOpenProbe($('#swdKind').value); setMsg('#swdMsg', ''); }
     catch (e) { setMsg('#swdMsg', swdProbeError(e), 'err'); }
