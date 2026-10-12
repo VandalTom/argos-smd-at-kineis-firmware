@@ -348,6 +348,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
             <option value="" selected>Working</option>
             <option value="lo">Unpowered (enable not reaching it)</option>
             <option value="fl">Data wire not connected</option>
+            <option value="swap">TX and RX swapped (P11 on its RX)</option>
             <option value="baud">Set to 38400 baud</option>
             <option value="nmea">Sends UBX only, no NMEA</option>
             <option value="inv">Enable works backwards</option>
@@ -791,7 +792,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.4.3';
+const TOOL_VERSION = '1.4.4';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -1349,6 +1350,9 @@ function gpsDiagnosis(r) {
   if (r.verdict !== 'FAIL') return null;
   const backwards = driven(off) && !driven(on)
     ? ' The line was driven while the GPS was switched off and went quiet when it was switched on, so its enable may work backwards (active-low).' : '';
+  if (on === 'hi' && !(Number(kv.bytes) || 0) && !fe) return { level: 'fail', title: 'The GPS data line sits high but carries nothing',
+    text: `With the GPS switched on, pad P11 (PB6) is held high, yet not one byte arrived in ${kv.baud === 'none' ? 'about 12 s at any common baud' : `5 s at ${GPS_BAUD} baud`}. That is what a GPS board's RX input looks like (many boards label TX and RX from the host's side), or a receiver that is powered but never transmits.${backwards}`,
+    fixes: ['Find which pin of the GPS board is its TX output (its datasheet, or a serial adapter at 9600 baud on each data pin while the board is powered). The carrier expects it on connector pin 4 to P11 (PB6); connector pin 3 is not connected.', 'Check whether the GPS board needs anything else to start, such as a backup supply (V_BCKP / VBAT) or a reset or ON/OFF pin.', enableFix] };
   if (driven(on) || fe) return { level: 'fail', title: 'The GPS is on and sending, but not NMEA the module can read',
     text: `The data line (P11/PB6) is driven, yet no checksum-valid NMEA arrived at ${GPS_BAUD} baud${kv.baud === 'none' ? ' or any other common baud (4800 to 115200)' : ''}.${fe ? ` ${fe} framing errors.` : ''}`,
     fixes: ['The receiver may be set to a binary protocol only (u-blox UBX): enable NMEA output on its UART and save it to the receiver\'s flash.', 'Check that only the GPS TX (connector pin 4) drives pad P11 (PB6).'] };
@@ -2448,6 +2452,7 @@ class NaiadSimulator {
       const d = {
         lo: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=lo/lo'],
         fl: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=fl/fl'],
+        swap: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=lo/hi,baud=none'],
         baud: ['PASS', `bytes=${200 + Math.floor(r * 60)},nmea=0,cs_err=0,fe=${40 + Math.floor(r * 30)},line=lo/act,baud=38400`],
         nmea: ['FAIL', `bytes=${300 + Math.floor(r * 90)},nmea=0,cs_err=0,fe=0,line=lo/act,baud=none`],
         inv: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=act/lo,off=nmea'],

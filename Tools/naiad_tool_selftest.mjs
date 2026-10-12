@@ -217,6 +217,9 @@ await test('GPS self-test diagnosis (line probe, enable check, baud scan)', () =
   eq(lo.title, 'The GPS data line is held low', 'unpowered receiver'); assert(/P3 \(PA1\)/.test(lo.fixes[0]), 'enable measurement first');
   assert(!/backwards/.test(lo.text), 'no polarity hint without evidence');
   assert(/backwards/.test(d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=hi/lo').text), 'driven while off, quiet while on: polarity hint');
+  const quiet = d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=lo/hi,baud=none');
+  eq(quiet.title, 'The GPS data line sits high but carries nothing', 'held high, silent: not "sending"');
+  assert(/RX input/.test(quiet.text) && /connector pin 3 is not connected/.test(quiet.fixes[0]), 'swapped TX/RX suspected');
   const none = d('+ST=GPS,FAIL,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=none');
   eq(none.title, 'The GPS is on and sending, but not NMEA the module can read', 'driven, no NMEA'); assert(/4800 to 115200/.test(none.text) && /57 framing errors/.test(none.text), 'scan + errors explained');
   const baud = d('+ST=GPS,PASS,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=38400');
