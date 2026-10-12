@@ -78,6 +78,7 @@ globalThis.fetch = async (input, init = {}) => {
 		const variant = (dl[2].match(/^naiad-carrier-(\w+)__/) || [])[1];
 		return (ATTACHED[dl[1]] || []).includes(variant) ? new Response(null, { status: 302, headers: { location: 'https://objects.example/x' } }) : new Response(null, { status: 404 });
 	}
+	if (dl && dl[1] === 'v9.9.8') throw new TypeError('fetch failed');                   // network down
 	if (dl) return dl[1] === 'v9.9.9' ? new Response('Not Found', { status: 404 }) : new Response(IMAGE);
 	throw new Error('unexpected fetch ' + u);
 };
@@ -183,6 +184,8 @@ await test('firmware proxy: serves release images, refuses anything else', async
 		eq((await call(env, 'GET', p, { token: null })).status, 404, p);
 	}
 	eq((await call(env, 'GET', '/api/firmware/v9.9.9/naiad-carrier-release__argos-smd-at-kineis-firmware.bin', { token: null })).status, 404, 'missing on GitHub');
+	const down = await call(env, 'GET', '/api/firmware/v9.9.8/naiad-carrier-release__argos-smd-at-kineis-firmware.bin', { token: null });
+	eq([down.status, /cannot be reached/.test(down.data.error)], [502, true], 'GitHub unreachable: a clear 502, not an internal error');
 	eq((await call(env, 'GET', '/api/nothing', { token: null })).status, 404, 'unknown api');
 });
 

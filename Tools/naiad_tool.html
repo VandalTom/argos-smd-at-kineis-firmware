@@ -462,12 +462,14 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
     <div id="flashRecovery" class="callout warn" hidden></div>
     <fieldset id="swdBox">
       <legend>Debug probe (SWD)</legend>
-      <p class="muted small" style="margin:0">For modules the serial update cannot reach: factory firmware without the update bootloader, or a module that stays silent. Wire a CMSIS-DAP probe to the module's SWD pads (SWDIO, SWCLK, GND, NRST, and 3.3 V as the probe's reference). It writes the full image (app + bootloader); the credentials and their backup copy are kept.</p>
+      <p class="muted small" style="margin:0">For modules the serial update cannot reach: factory firmware without the update bootloader, or a module that stays silent. Wire an ST-Link or a CMSIS-DAP probe to the module's SWD pads: SWDIO (P26), SWCLK (P25), GND and NRST (P35); on the Naiad carrier, the debug JST. It writes the full image (app + bootloader); the credentials and their backup copy are kept.</p>
       <div class="row">
         <select id="swdKind" aria-label="Probe type">
+          <option value="stlink">ST-Link V2 / V2-1 / V3 (WebUSB)</option>
           <option value="usb">CMSIS-DAP v2 probe (WebUSB)</option>
           <option value="hid">CMSIS-DAP v1 probe (WebHID)</option>
-          <option value="sim">Simulated probe (practice)</option>
+          <option value="simst">Simulated ST-Link (practice)</option>
+          <option value="sim">Simulated CMSIS-DAP probe (practice)</option>
         </select>
         <button type="button" id="btnSwdProbe" class="btn">Choose probe…</button>
         <span id="swdProbe" class="muted small"></span>
@@ -493,7 +495,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
           <li><b>Raspberry Pi Pico with Raspberry Pi's debugprobe firmware</b> (about $5): CMSIS-DAP v2, works in Chrome and Edge on Windows without a driver. GP2 = SWCLK, GP3 = SWDIO, GP1 = reset line. The boxed Raspberry Pi Debug Probe has no reset line: untick "Connect under reset" and wake the module first.</li>
           <li><b>SEGGER J-Link BASE/PLUS V12+ (or PRO V6+)</b>: in J-Link Configurator, right-click the probe → Configure → Boot mode = CMSIS-DAPv2, then replug. Switch back to J-Link mode for JLinkExe / <code>make flash-full</code>. V10/V11: CMSIS-DAPv1 only (choose the WebHID option). The J-Link EDU Mini has no CMSIS-DAP mode.</li>
           <li><b>DAPLink probes</b>: v2 (WebUSB) or v1 (WebHID).</li>
-          <li><b>ST-Link</b> does not speak CMSIS-DAP: use STM32CubeProgrammer for those.</li>
+          <li><b>ST-Link V2 / V2-1 / V3</b> (including the V2 "mini" clones): choose the ST-Link option. Wire SWDIO, SWCLK, GND and RST (→ module NRST, P35); leave its 3.3 V unconnected when the board has its own supply. On Windows the browser needs the WinUSB driver for it: install ST's ST-LINK USB driver (comes with STM32CubeProgrammer), or set "STM32 STLink" to WinUSB with Zadig. On some clones the RST pin does not reach the STM32: then a sleeping module must be power-cycled just before flashing.</li>
           <li>Close other programs using the probe (J-Link or ST software) first. Flashing takes about half a minute.</li>
         </ul>
       </details>
@@ -777,7 +779,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.3.0';
+const TOOL_VERSION = '1.4.0';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -3112,7 +3114,7 @@ const WL = {
   OPTR_ESE: 1 << 8, SFR_FSD: 1 << 7, C2BOOT: 1 << 15,
   DBGMCU_IDCODE: 0xE0042000, DBGMCU_CR: 0xE0042004, DBGMCU_APB1FZR1: 0xE004203C, DEV_ID: 0x497,
   FZ_IWDG_WWDG: (1 << 12) | (1 << 11),
-  DHCSR: 0xE000EDF0, DEMCR: 0xE000EDFC, AIRCR: 0xE000ED0C,
+  DHCSR: 0xE000EDF0, DEMCR: 0xE000EDFC, AIRCR: 0xE000ED0C, DFSR: 0xE000ED30, DFSR_VCATCH: 1 << 3,
   DHCSR_KEY: 0xA05F0000, C_DEBUGEN: 1 << 0, C_HALT: 1 << 1, S_HALT: 1 << 17, S_RESET_ST: 1 << 25,
   VC_CORERESET: 1 << 0, AIRCR_SYSRESET: 0x05FA0004,
 };
@@ -3152,6 +3154,7 @@ class CmsisDap {
     return this.info;
   }
   async disconnect() { try { await this.cmd([DAP_CMD.DISCONNECT], 'DAP_Disconnect'); } catch (e) { /* probe gone */ } }
+  async attachStm32(opts) { return cmsisAttachStm32(this, opts); }
   async sequence(bits, bytes) { await this.cmd([DAP_CMD.SWJ_SEQUENCE, bits & 0xFF, ...bytes], 'DAP_SWJ_Sequence'); }
   /** JTAG-to-SWD switch and line reset (ADIv5): 51+ ones, 0xE79E, 51+ ones, idle. */
   async lineReset() {
@@ -3272,26 +3275,30 @@ class SwdTarget {
  * in STOP2; the core's reset-seen flag confirms it. Otherwise: plain attach, vector catch, system reset.
  * Then the watchdogs are frozen while halted, and the protections that could block writes are checked.
  */
-async function swdConnect(dap, { underReset = true, onStep = () => {} } = {}) {
+/** Under reset: halt on the reset vector, and clear the sticky debug-fault flags so a caught reset shows. */
+async function armResetCatch(t) {
+  await t.write32(WL.DEMCR, WL.VC_CORERESET);
+  await t.write32(WL.DHCSR, WL.DHCSR_KEY | WL.C_DEBUGEN | WL.C_HALT);
+  try { await t.write32(WL.DFSR, 0x1F); } catch (e) { /* not writable under reset on every part */ }
+}
+/** True when the core is halted by the reset vector catch: the probe's reset line really reset the chip. */
+async function caughtReset(t) {
+  const halted = await t.halted();
+  const vcatch = ((await t.read32(WL.DFSR)) & WL.DFSR_VCATCH) !== 0;
+  try { await t.write32(WL.DFSR, 0x1F); } catch (e) { /* best effort */ }
+  return halted && vcatch;
+}
+/** CMSIS-DAP: drive nRESET and the ADIv5 debug port ourselves. */
+async function cmsisAttachStm32(dap, { underReset = true, onStep = () => {} } = {}) {
   const t = new SwdTarget(dap, { ap: 0 });
   let dpidr = null, usedReset = false;
   if (underReset) {
     onStep('Holding the module in reset…');
     await dap.reset(true); await sleep(20);
     let armed = false;
-    try {
-      dpidr = await t.attach();
-      await t.write32(WL.DEMCR, WL.VC_CORERESET);                // halt at the reset vector...
-      await t.write32(WL.DHCSR, WL.DHCSR_KEY | WL.C_DEBUGEN | WL.C_HALT);
-      armed = true;
-    } catch (e) { dpidr = null; }
-    await dap.reset(false); await sleep(30);                     // ...when reset is released
-    if (armed) {
-      try {
-        const d = await t.read32(WL.DHCSR);
-        usedReset = !!(d & WL.S_HALT) && !!(d & WL.S_RESET_ST);  // halted by a reset we caused: the reset line works
-      } catch (e) { usedReset = false; }
-    }
+    try { dpidr = await t.attach(); await armResetCatch(t); armed = true; } catch (e) { dpidr = null; }
+    await dap.reset(false); await sleep(30);                     // the core halts on its reset vector
+    if (armed) { try { usedReset = await caughtReset(t); } catch (e) { usedReset = false; } }
   }
   if (!usedReset) {
     onStep('Attaching to the module…');
@@ -3303,6 +3310,18 @@ async function swdConnect(dap, { underReset = true, onStep = () => {} } = {}) {
     t.select = -1; t.csw = -1;
     await t.attach();
   }
+  return { target: t, dpidr, usedReset };
+}
+
+/**
+ * Connect to the STM32WL55 CPU1 and halt it at its reset vector, through any supported probe (its
+ * attachStm32: CMSIS-DAP or ST-Link). With a working probe reset line the attach happens while the chip
+ * is held in reset ("connect under reset"), which also reaches a module asleep in STOP2; otherwise a
+ * plain attach, vector catch and system reset. Then the watchdogs are frozen while halted, and the
+ * protections that could block writes are read.
+ */
+async function swdConnect(dap, { underReset = true, onStep = () => {} } = {}) {
+  const { target: t, dpidr, usedReset } = await dap.attachStm32({ underReset, onStep });
   if (!(await t.halted())) await t.halt();
   await t.write32(WL.DEMCR, 0);
   // freeze IWDG/WWDG while halted (the firmware runs the IWDG) and keep debug alive in low-power modes
@@ -3430,6 +3449,7 @@ async function swdFlashStm32wl(dap, bytes, opts = {}) {
     const pages = plan.erase.filter(p => p * WL.PAGE < bytes.length);
     const total = pages.length * (WL.PAGE / 8);
     let done = 0, written = 0;
+    if (t.flashPace) await t.flashPace(true);
     await t.write32(WL.FLASH_CR, WL.CR_PG);
     onPhase('write', 'Writing the new firmware…');
     for (const p of pages) {
@@ -3454,6 +3474,7 @@ async function swdFlashStm32wl(dap, bytes, opts = {}) {
     res.written = written + 8;
   } finally {
     try { await t.write32(WL.FLASH_CR, WL.CR_LOCK); } catch (e) { /* best effort */ }
+    if (t.flashPace) await t.flashPace(false);
   }
 
   if (verify) {
@@ -3492,14 +3513,14 @@ class SimDapProbe {
     this.stop2 = stop2; this.nreset = false; this.powered = false; this.select = 0; this.csw = 0; this.tar = 0;
     this.locked = true; this.keyStep = 0; this.cr = 0; this.sr = 0; this.pend = null; this.acr = 0x600;
     this.dhcsr = 0; this.demcr = 0; this.halted = false; this.running = true; this.resetSeen = false;
-    this.dbgmcuCr = 0; this.fz = 0;
+    this.dbgmcuCr = 0; this.fz = 0; this.dfsr = 0;
     this.log = { erased: [], programmed: 0, firstVectorWriteIndex: -1, writes: 0, resets: 0 };
     this.connected = false;
   }
   _sysReset() {
     this.log.resets++; this.resetSeen = true;
     this.stop2 = false; this.locked = true; this.cr = 0; this.keyStep = 0; this.pend = null;
-    if ((this.demcr & WL.VC_CORERESET) && (this.dhcsr & WL.C_DEBUGEN)) { this.halted = true; this.running = false; } else { this.halted = false; this.running = true; }
+    if ((this.demcr & WL.VC_CORERESET) && (this.dhcsr & WL.C_DEBUGEN)) { this.halted = true; this.running = false; this.dfsr |= WL.DFSR_VCATCH; } else { this.halted = false; this.running = true; }
   }
   _mem32(addr) {
     const regs = {
@@ -3508,7 +3529,7 @@ class SimDapProbe {
       [WL.FLASH_OPTR]: 0x3FFFF000 | (this.o.ese ? WL.OPTR_ESE : 0) | this.o.rdp, [WL.FLASH_SFR]: this.o.sfr,
       [WL.FLASH_WRP1AR]: this.o.wrp1a, [WL.FLASH_WRP1BR]: 0xFF80FFFF, [WL.FLASH_PCROP1ASR]: 0xFFFFFFFF, [WL.FLASH_PCROP1AER]: 0xFFFFFF00,
       [WL.FLASH_PCROP1BSR]: 0xFFFFFFFF, [WL.FLASH_PCROP1BER]: 0xFFFFFF00, [WL.PWR_CR4]: 0, [WL.FLASHSIZE_REG]: 0xFFFF0100,
-      [WL.DEMCR]: this.demcr,
+      [WL.DEMCR]: this.demcr, [WL.DFSR]: this.dfsr,
     };
     if (addr in regs) return regs[addr] >>> 0;
     if (addr === WL.DHCSR) { const v = (this.dhcsr & 0xFFFF) | (this.halted ? WL.S_HALT : 0) | (this.resetSeen ? WL.S_RESET_ST : 0); this.resetSeen = false; return v >>> 0; }
@@ -3545,11 +3566,12 @@ class SimDapProbe {
     if (addr === WL.DHCSR) {
       if (((v & 0xFFFF0000) >>> 0) !== WL.DHCSR_KEY) return;
       this.dhcsr = v & 0xFFFF;
-      if ((v & WL.C_HALT) && (v & WL.C_DEBUGEN)) { if (!this.nreset) { this.halted = true; this.running = false; } }
+      if ((v & WL.C_HALT) && (v & WL.C_DEBUGEN)) { if (!this.nreset) { if (!this.halted) this.dfsr |= 1; this.halted = true; this.running = false; } }
       else if (!(v & WL.C_HALT)) { this.halted = false; if (!this.nreset) this.running = true; }
       return;
     }
     if (addr === WL.DEMCR) { this.demcr = v; return; }
+    if (addr === WL.DFSR) { this.dfsr &= ~v; return; }
     if (addr === WL.AIRCR) { if (v === WL.AIRCR_SYSRESET) this._sysReset(); return; }
     if (addr >= WL.FLASH_BASE && addr < WL.FLASH_BASE + WL.FLASH_SIZE) {
       const off = addr - WL.FLASH_BASE;
@@ -3586,7 +3608,7 @@ class SimDapProbe {
     const bank = this.select & 0xF0, apsel = this.select >>> 24;
     if (apsel !== 0) return { ack: 4 };
     const r = bank | reg;
-    if (this.nreset && r === 0x0C && ![WL.DHCSR, WL.DEMCR].includes(this.tar)) return { ack: 4 };   // under reset: core debug registers only
+    if (this.nreset && r === 0x0C && ![WL.DHCSR, WL.DEMCR, WL.DFSR].includes(this.tar)) return { ack: 4 };   // under reset: core debug registers only
     try {
       if (r === 0x00) { if (read) return { ack: 1, value: this.csw }; this.csw = value; return { ack: 1 }; }
       if (r === 0x04) { if (read) return { ack: 1, value: this.tar }; this.tar = value >>> 0; return { ack: 1 }; }
@@ -3652,6 +3674,246 @@ class SimDapProbe {
   }
 }
 
+/* ---------- ST-Link (V2, V2-1, V3) ----------
+ * ST's probes speak their own USB protocol: the probe firmware runs the SWD debug port itself and
+ * offers memory reads/writes (the APIV2 commands OpenOCD's stlink driver uses). StLinkProbe +
+ * StLinkTarget give swdFlashStm32wl the same interface as CmsisDap + SwdTarget. While flash is
+ * programmed the SWD clock drops to 480 kHz (V2 firmware V2J22+), so each double word has finished
+ * programming before the next arrives and the probe never meets a WAIT; reads run at 1.8 MHz. */
+
+const STL = {
+  GET_VERSION: 0xF1, DEBUG: 0xF2, DFU: 0xF3, SWIM: 0xF4, GET_MODE: 0xF5, GET_VOLTAGE: 0xF7,
+  DFU_EXIT: 0x07, SWIM_EXIT: 0x01,
+  D_EXIT: 0x21, D_ENTER: 0x30, D_ENTER_SWD: 0xA3, D_READ_IDCODES: 0x31, D_RESETSYS: 0x32,
+  D_WRITEDEBUGREG: 0x35, D_READDEBUGREG: 0x36, D_READMEM32: 0x07, D_WRITEMEM32: 0x08, D_LASTRW: 0x3B,
+  D_DRIVE_NRST: 0x3C, D_SWD_FREQ: 0x43,
+  OK: 0x80, MODE_DFU: 0x00, MODE_MASS: 0x01, MODE_DEBUG: 0x02, MODE_SWIM: 0x03,
+  VID: 0x0483, PIDS: [0x3748, 0x374B, 0x374E, 0x374F, 0x3752, 0x3753, 0x3754, 0x3757],
+  FREQ_DIV: { 1800: 1, 950: 3, 480: 7, 240: 15 },
+};
+const STL_ERR = {
+  0x09: 'no target found (check SWDIO, SWCLK, GND and the module power; a sleeping module needs the reset line)',
+  0x10: 'AP WAIT', 0x11: 'AP fault', 0x12: 'AP error', 0x13: 'AP parity error (wiring or clock)',
+  0x14: 'DP WAIT', 0x15: 'DP fault', 0x16: 'DP error', 0x17: 'DP parity error (wiring or clock)',
+  0x18: 'AP write error', 0x19: 'AP sticky error', 0x1A: 'AP sticky overrun', 0x81: 'fault',
+};
+function stlError(code, what) {
+  const e = new DapError(`ST-Link: ${what}: ${STL_ERR[code] || `status 0x${code.toString(16)}`}`);
+  e.stlink = code;
+  return e;
+}
+
+class StLinkProbe {
+  constructor(io) { this.io = io; this.info = {}; this.packet = 1024; this.ver = { stlink: 0, jtag: 0, swim: 0, pid: 0 }; this.inDebug = false; }
+  /** Commands are 16-byte blocks; some have an OUT data phase, most an IN reply. */
+  async xfer(cmd, { out = null, inLen = 0 } = {}) {
+    const c = new Uint8Array(16);
+    c.set(cmd);
+    const r = await this.io.xfer(c, out, inLen);
+    if (inLen && (!r || r.length < inLen)) throw new DapError(`ST-Link: short reply to command 0x${cmd[0].toString(16)}`);
+    return r;
+  }
+  check(r, what) { if (r[0] !== STL.OK) throw stlError(r[0], what); }
+  async init() {
+    const v = await this.xfer([STL.GET_VERSION], { inLen: 6 });
+    const w = (v[0] << 8) | v[1];
+    this.ver = { stlink: (w >> 12) & 0xF, jtag: (w >> 6) & 0x3F, swim: w & 0x3F, pid: v[4] | (v[5] << 8) };
+    this.v3 = this.ver.stlink >= 3;
+    const name = this.v3 ? 'ST-Link V3' : `ST-Link V${this.ver.stlink}${this.ver.pid === 0x374B ? '-1' : ''}`;
+    this.info = { vendor: 'STMicroelectronics', product: name, version: this.v3 ? 'V3' : `V${this.ver.stlink}J${this.ver.jtag}${this.ver.swim ? 'S' + this.ver.swim : ''}`, serial: '' };
+    // leave DFU, SWIM or a previous debug session, so the debug entry starts clean
+    const mode = (await this.xfer([STL.GET_MODE], { inLen: 2 }))[0];
+    if (mode === STL.MODE_DFU) await this.xfer([STL.DFU, STL.DFU_EXIT]);
+    else if (mode === STL.MODE_SWIM) await this.xfer([STL.SWIM, STL.SWIM_EXIT]);
+    else if (mode === STL.MODE_DEBUG) await this.xfer([STL.DEBUG, STL.D_EXIT]);
+    if (this.v3 || this.ver.jtag >= 13) {
+      try {
+        const r = await this.xfer([STL.GET_VOLTAGE], { inLen: 8 });
+        const a0 = u32le(r, 0), a1 = u32le(r, 4);
+        if (a0) this.info.targetV = Math.round(2 * a1 * 1.2 / a0 * 100) / 100;
+      } catch (e) { /* older firmware */ }
+    }
+    return this.info;
+  }
+  async enterSwd() {
+    if (this.inDebug) { await this.xfer([STL.DEBUG, STL.D_EXIT]); this.inDebug = false; }
+    this.check(await this.xfer([STL.DEBUG, STL.D_ENTER, STL.D_ENTER_SWD], { inLen: 2 }), 'entering SWD');
+    this.inDebug = true;
+    await this.setFreq(1800);
+  }
+  async idcode() {
+    const r = await this.xfer([STL.DEBUG, STL.D_READ_IDCODES], { inLen: 12 });
+    this.check(r, 'reading the debug port ID');
+    return u32le(r, 4);
+  }
+  /** NRST low (true) / high: through the probe's RST pin. */
+  async reset(asserted) { this.check(await this.xfer([STL.DEBUG, STL.D_DRIVE_NRST, asserted ? 0 : 1], { inLen: 2 }), 'driving NRST'); }
+  /** SWD clock (V2 firmware V2J22+; V3 picks its own and handles WAIT): false when not changed. */
+  async setFreq(khz) {
+    if (this.v3 || this.ver.jtag < 22 || !this.inDebug) return false;
+    const div = STL.FREQ_DIV[khz];
+    const r = await this.xfer([STL.DEBUG, STL.D_SWD_FREQ, div & 0xFF, div >> 8], { inLen: 2 });
+    return r[0] === STL.OK;
+  }
+  async disconnect() {
+    try { if (this.inDebug) await this.xfer([STL.DEBUG, STL.D_EXIT]); } catch (e) { /* unplugged */ }
+    this.inDebug = false;
+  }
+  /** Attach to CPU1 and halt it at its reset vector: under reset when the RST pin works, else plain attach + reset. */
+  async attachStm32({ underReset = true, onStep = () => {} } = {}) {
+    const t = new StLinkTarget(this);
+    let dpidr = null, usedReset = false;
+    if (underReset) {
+      onStep('Holding the module in reset…');
+      let armed = false;
+      try {
+        await this.reset(true); await sleep(20);
+        await this.enterSwd();
+        dpidr = await this.idcode();
+        await armResetCatch(t);
+        armed = true;
+      } catch (e) { /* asleep with no working reset line, or no target: try the plain attach */ }
+      try { await this.reset(false); } catch (e) { /* reported by the plain attach */ }
+      await sleep(30);
+      if (armed) { try { usedReset = await caughtReset(t); } catch (e) { usedReset = false; } }
+    }
+    if (!usedReset) {
+      onStep('Attaching to the module…');
+      await this.enterSwd();
+      dpidr = await this.idcode();
+      await t.write32(WL.DEMCR, WL.VC_CORERESET);
+      await t.halt();
+      try { await t.write32(WL.AIRCR, WL.AIRCR_SYSRESET); } catch (e) { /* the reset may cut the reply */ }
+      await sleep(30);
+    }
+    return { target: t, dpidr, usedReset };
+  }
+}
+
+/** Target memory through the ST-Link: single words via the debug-register commands, blocks via
+ *  READMEM/WRITEMEM_32BIT (split at 1 KB, where the AP's address auto-increment wraps). */
+class StLinkTarget {
+  constructor(stl) { this.stl = stl; }
+  async read32(addr) {
+    const r = await this.stl.xfer([STL.DEBUG, STL.D_READDEBUGREG, ...le32(addr)], { inLen: 8 });
+    if (r[0] !== STL.OK) throw stlError(r[0], `reading 0x${hex8(addr)}`);
+    return u32le(r, 4);
+  }
+  async write32(addr, value) {
+    const r = await this.stl.xfer([STL.DEBUG, STL.D_WRITEDEBUGREG, ...le32(addr), ...le32(value >>> 0)], { inLen: 2 });
+    if (r[0] !== STL.OK) throw stlError(r[0], `writing 0x${hex8(addr)}`);
+  }
+  async lastRw(what) {
+    const r = await this.stl.xfer([STL.DEBUG, STL.D_LASTRW], { inLen: 2 });
+    if (r[0] !== STL.OK) throw stlError(r[0], what);
+  }
+  async readBlock(addr, count) {
+    const out = [];
+    while (out.length < count) {
+      const a = addr + out.length * 4, n = Math.min(count - out.length, (0x400 - (a & 0x3FF)) >> 2), len = n * 4;
+      const r = await this.stl.xfer([STL.DEBUG, STL.D_READMEM32, ...le32(a), len & 0xFF, len >> 8], { inLen: len });
+      await this.lastRw(`reading 0x${hex8(a)}`);
+      for (let k = 0; k < n; k++) out.push(u32le(r, k * 4));
+    }
+    return out;
+  }
+  async writeBlock(addr, words) {
+    for (let i = 0; i < words.length;) {
+      const a = addr + i * 4, n = Math.min(words.length - i, (0x400 - (a & 0x3FF)) >> 2), len = n * 4;
+      const data = new Uint8Array(len);
+      for (let k = 0; k < n; k++) data.set(le32(words[i + k] >>> 0), k * 4);
+      await this.stl.xfer([STL.DEBUG, STL.D_WRITEMEM32, ...le32(a), len & 0xFF, len >> 8], { out: data });
+      await this.lastRw(`writing 0x${hex8(a)}`);
+      i += n;
+    }
+  }
+  async halted() { return ((await this.read32(WL.DHCSR)) & WL.S_HALT) !== 0; }
+  async halt() {
+    await this.write32(WL.DHCSR, WL.DHCSR_KEY | WL.C_DEBUGEN | WL.C_HALT);
+    for (let i = 0; i < 50; i++) { if (await this.halted()) return; await sleep(2); }
+    throw new DapError('The CPU did not halt');
+  }
+  async writeDp() { /* the probe firmware owns the debug port */ }
+  /** Slow SWD while flash programs (no WAITs), normal speed otherwise. */
+  async flashPace(programming) { try { await this.stl.setFreq(programming ? 480 : 1800); } catch (e) { /* keep the current clock */ } }
+}
+
+/**
+ * Simulated ST-Link V2 (firmware V2J37) on the simulated STM32WL55 of SimDapProbe: starts in DFU mode
+ * like a freshly plugged stick, drives NRST through its RST pin (unless rstWired is false, as on some
+ * clones), and keeps a log of SWD clock changes. For the tests and the page's practice mode.
+ */
+class SimStLinkIo {
+  constructor(opts = {}) {
+    this.wl = new SimDapProbe(opts);
+    this.wl.connected = true;
+    this.rstWired = opts.nresetWired !== false;
+    this.mode = STL.MODE_DFU; this.debug = false; this.last = STL.OK;
+    this.log = { freqs: [], commands: 0 };
+  }
+  get flash() { return this.wl.flash; }
+  async xfer(c, out, inLen) {
+    await Promise.resolve();
+    this.log.commands++;
+    const w = this.wl;
+    const reply = bytes => { const r = new Uint8Array(inLen); r.set(bytes.slice(0, inLen)); return r; };
+    switch (c[0]) {
+      case STL.GET_VERSION: return reply([0x29, 0x47, 0x83, 0x04, 0x48, 0x37]);          // V2J37S7, 0483:3748
+      case STL.GET_MODE: return reply([this.debug ? STL.MODE_DEBUG : this.mode, 0]);
+      case STL.DFU: if (c[1] === STL.DFU_EXIT) this.mode = STL.MODE_MASS; return new Uint8Array(0);
+      case STL.SWIM: this.mode = STL.MODE_MASS; return new Uint8Array(0);
+      case STL.GET_VOLTAGE: return reply([...le32(1489), ...le32(2047)]);                   // 3.30 V
+      case STL.DEBUG: break;
+      default: return reply([0x81]);
+    }
+    const asleep = () => w.stop2 && !w.nreset;
+    const reachable = a => !w.nreset || [WL.DHCSR, WL.DEMCR, WL.DFSR].includes(a);        // under reset: core debug registers only
+    switch (c[1]) {
+      case STL.D_EXIT: this.debug = false; return new Uint8Array(0);
+      case STL.D_ENTER:
+        if (this.mode === STL.MODE_DFU) return reply([0x81, 0]);
+        if (asleep()) return reply([0x09, 0]);
+        this.debug = true; w.powered = true;
+        return reply([STL.OK, 0]);
+      case STL.D_READ_IDCODES: return reply(this.debug && !asleep() ? [STL.OK, 0, 0, 0, ...le32(0x6BA02477), 0, 0, 0, 0] : [0x09]);
+      case STL.D_DRIVE_NRST:
+        if (this.rstWired) {
+          if (c[2] === 0 && !w.nreset) { w.nreset = true; w.stop2 = false; w.halted = false; w.running = false; }
+          else if (c[2] === 1 && w.nreset) { w.nreset = false; w._sysReset(); }
+        }
+        return reply([STL.OK, 0]);
+      case STL.D_SWD_FREQ: this.log.freqs.push(c[2] | (c[3] << 8)); return reply([STL.OK, 0]);
+      case STL.D_RESETSYS: w._sysReset(); return reply([STL.OK, 0]);
+      case STL.D_READDEBUGREG: {
+        const a = u32le(c, 2);
+        if (!this.debug || asleep() || !reachable(a)) return reply([0x11]);
+        try { return reply([STL.OK, 0, 0, 0, ...le32(w._mem32(a))]); } catch (e) { return reply([0x11]); }
+      }
+      case STL.D_WRITEDEBUGREG: {
+        const a = u32le(c, 2), v = u32le(c, 6);
+        if (!this.debug || asleep() || !reachable(a)) return reply([0x11]);
+        try { w._write32(a, v); return reply([STL.OK, 0]); } catch (e) { return reply([0x11]); }
+      }
+      case STL.D_READMEM32: {
+        const a = u32le(c, 2), n = c[6] | (c[7] << 8), r = new Uint8Array(inLen);
+        this.last = STL.OK;
+        if (!this.debug || w.nreset || n > 6144 || (a & 0x3FF) + n > 0x400) { this.last = 0x11; return r; }
+        try { for (let k = 0; k < n; k += 4) r.set(le32(w._mem32(a + k)), k); } catch (e) { this.last = 0x11; }
+        return r;
+      }
+      case STL.D_WRITEMEM32: {
+        const a = u32le(c, 2), n = c[6] | (c[7] << 8);
+        this.last = STL.OK;
+        if (!this.debug || w.nreset || !out || out.length !== n || (a & 0x3FF) + n > 0x400) { this.last = 0x11; return new Uint8Array(0); }
+        try { for (let k = 0; k < n; k += 4) w._write32(a + k, u32le(out, k)); } catch (e) { this.last = 0x11; }
+        return new Uint8Array(0);
+      }
+      case STL.D_LASTRW: return reply([this.last, 0]);
+      default: return reply([STL.OK, 0]);
+    }
+  }
+}
+
 const NaiadProtocol = {
   TOOL_VERSION, APP_BASE, APP_MAX_SIZE, RAM_START, RAM_END, DFU_CHUNK, DFU_MAX_PAYLOAD, BAUDS, ST_ITEMS, CSV_COLUMNS, AT_ERROR_TEXT, ROM_RECOVERY_CMD,
   Clock, sleep, CancelledError, TimeoutError, ProtocolError,
@@ -3670,6 +3932,7 @@ const NaiadProtocol = {
   vaultDeriveKey, vaultSeal, vaultOpen, vaultCreate, b64enc, b64dec,
   teamImportPreview, teamSealKey, teamOpenKey, teamVaultNew, teamVaultUnlock, teamSealRecords, defaultRelease, releaseLabel,
   DAP_CMD, WL, SWD_APP_PAGES, SWD_BL_PAGES, DapError, CmsisDap, SwdTarget, swdConnect, swdProtectionProblems, analyzeSwdImage, swdFlashStm32wl, SimDapProbe,
+  STL, StLinkProbe, StLinkTarget, SimStLinkIo,
 };
 // ==== PROTOCOL END ====
 
@@ -5850,6 +6113,40 @@ class WebHidDapIo {
   async close() { try { this.device.removeEventListener('inputreport', this.onReport); await this.device.close(); } catch (e) { /* unplugged */ } }
 }
 
+/** ST-Link V2/V2-1/V3 over WebUSB: one bulk OUT endpoint, replies on the lowest bulk IN endpoint
+ *  (the other IN carries SWO trace). On Windows the interface needs the WinUSB driver. */
+class WebUsbStLinkIo {
+  constructor(device) { this.device = device; this.label = device.productName || 'ST-Link'; }
+  static async request() {
+    const device = await navigator.usb.requestDevice({ filters: STL.PIDS.map(productId => ({ vendorId: STL.VID, productId })) });
+    const io = new WebUsbStLinkIo(device);
+    await io.open();
+    return io;
+  }
+  async open() {
+    const d = this.device;
+    try { await d.open(); }
+    catch (e) { throw new DapError('The browser could not open the ST-Link. On Windows it needs the WinUSB driver: install ST\'s ST-LINK USB driver (it comes with STM32CubeProgrammer), or use Zadig to set "STM32 STLink" to WinUSB. Close STM32CubeProgrammer or OpenOCD if they are running.'); }
+    if (!d.configuration) await d.selectConfiguration(1);
+    const intf = d.configuration.interfaces[0], alt = intf.alternate || intf.alternates[0];
+    const bulk = alt.endpoints.filter(e => e.type === 'bulk');
+    const out = bulk.find(e => e.direction === 'out'), ins = bulk.filter(e => e.direction === 'in').sort((a, b) => a.endpointNumber - b.endpointNumber);
+    if (!out || !ins.length) { await d.close(); throw new DapError('This ST-Link has no usable bulk endpoints'); }
+    try { await d.claimInterface(intf.interfaceNumber); }
+    catch (e) { await d.close(); throw new DapError('The ST-Link is in use by another program (STM32CubeProgrammer, OpenOCD, an IDE), or Windows has no WinUSB driver for it.'); }
+    this.epOut = out.endpointNumber; this.epIn = ins[0].endpointNumber;
+  }
+  async xfer(cmd16, out, inLen) {
+    await withTimeout(this.device.transferOut(this.epOut, cmd16), 'ST-Link command');
+    if (out && out.length) await withTimeout(this.device.transferOut(this.epOut, out), 'ST-Link data');
+    if (!inLen) return new Uint8Array(0);
+    const r = await withTimeout(this.device.transferIn(this.epIn, inLen), 'ST-Link reply');
+    if (r.status !== 'ok') throw new DapError(`USB transfer ${r.status}`);
+    return new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
+  }
+  async close() { try { await this.device.close(); } catch (e) { /* unplugged */ } }
+}
+
 const swd = { io: null, dap: null, kind: null, label: '', file: null };
 
 /** A simulated probe on the simulated module: its app region, no credentials page content needed. */
@@ -5861,6 +6158,13 @@ function swdSimProbe() {
   io.label = 'Simulated CMSIS-DAP probe';
   return io;
 }
+function swdSimStLink() {
+  const flash = new Uint8Array(WL.FLASH_SIZE).fill(0xFF);
+  flash.set(ensureSim(false).flash.subarray(0, APP_MAX_SIZE), 0);
+  const io = new SimStLinkIo({ flash });
+  io.label = 'Simulated ST-Link V2';
+  return io;
+}
 async function swdCloseProbe() {
   if (swd.dap) await swd.dap.disconnect();
   if (swd.io && swd.io.close) await swd.io.close();
@@ -5870,20 +6174,26 @@ async function swdCloseProbe() {
 async function swdOpenProbe(kind) {
   await swdCloseProbe();
   let io;
+  const stlink = kind === 'stlink' || kind === 'simst';
   if (kind === 'sim') io = swdSimProbe();
-  else if (kind === 'hid') {
+  else if (kind === 'simst') io = swdSimStLink();
+  else if (kind === 'stlink') {
+    if (!('usb' in navigator)) throw new DapError('WebUSB is not available here: use Chrome or Edge on a desktop computer.');
+    io = await WebUsbStLinkIo.request();
+  } else if (kind === 'hid') {
     if (!('hid' in navigator)) throw new DapError('WebHID is not available here: use Chrome or Edge on a desktop computer.');
     io = await WebHidDapIo.request();
   } else {
     if (!('usb' in navigator)) throw new DapError('WebUSB is not available here: use Chrome or Edge on a desktop computer.');
     io = await WebUsbDapIo.request();
   }
-  const dap = new CmsisDap(io);
+  const dap = stlink ? new StLinkProbe(io) : new CmsisDap(io);
   let info;
   try { info = await dap.init(); }
   catch (e) { if (io.close) await io.close(); throw e; }
-  Object.assign(swd, { io, dap, kind, label: [info.vendor, info.product].filter(Boolean).join(' ') || io.label || 'CMSIS-DAP probe' });
-  note(`SWD probe: ${swd.label}${info.version ? ` (firmware ${info.version})` : ''}, ${dap.packet}-byte packets`);
+  Object.assign(swd, { io, dap, kind, label: [info.vendor, info.product].filter(Boolean).join(' ') || io.label || 'debug probe' });
+  note(`SWD probe: ${swd.label}${info.version ? ` (firmware ${info.version})` : ''}${info.targetV != null ? `, target ${info.targetV} V` : ''}${stlink ? '' : `, ${dap.packet}-byte packets`}`);
+  if (stlink && info.targetV != null && info.targetV < 1.7) note('The ST-Link sees no target voltage: genuine ST-Links need the board 3.3 V on their VAPP/T_VCC pin (clones do not sense it).', 'warn');
   renderSwd();
   return swd;
 }
@@ -5928,7 +6238,7 @@ async function swdFlashImage(img, { onPhase = () => {}, onProgress = () => {} } 
     ui.flash = { ok: true, method: 'swd', name: img.name, size: v.size, crc: v.crc, verifyCrc: v.crc, durationMs: v.durationMs, oldFw: typeof ui.unit.fw === 'string' ? ui.unit.fw : null, newFw: null, startedAt: v.at, swd: v };
     note(`SWD flash OK: ${img.name}, ${v.pages} pages erased, ${v.written} bytes written, verified, ${fmtDur(v.durationMs)}${v.underReset ? ' (connected under reset)' : ''}`);
     for (const w of v.warnings) note(`SWD: ${w}`, 'warn');
-    if (swd.kind === 'sim') simAfterSwd();
+    if (swd.kind === 'sim' || swd.kind === 'simst') simAfterSwd();
     await afterSwd();
   } else ui.flash = { ok: false, method: 'swd', error: r.error ? r.error.message : 'cancelled' };
   renderReport(); renderSwd();
@@ -5936,7 +6246,7 @@ async function swdFlashImage(img, { onPhase = () => {}, onProgress = () => {} } 
 }
 /** Practice mode: the simulated module now runs what the simulated probe wrote, bootloader included. */
 function simAfterSwd() {
-  if (!ui.sim || !swd.io) return;
+  if (!ui.sim || !swd.io || !swd.io.flash) return;
   ui.sim.flash.set(swd.io.flash.subarray(0, APP_MAX_SIZE));
   Object.assign(ui.sim.o, { noDfu: false, crashOnBoot: false });
   $('#simNoDfu').checked = false; $('#simCrash').checked = false;
@@ -6045,7 +6355,7 @@ const SENSOR_INFO = {
 const K_VOYAGES = 'naiadTool.voyages.v1';
 const SHIP_SVG = '<svg viewBox="0 0 40 34" aria-hidden="true"><path d="M20 3 20 24 8 24Z" fill="#fff"/><path d="M22 7 22 24 33 24Z" fill="#ffe08a"/><path d="M4 26H36L31 32H9Z" fill="#8b4a22"/><path d="M20 2V26" stroke="#5b3a1a" stroke-width="1.5"/></svg>';
 
-const voy = { step: 0, busy: false, prog: null, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, src: null, manual: false, raf: 0, hailed: false, sang: false, swdOpen: false, swdKind: 'usb', swdDone: null };
+const voy = { step: 0, busy: false, prog: null, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, src: null, manual: false, raf: 0, hailed: false, sang: false, swdOpen: false, swdKind: 'stlink', swdDone: null };
 
 /** Small DOM builder: el('div', { class, text, onclick, ...attrs }, ...children) */
 function el(tag, props = {}, ...kids) {
@@ -6656,10 +6966,12 @@ function vSwdPanel() {
     out.push(vState('storm', voy.err.swd.title, voy.err.swd.text));
     out.push(vFixes(['Check the probe wiring: SWDIO, SWCLK, GND, NRST, and the 3.3 V reference.', 'Close J-Link or ST software that may be using the probe, then try again.', 'No reset line on the probe and the module asleep? Power-cycle the module and flash right away.']));
   }
-  out.push(vState('info', 'Flash with a debug probe (SWD)', `Wire a CMSIS-DAP probe to the module’s SWD pads: SWDIO, SWCLK, GND, NRST and the 3.3 V reference. It writes ${R && R.full ? `${R.release.tag}: firmware and update bootloader` : 'the full firmware image'}. The module keeps its credentials.`));
+  out.push(vState('info', 'Flash with a debug probe (SWD)', `Wire the probe to the module’s SWD pads: SWDIO (P26), SWCLK (P25), GND and NRST (P35). It writes ${R && R.full ? `${R.release.tag}: firmware and update bootloader` : 'the full firmware image'}. The module keeps its credentials.`));
   if (!sim) {
     out.push(el('div', { class: 'vchoices', role: 'group', 'aria-label': 'Probe type' },
-      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(voy.swdKind !== 'hid'), onclick: () => { voy.swdKind = 'usb'; vRender(); } },
+      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(voy.swdKind === 'stlink'), onclick: () => { voy.swdKind = 'stlink'; vRender(); } },
+        el('b', { text: 'ST-Link' }), el('span', { text: 'ST-Link V2 (and the V2 mini clones), V2-1 or V3.' })),
+      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(voy.swdKind === 'usb'), onclick: () => { voy.swdKind = 'usb'; vRender(); } },
         el('b', { text: 'USB probe (CMSIS-DAP v2)' }), el('span', { text: 'Pico debugprobe, DAPLink, or a J-Link switched to CMSIS-DAPv2.' })),
       el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(voy.swdKind === 'hid'), onclick: () => { voy.swdKind = 'hid'; vRender(); } },
         el('b', { text: 'Older HID probe (CMSIS-DAP v1)' }), el('span', { text: 'J-Link V10/V11 in CMSIS-DAPv1 mode, older DAPLink.' }))));
@@ -6668,7 +6980,7 @@ function vSwdPanel() {
   out.push(el('details', { class: 'help' }, el('summary', { text: 'Which probe, and how to switch a J-Link' }), vFixes([
     'A Raspberry Pi Pico with the debugprobe firmware (about $5) works without drivers: GP2 = SWCLK, GP3 = SWDIO, GP1 = reset.',
     'J-Link BASE/PLUS V12+: J-Link Configurator → right-click the probe → Configure → Boot mode = CMSIS-DAPv2, then replug (switch back for JLinkExe).',
-    'ST-Link does not speak CMSIS-DAP: use STM32CubeProgrammer for those.',
+    'ST-Link (V2 mini clones too): SWDIO, SWCLK, GND and RST → NRST (P35); its 3.3 V only for a board without its own supply. On Windows it needs the WinUSB driver (ST\'s ST-LINK driver, or Zadig).',
   ])));
   return out;
 }

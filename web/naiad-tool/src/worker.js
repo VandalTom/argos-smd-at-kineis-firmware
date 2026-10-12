@@ -58,6 +58,12 @@ export default {
 
 /* ---------------- firmware releases ---------------- */
 
+/** fetch() to GitHub: a network failure becomes a clear 502 instead of an internal error. */
+async function gh(url, init) {
+	try { return await fetch(url, init); }
+	catch (e) { throw new HttpError(502, 'GitHub cannot be reached right now: try again in a minute'); }
+}
+
 async function cached(ctx, key, ttl, make) {
 	const cache = globalThis.caches && caches.default;
 	const req = new Request(`https://naiad-tool.cache/${key}`);
@@ -94,8 +100,8 @@ const FEED_MAX = 10;
  *  Cloudflare without a GITHUB_TOKEN), the public Atom feed stands in. The feed also lists plain tags
  *  (the fork inherits upstream's), so each tag counts only if its Naiad images are really attached. */
 async function listReleases(env) {
-	const gh = { 'user-agent': 'naiad-tool', ...(env.GITHUB_TOKEN ? { authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}) };
-	const api = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/releases?per_page=30`, { headers: { ...gh, accept: 'application/vnd.github+json' } });
+	const auth = { 'user-agent': 'naiad-tool', ...(env.GITHUB_TOKEN ? { authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}) };
+	const api = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/releases?per_page=30`, { headers: { ...auth, accept: 'application/vnd.github+json' } }).catch(() => ({ ok: false, status: 0 }));
 	if (api.ok) {
 		return (await api.json()).filter(r => !r.draft && TAG.test(r.tag_name)).map(r => releaseEntry(env, r.tag_name, {
 			name: r.name, date: r.published_at, prerelease: !!r.prerelease, url: r.html_url,
@@ -103,7 +109,7 @@ async function listReleases(env) {
 		})).filter(r => r.assets.some(a => a.kind === 'app')).sort(newestFirst);
 	}
 	console.log(`GitHub API ${api.status}: listing releases from the Atom feed`);
-	const feed = await fetch(`https://github.com/${env.GITHUB_REPO}/releases.atom`, { headers: { 'user-agent': 'naiad-tool' } });
+	const feed = await gh(`https://github.com/${env.GITHUB_REPO}/releases.atom`, { headers: { 'user-agent': 'naiad-tool' } });
 	if (!feed.ok) throw new HttpError(502, `GitHub answered ${api.status} (API) and ${feed.status} (feed)`);
 	const tags = [];
 	for (const entry of (await feed.text()).match(/<entry>[\s\S]*?<\/entry>/g) || []) {
@@ -115,7 +121,7 @@ async function listReleases(env) {
 		const assets = [];
 		for (const variant of VARIANTS) {
 			const name = `naiad-carrier-${variant}__argos-smd-at-kineis-firmware.bin`;
-			const head = await fetch(`https://github.com/${env.GITHUB_REPO}/releases/download/${t.tag}/${name}`, { method: 'HEAD', redirect: 'manual', headers: { 'user-agent': 'naiad-tool' } });
+			const head = await gh(`https://github.com/${env.GITHUB_REPO}/releases/download/${t.tag}/${name}`, { method: 'HEAD', redirect: 'manual', headers: { 'user-agent': 'naiad-tool' } });
 			// CI attaches the '_full' image next to every app image (one HEAD per variant keeps the subrequest count low)
 			if (head.status === 302 || head.status === 200) assets.push({ name, size: null, variant, kind: 'app' }, { name: name.replace(/\.bin$/, '_full.bin'), size: null, variant, kind: 'full' });
 		}
@@ -132,7 +138,7 @@ async function releases(env, ctx) {
 async function firmware(env, ctx, tag, name) {
 	if (!TAG.test(tag) || !RELEASE_ASSET.test(name)) throw new HttpError(404, 'Not a Naiad release image');
 	return cached(ctx, `fw2/${tag}/${name}`, 3600, async () => {     // 1 h: a re-published release reaches the tool quickly
-		const res = await fetch(`https://github.com/${env.GITHUB_REPO}/releases/download/${tag}/${name}`, { redirect: 'follow', headers: { 'user-agent': 'naiad-tool' } });
+		const res = await gh(`https://github.com/${env.GITHUB_REPO}/releases/download/${tag}/${name}`, { redirect: 'follow', headers: { 'user-agent': 'naiad-tool' } });
 		if (!res.ok) throw new HttpError(res.status === 404 ? 404 : 502, `Release image not available (GitHub ${res.status})`);
 		return new Response(res.body, {
 			headers: { 'content-type': 'application/octet-stream', 'content-disposition': `attachment; filename="${tag}__${name}"`, 'x-content-type-options': 'nosniff' },

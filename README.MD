@@ -255,8 +255,11 @@ an audio file of your own, kept in that browser only).
 *Debug probe (SWD)*: for modules the serial update cannot reach (factory
 firmware without the update bootloader, or a silent module), the Flash panel
 and the Voyage view flash the release's full image (app + bootloader) through
-a CMSIS-DAP probe on the module's SWD pads, from the browser: CMSIS-DAP v2 via
-WebUSB (no driver on Windows), v1 via WebHID. It connects under reset (NRST
+a debug probe on the module's SWD pads (SWDIO P26, SWCLK P25, NRST P35, GND;
+on the Naiad carrier the debug JST), from the browser: ST-Link V2/V2-1/V3
+(including V2 mini clones) via WebUSB, which on Windows needs the WinUSB
+driver (ST's ST-LINK driver from STM32CubeProgrammer, or Zadig); CMSIS-DAP v2
+via WebUSB (no driver on Windows), v1 via WebHID. It connects under reset (NRST
 held low: reaches a module asleep in STOP2), freezes the watchdogs while the
 CPU is halted, refuses read-protected chips, CPU2 secure areas and
 write-protected pages, erases only the app (pages 0-99) and bootloader (102-117)
@@ -265,9 +268,11 @@ FLASH_USER at 0x0803B000), writes the vector table last, verifies by reading
 back, and restarts the module. Probes: a Raspberry Pi Pico running Raspberry
 Pi's debugprobe firmware (GP2 SWCLK, GP3 SWDIO, GP1 reset), DAPLink, or a
 J-Link BASE/PLUS V12+ switched to CMSIS-DAPv2 in J-Link Configurator (Boot
-mode; switch back for JLinkExe). ST-Link is not CMSIS-DAP: use
-STM32CubeProgrammer. A simulated probe is available for practice; the browser
-flasher is tested against it (not yet on a real probe).
+mode; switch back for JLinkExe). With an ST-Link the SWD clock drops to 480 kHz
+while flash programs (no WAIT retries needed). On some ST-Link V2 clones the RST
+pin does not reach an STM32: power-cycle a sleeping module just before
+flashing. Simulated probes (ST-Link and CMSIS-DAP) are available for practice;
+the browser flasher is tested against them (not yet on real hardware).
 
 *Released firmware*: the Flash panel lists the Naiad images attached to the
 GitHub Releases (field and bench builds) and loads one with a click; the

@@ -990,6 +990,42 @@ await test('SWD: a unit asleep in STOP2 needs nRESET; RDP, wrong chip and cancel
   eq(P.u32le(sim.flash, 0), 0xFFFFFFFF, 'vector table still blank: the ROM bootloader starts next boot');
 });
 
+/* ---------- SWD through an ST-Link (simulated ST-Link V2 on the same simulated STM32WL55) ---------- */
+await test('ST-Link: flash a unit under reset (stick starts in DFU mode): image written, credentials + mirror kept, 480 kHz while programming', async () => {
+  const img = swdImage(), before = swdUnitFlash();
+  const io = new P.SimStLinkIo({ flash: before.slice() });
+  const stl = new P.StLinkProbe(io);
+  const info = await stl.init();
+  eq(`${info.product} ${info.version} ${info.targetV} V`, 'ST-Link V2 V2J37S7 3.3 V', 'probe info');
+  const res = await P.swdFlashStm32wl(stl, img);
+  assert(res.ok && res.verified && res.underReset, JSON.stringify(res));
+  assert(sameRange(io.flash, img, 0, 120 * 1024) && sameRange(io.flash, img, 0x33000, 0x33000 + 20 * 1024), 'app and bootloader written');
+  for (const [s, e] of PROTECTED) assert(sameRange(io.flash, before, s, e), `0x${(0x08000000 + s).toString(16)} untouched`);
+  assert(!io.wl.log.erased.some(p => p === 100 || p === 101 || p >= 118), 'protected pages never erased');
+  eq(io.wl.log.firstVectorWriteIndex, io.wl.log.programmed - 1, 'vector table programmed last');
+  assert(io.wl.locked && io.wl.running && !io.wl.halted, 'flash relocked, module running');
+  eq(io.log.freqs.join(), '1,7,1', 'SWD clock 1.8 MHz, 480 kHz while programming, 1.8 MHz again');
+  return `${res.written} B in ${io.log.commands} ST-Link commands`;
+});
+
+await test('ST-Link: a sleeping unit needs the RST pin, a dead clone RST falls back to a plain attach, RDP is refused', async () => {
+  const img = swdImage({ appSize: 16 * 1024, blSize: 4096 });
+  const run = async (opts, fopts = {}) => { const io = new P.SimStLinkIo(opts); const stl = new P.StLinkProbe(io); await stl.init(); return { io, r: P.swdFlashStm32wl(stl, img, fopts) }; };
+  let { io, r } = await run({ stop2: true });
+  const a = await r;
+  assert(a.ok && a.underReset, 'asleep: connect under reset through RST');
+  ({ io, r } = await run({ stop2: true, nresetWired: false }));
+  await rejects(r, e => /no target found/.test(e.message), 'asleep and RST not driving NRST');
+  eq(io.wl.log.erased.length, 0, 'nothing erased');
+  ({ io, r } = await run({ nresetWired: false }));
+  io.wl.dfsr = P.WL.DFSR_VCATCH;                    // stale flag from an earlier session must not fake a reset
+  const b = await r;
+  assert(b.ok && !b.underReset, 'awake, RST not wired: plain attach + system reset');
+  ({ io, r } = await run({ rdp: 0xBB }));
+  await rejects(r, e => /read protection is on/.test(e.message), 'RDP 1');
+  eq(io.wl.log.erased.length, 0, 'nothing erased under RDP');
+});
+
 await test('Releases: the image offered first is the newest field build without a warning', async () => {
   const a = v => ({ name: `naiad-carrier-${v}__argos-smd-at-kineis-firmware.bin`, variant: v });
   const list = [
