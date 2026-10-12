@@ -346,12 +346,13 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
         <label class="field"><span class="lbl">GPS receiver</span>
           <select id="simGps">
             <option value="" selected>Working</option>
-            <option value="lo">Unpowered (enable not reaching it)</option>
-            <option value="fl">Data wire not connected</option>
-            <option value="swap">TX and RX swapped (P11 on its RX)</option>
-            <option value="baud">Set to 38400 baud</option>
-            <option value="nmea">Sends UBX only, no NMEA</option>
-            <option value="inv">Enable works backwards</option>
+            <option value="lo">Not powered</option>
+            <option value="fl">Data wire open</option>
+            <option value="swap">Cable wired to the wrong pins</option>
+            <option value="sparse">Loose supply connection</option>
+            <option value="baud">Module set to 38400 baud</option>
+            <option value="nmea">Wrong module fitted</option>
+            <option value="inv">Enable wire fault</option>
           </select></label>
       </div>
       <div class="row" style="margin-top:8px">
@@ -792,7 +793,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.4.5';
+const TOOL_VERSION = '1.4.6';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -1312,62 +1313,63 @@ function txDeferral(r) {
 function isTxDeferred(r) { return !!txDeferral(r); }
 const GPS_BAUD = 9600;
 /**
- * The GPS self-test detail in plain words (firmware 1.0.2 and later):
+ * The GPS self-test detail (firmware 1.0.2 and later) for the technician: what the test saw,
+ * then assembly checks only (cable, connector, solder joints, supply at the connector, the
+ * module fitted). Never design advice.
  *   bytes=<n>,nmea=<n>,cs_err=<n>,fe=<n>,line=<off>/<on>[,off=bytes|nmea][,baud=<b>|none]
- * line: the data line (P11/PB6) probed against the module's own pulls with the receiver
- * switched off, then on: fl = nothing drives it, hi = held high (an idle receiver output),
- * lo = held low (an unpowered receiver clamps it, or a short), act = data moving.
- * off: heard while the enable (P3/PA1) was low. baud: a scan of the other common bauds.
- * Returns { level: 'fail' | 'warn', title, text, fixes } or null (all fine, or an older detail).
+ * line: the data line (P11/PB6) probed with the GPS switched off, then on: fl = nothing drives
+ * it, hi = held high, lo = held low, act = data moving. off: heard while switched off.
+ * baud: the other speeds tried. Returns { level: 'fail' | 'warn', title, text, fixes } or null
+ * (all fine, or an older detail).
  */
+const GPS_CHECK = {
+  seated: 'Check the GPS cable is fully seated at both ends and undamaged.',
+  harness: 'Check the GPS cable is the correct one, wired pin 1 to pin 1.',
+  supply: 'Measure 3.3 V between GPS connector pins 1 and 2 while the test runs.',
+  enable: 'Check the enable wire (GPS connector pin 5) and its solder joint at pad P3: it reads 3.3 V while the GPS test runs, 0 V otherwise.',
+  data: 'Check the data wire (GPS connector pin 4) and its solder joint at pad P11.',
+  joints: 'Check the solder joints at the GPS connector and at pads P3 and P11.',
+  part: 'Check the GPS module fitted is the specified part.',
+  spare: 'Swap in a known-good GPS module and test again.',
+};
 function gpsDiagnosis(r) {
   if (!r || (r.item && r.item !== 'GPS') || !r.detail) return null;
   const kv = {};
   for (const part of r.detail.split(',')) { const i = part.indexOf('='); if (i > 0) kv[part.slice(0, i)] = part.slice(i + 1); }
   if (!kv.line) return null;
-  const [off, on] = kv.line.split('/');
-  const driven = s => s === 'hi' || s === 'act';
-  const nmea = Number(kv.nmea) || 0, fe = Number(kv.fe) || 0;
+  const on = kv.line.split('/')[1];
+  const driven = on === 'hi' || on === 'act';
+  const nmea = Number(kv.nmea) || 0, bytes = Number(kv.bytes) || 0, fe = Number(kv.fe) || 0;
   const found = kv.baud && kv.baud !== 'none' ? kv.baud : null;
-  const enableFix = 'Measure the enable on pad P3 (PA1) while the test runs: it should read 3.3 V for about 5 s, then 0 V.';
-  if (kv.off === 'nmea') {
-    if (nmea || found) return { level: 'fail', title: 'The GPS never switches off',
-      text: 'It sent NMEA while its enable (P3/PA1) was low, so it would run all the time and flatten the battery.',
-      fixes: ['Check the enable wire: GPS connector pin 5 to module pad P3 (PA1).', 'Check that the GPS board\'s EN input really switches the receiver: with EN at 0 V its current should drop to almost nothing.'] };
-    return { level: 'fail', title: 'The GPS enable works backwards',
-      text: 'The receiver talked while its enable (P3/PA1) was low and went quiet when the module drove it high: this GPS board\'s EN input is active-low.',
-      fixes: ['Use a GPS board whose EN is active-high (high = on), or add an inverter. The firmware drives P3 (PA1) high to switch the GPS on.'] };
-  }
+  const C = GPS_CHECK;
+  if (kv.off === 'nmea') return { level: 'fail', title: 'The GPS does not follow its on/off control',
+    text: nmea || found ? 'It kept sending data after the unit switched it off.' : 'It sent data while switched off and stopped when switched on.',
+    fixes: [C.enable, 'Look for a solder bridge between pad P3 and 3.3 V.', C.part, C.spare] };
   if (r.verdict === 'PASS') {
-    if (found) return { level: 'warn', title: `The GPS talks at ${found} baud`,
-      text: `The firmware expects ${GPS_BAUD} baud. It found the receiver at ${found} and uses that until the next restart, which checks again.`,
-      fixes: [`To make it permanent, set the receiver to ${GPS_BAUD} baud and save it to the receiver's flash (u-blox: u-center, UBX-CFG-PRT), or build the firmware with CC_GPS_BAUD ${found}.`] };
-    if (kv.off === 'bytes') return { level: 'warn', title: 'Bytes arrived while the GPS was switched off',
-      text: 'Something reached the data line (P11/PB6) while the enable (P3/PA1) was low. The GPS may not switch fully off.',
-      fixes: [enableFix] };
+    if (found) return { level: 'warn', title: 'The GPS module is set to a different speed',
+      text: `It answered at ${found} baud instead of ${GPS_BAUD}. The unit adapts and the GPS works, but the module is not set up as specified.`,
+      fixes: [C.part, 'If in doubt, fit a GPS module from a known-good batch.'] };
+    if (kv.off === 'bytes') return { level: 'warn', title: 'Stray data while the GPS was switched off',
+      text: 'The GPS works, but something reached its data line while it was switched off.',
+      fixes: [C.enable, C.data] };
     return null;
   }
   if (r.verdict !== 'FAIL') return null;
-  const backwards = driven(off) && !driven(on)
-    ? ' The line was driven while the GPS was switched off and went quiet when it was switched on, so its enable may work backwards (active-low).' : '';
-  if (on === 'hi' && !(Number(kv.bytes) || 0) && !fe) return { level: 'fail', title: 'The GPS data line sits high but carries nothing',
-    text: `With the GPS switched on, pad P11 (PB6) is held high, yet not one byte arrived in ${kv.baud === 'none' ? 'about 12 s at any common baud' : `5 s at ${GPS_BAUD} baud`}. That is what a GPS board's RX input looks like (many boards label TX and RX from the host's side), or a receiver that is powered but never transmits.${backwards}`,
-    fixes: ['Find which pin of the GPS board is its TX output (its datasheet, or a serial adapter at 9600 baud on each data pin while the board is powered). The carrier expects it on connector pin 4 to P11 (PB6); connector pin 3 is not connected.', 'Check whether the GPS board needs anything else to start, such as a backup supply (V_BCKP / VBAT) or a reset or ON/OFF pin.', enableFix] };
-  // A steady 1 Hz stream gives hundreds of bytes in 5 s at any baud (thousands at the right one);
-  // a few dozen, mostly broken, means the receiver is not streaming at all.
-  const bytes = Number(kv.bytes) || 0;
-  if ((driven(on) || fe) && bytes < 200 && kv.baud === 'none') return { level: 'fail', title: 'Only scattered, broken bytes from the GPS',
-    text: `The receiver wakes up (its data line, P11/PB6, is driven), but in about 12 s it sent just ${bytes} bytes${fe ? `, ${fe} of them broken (framing errors)` : ''}, and no NMEA at ${GPS_BAUD} or any other common baud. A working receiver sends a steady stream every second. This pattern usually means the receiver keeps restarting: its supply is too low or dips when it wakes.`,
-    fixes: ['Measure the GPS supply on connector pin 1 while the test runs. Many GPS modules want 5 V (their own regulator drops some of it); check the module\'s minimum against the 3.3 V the carrier gives.', 'Power the GPS module on its own from its recommended supply, with its enable tied high (at 3.3 V logic), and watch its TX with a serial adapter at 9600 baud: a steady NMEA stream there and not on the carrier points at the carrier supply.', 'Keep the GPS cable short, and add a bulk capacitor (10 to 47 uF) at the module\'s supply pins.'] };
-  if (driven(on) || fe) return { level: 'fail', title: 'The GPS is on and sending, but not NMEA the module can read',
-    text: `The data line (P11/PB6) is driven, yet no checksum-valid NMEA arrived at ${GPS_BAUD} baud${kv.baud === 'none' ? ' or any other common baud (4800 to 115200)' : ''}.${fe ? ` ${fe} framing errors.` : ''}`,
-    fixes: ['The receiver may be set to a binary protocol only (u-blox UBX, CASIC binary): enable NMEA output on its UART and save it.', 'Check that only the GPS TX (connector pin 4) drives pad P11 (PB6).'] };
-  if (on === 'lo') return { level: 'fail', title: 'The GPS data line is held low',
-    text: `With the GPS switched on, pad P11 (PB6) stays low: the receiver looks unpowered (its output pin pulls the line down), or the line is shorted to ground.${backwards}`,
-    fixes: [enableFix, 'Measure the GPS supply on connector pin 1 (3.3 V) and ground on pin 2.', 'If the enable reads 3.3 V and the receiver still stays off, its EN input may be active-low or need a different voltage.', 'Check for a short between P11 (PB6) and ground.'] };
-  if (on === 'fl') return { level: 'fail', title: 'Nothing drives the GPS data line',
-    text: `With the GPS switched on, pad P11 (PB6) floats: no receiver output reaches the module.${backwards}`,
-    fixes: ['Check the GPS TX wire: GPS connector pin 4 to module pad P11 (PB6).', 'Measure the GPS supply on connector pin 1 (3.3 V) and ground on pin 2.', enableFix] };
+  if (on === 'hi' && !bytes && !fe) return { level: 'fail', title: 'No data from the GPS',
+    text: 'The GPS data line stayed idle: the module sent nothing while switched on.',
+    fixes: [C.seated, C.harness, C.data, C.supply, C.enable, C.spare] };
+  if ((driven || fe) && bytes < 200 && kv.baud === 'none') return { level: 'fail', title: 'Broken data from the GPS',
+    text: `It sent only ${bytes} bytes${fe ? `, ${fe} of them corrupted` : ''}, and no readable position messages.`,
+    fixes: [C.seated, `${C.supply} Watch for it dropping when the GPS switches on.`, C.joints, C.spare] };
+  if (driven || fe) return { level: 'fail', title: 'Unreadable data from the GPS',
+    text: 'The GPS is sending, but not in the expected format or speed.',
+    fixes: [C.part, 'Check for a solder bridge between pad P11 and its neighbours.', C.spare] };
+  if (on === 'lo') return { level: 'fail', title: 'The GPS data line is stuck low',
+    text: 'The GPS is not running, or its data line is shorted to ground.',
+    fixes: [C.seated, C.supply, C.enable, 'Check for a solder bridge or short between pad P11 and ground.', C.spare] };
+  if (on === 'fl') return { level: 'fail', title: 'No connection to the GPS data line',
+    text: 'Nothing reaches pad P11 from the GPS.',
+    fixes: [C.seated, C.data, C.supply, C.spare] };
   return null;
 }
 /** Overall verdict from the REQUIRED items only: PASS only if every required item passed.
@@ -2459,6 +2461,7 @@ class NaiadSimulator {
         lo: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=lo/lo'],
         fl: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=fl/fl'],
         swap: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=lo/hi,baud=none'],
+        sparse: ['FAIL', `bytes=${30 + Math.floor(r * 20)},nmea=0,cs_err=0,fe=${25 + Math.floor(r * 5)},line=hi/hi,baud=none`],
         baud: ['PASS', `bytes=${200 + Math.floor(r * 60)},nmea=0,cs_err=0,fe=${40 + Math.floor(r * 30)},line=lo/act,baud=38400`],
         nmea: ['FAIL', `bytes=${300 + Math.floor(r * 90)},nmea=0,cs_err=0,fe=0,line=lo/act,baud=none`],
         inv: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=act/lo,off=nmea'],

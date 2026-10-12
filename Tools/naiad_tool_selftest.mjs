@@ -205,34 +205,34 @@ await test('Self-test parsing and required-item verdict', () => {
   eq(c.state, 'BURST', 'comm state'); eq(c.sent, 3, 'sent'); eq(c.target, 30, 'target'); eq(c.extra.next, '42', 'extra');
 });
 
-await test('GPS self-test diagnosis (line probe, enable check, baud scan)', () => {
+await test('GPS self-test diagnosis: what the test saw, then assembly checks only', () => {
   const d = l => P.gpsDiagnosis(P.parseStLine(l));
   eq(d('+ST=GPS,PASS,bytes=812,nmea=9'), null, 'pre-1.0.2 detail: no diagnosis');
   eq(d('+ST=GPS,FAIL,bytes=39,nmea=0,cs_err=0'), null, 'pre-1.0.2 failure: the generic advice stays');
   eq(d('+ST=GPS,PASS,bytes=812,nmea=1,cs_err=0,fe=0,line=lo/act'), null, 'healthy receiver: nothing to say');
   eq(d('+ST=WS85,FAIL,silent'), null, 'other items ignored');
-  const fl = d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=fl/fl');
-  eq(fl.title, 'Nothing drives the GPS data line', 'floating line'); assert(/pin 4 to module pad P11/.test(fl.fixes.join(' ')), 'TX wire named');
-  const lo = d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=lo/lo');
-  eq(lo.title, 'The GPS data line is held low', 'unpowered receiver'); assert(/P3 \(PA1\)/.test(lo.fixes[0]), 'enable measurement first');
-  assert(!/backwards/.test(lo.text), 'no polarity hint without evidence');
-  assert(/backwards/.test(d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=hi/lo').text), 'driven while off, quiet while on: polarity hint');
-  const quiet = d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=lo/hi,baud=none');
-  eq(quiet.title, 'The GPS data line sits high but carries nothing', 'held high, silent: not "sending"');
-  assert(/RX input/.test(quiet.text) && /connector pin 3 is not connected/.test(quiet.fixes[0]), 'swapped TX/RX suspected');
-  const sparse = d('+ST=GPS,FAIL,bytes=40,nmea=0,cs_err=0,fe=39,line=hi/hi,baud=none');   // VG7669 on the 3.3 V carrier, 2026-10-12
-  eq(sparse.title, 'Only scattered, broken bytes from the GPS', 'a few broken bytes: not a stream');
-  assert(/39 of them broken/.test(sparse.text) && /connector pin 1/.test(sparse.fixes[0]), 'supply suspected first');
-  const none = d('+ST=GPS,FAIL,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=none');
-  eq(none.title, 'The GPS is on and sending, but not NMEA the module can read', 'driven, no NMEA'); assert(/4800 to 115200/.test(none.text) && /57 framing errors/.test(none.text), 'scan + errors explained');
-  const baud = d('+ST=GPS,PASS,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=38400');
-  eq(baud.level, 'warn', 'adopted baud: a warning, not a failure'); eq(baud.title, 'The GPS talks at 38400 baud', 'baud named');
-  const inv = d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=act/lo,off=nmea');
-  eq(inv.title, 'The GPS enable works backwards', 'talks only while off: active-low enable');
-  eq(d('+ST=GPS,FAIL,bytes=700,nmea=1,cs_err=0,fe=0,line=act/act,off=nmea').title, 'The GPS never switches off', 'talks both ways: never off');
-  eq(d('+ST=GPS,PASS,bytes=700,nmea=1,cs_err=0,fe=0,line=lo/act,off=bytes').level, 'warn', 'stray bytes while off: a warning');
-  const ev = P.evaluateSelftest({ GPS: P.parseStLine('+ST=GPS,PASS,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=38400') }, ['GPS']);
-  eq(ev.verdict, 'PASS', 'an adopted baud still passes');
+  const cases = [
+    ['+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=fl/fl', 'No connection to the GPS data line', /pad P11/],
+    ['+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=lo/lo', 'The GPS data line is stuck low', /pins 1 and 2/],
+    ['+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=lo/hi,baud=none', 'No data from the GPS', /pin 1 to pin 1/],
+    ['+ST=GPS,FAIL,bytes=40,nmea=0,cs_err=0,fe=39,line=hi/hi,baud=none', 'Broken data from the GPS', /dropping when the GPS switches on/],
+    ['+ST=GPS,FAIL,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=none', 'Unreadable data from the GPS', /specified part/],
+    ['+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=act/lo,off=nmea', 'The GPS does not follow its on/off control', /pad P3/],
+    ['+ST=GPS,FAIL,bytes=700,nmea=1,cs_err=0,fe=0,line=act/act,off=nmea', 'The GPS does not follow its on/off control', /pad P3/],
+    ['+ST=GPS,PASS,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=38400', 'The GPS module is set to a different speed', /specified part/],
+    ['+ST=GPS,PASS,bytes=700,nmea=1,cs_err=0,fe=0,line=lo/act,off=bytes', 'Stray data while the GPS was switched off', /pad P3/],
+  ];
+  // Technicians get assembly checks, never design talk.
+  const design = /firmware|active-low|inverter|u-center|CC_GPS_BAUD|datasheet|5 V|capacit|UBX|protocol|label|regulator|design|backwards/i;
+  for (const [line, title, fix] of cases) {
+    const x = d(line);
+    eq(x && x.title, title, line);
+    assert(fix.test(x.fixes.join(' ')), `${title}: the right check`);
+    assert(!design.test([x.title, x.text, ...x.fixes].join(' ')), `${title}: no design advice`);
+  }
+  eq(d(cases[3][0]).text, 'It sent only 40 bytes, 39 of them corrupted, and no readable position messages.', 'counts quoted plainly');
+  eq(d(cases[7][0]).level, 'warn', 'an adopted speed is a warning, not a failure');
+  eq(P.evaluateSelftest({ GPS: P.parseStLine(cases[7][0]) }, ['GPS']).verdict, 'PASS', 'an adopted speed still passes');
 });
 
 await test('Credential validation and CLS paste parsing', () => {
