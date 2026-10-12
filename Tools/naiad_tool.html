@@ -780,7 +780,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.4.1';
+const TOOL_VERSION = '1.4.2';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -6363,6 +6363,7 @@ async function doSwdFlash() {
     : `SWD flash failed: ${swdProbeError(r.error)}`;
   $('#swdResult').append(div);
   $('#swdPhase').textContent = r.ok ? 'Done.' : 'Stopped.';
+  if (r.ok) { $('#swdBar').max = 1; $('#swdBar').value = 1; }
 }
 /** Pro view: read-only SWD check, shown as a short report with the next step. */
 async function doSwdCheck() {
@@ -6695,9 +6696,14 @@ const VVIEWS = {
       out.push(el('div', { class: 'vchoices', role: 'group', 'aria-label': 'Connection' },
         el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(src === 'serial'), disabled: !serialOk, onclick: () => { voy.src = 'serial'; vRender(); } },
           el('b', { text: 'Real module (USB-serial adapter)' }), el('span', { text: serialOk ? 'Chrome or Edge asks which port to use.' : 'Needs Chrome or Edge on a desktop computer.' })),
+        el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(src === 'probe'), onclick: () => { voy.src = 'probe'; vRender(); } },
+          el('b', { text: 'Fresh module: debug probe first' }), el('span', { text: 'Straight from the factory it has no update bootloader: flash it once over SWD (ST-Link or another probe), then hail it over the serial adapter.' })),
         el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(src === 'sim'), onclick: () => { voy.src = 'sim'; vRender(); } },
           el('b', { text: 'Simulated module (practice)' }), el('span', { text: 'A virtual Naiad with old firmware and no credentials.' }))));
-      out.push(el('div', { class: 'vactions' }, vBtn('Hail the module', vConnect, { primary: true })));
+      if (src === 'probe') {
+        out.push(...vSwdPanel());
+        out.push(el('div', { class: 'vactions' }, vBtn(vPracticeProbe() ? 'Hail the simulated module' : 'Hail the module (serial adapter)', vConnect, { primary: !!voy.swdDone })));
+      } else out.push(el('div', { class: 'vactions' }, vBtn('Hail the module', vConnect, { primary: true })));
       out.push(el('details', { class: 'help' }, el('summary', { text: 'How to wire the adapter' }), vFixes([
         'Adapter TX → module P4 (PA3), adapter RX ← module P5 (PA2), GND ↔ GND.',
         'Use a 3.3 V adapter (CP2102, CH340 or FT232). Never 5 V signals.',
@@ -6908,7 +6914,8 @@ const VVIEWS = {
 async function vConnect() {
   voy.err.connect = null;
   if (!voy.sang) { voy.sang = true; void playVoyageMusic(); }     // once per voyage, inside the click
-  const src = voy.src || ('serial' in navigator ? 'serial' : 'sim');
+  const chosen = voy.src || ('serial' in navigator ? 'serial' : 'sim');
+  const src = chosen === 'probe' ? (vPracticeProbe() ? 'sim' : 'serial') : chosen;   // after the probe, the console is on the serial link
   const radio = $(`input[name=src][value=${src}]`);
   if (radio && !radio.checked) { radio.checked = true; radio.dispatchEvent(new Event('change')); }
   await vDo('Hailing the module', async () => {
@@ -7056,7 +7063,7 @@ async function vNextUnit() {
   await disconnect(false);
   if (sim) ensureSim(true);
   Object.assign(ui, { unit: {}, selftest: null, flash: null, creds: null, commission: null, wizard: null });
-  Object.assign(voy, { step: 0, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, manual: false, sang: false, swdOpen: false, swdDone: null });
+  Object.assign(voy, { step: 0, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, manual: false, sang: false, swdOpen: false, swdDone: null, swdCheck: null });
   renderUnit(); renderSelftest(); renderCommission(); renderReport();
   note(sim ? 'New simulated module ready: hail it.' : 'Connect the next module, then hail it.');
   vRender();
@@ -7079,9 +7086,16 @@ function vSwdPanel() {
       el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(voy.swdKind === 'usb'), onclick: () => { voy.swdKind = 'usb'; vRender(); } },
         el('b', { text: 'USB probe (CMSIS-DAP v2)' }), el('span', { text: 'Pico debugprobe, DAPLink, or a J-Link switched to CMSIS-DAPv2.' })),
       el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(voy.swdKind === 'hid'), onclick: () => { voy.swdKind = 'hid'; vRender(); } },
-        el('b', { text: 'Older HID probe (CMSIS-DAP v1)' }), el('span', { text: 'J-Link V10/V11 in CMSIS-DAPv1 mode, older DAPLink.' }))));
+        el('b', { text: 'Older HID probe (CMSIS-DAP v1)' }), el('span', { text: 'J-Link V10/V11 in CMSIS-DAPv1 mode, older DAPLink.' })),
+      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(voy.swdKind === 'simst'), onclick: () => { voy.swdKind = 'simst'; vRender(); } },
+        el('b', { text: 'Practice (simulated ST-Link)' }), el('span', { text: 'Rehearse the probe steps on a virtual module.' }))));
   }
-  out.push(el('div', { class: 'vactions' }, vBtn(R && R.full ? `Flash ${R.release.tag} with the ${sim ? 'simulated ' : ''}probe` : 'Flash with the probe', () => vSwdFlash(sim ? 'sim' : voy.swdKind), { primary: true, disabled: !(R && R.full) && !swd.file })));
+  if (voy.swdCheck) out.push(vSwdCheckState(voy.swdCheck));
+  const kind = sim ? 'sim' : voy.swdKind;
+  const needsFlash = !voy.swdCheck || !voy.swdCheck.bootloader.ok || !vSwdCurrent(voy.swdCheck);
+  out.push(el('div', { class: 'vactions' },
+    vBtn('Check the connection', () => vSwdCheck(kind), { primary: !voy.swdCheck && !voy.swdDone }),
+    vBtn(R && R.full ? `Flash ${R.release.tag} with the ${sim || kind === 'simst' ? 'simulated ' : ''}probe` : 'Flash with the probe', () => vSwdFlash(kind), { primary: !!voy.swdCheck && needsFlash && !voy.swdDone, disabled: !(R && R.full) && !swd.file })));
   out.push(el('details', { class: 'help' }, el('summary', { text: 'Which probe, and how to switch a J-Link' }), vFixes([
     'A Raspberry Pi Pico with the debugprobe firmware (about $5) works without drivers: GP2 = SWCLK, GP3 = SWDIO, GP1 = reset.',
     'J-Link BASE/PLUS V12+: J-Link Configurator → right-click the probe → Configure → Boot mode = CMSIS-DAPv2, then replug (switch back for JLinkExe).',
@@ -7093,7 +7107,7 @@ async function vSwdFlash(kind) {
   await vDo('Flashing over SWD', async () => {
     voy.err.swd = null; voy.swdDone = null;
     vSetProg(kind === 'sim' ? 'Connecting the simulated probe…' : 'Choose the probe in the browser’s list…');
-    try { await swdOpenProbe(kind); } catch (e) { voy.err.swd = { title: 'The probe could not be opened', text: swdProbeError(e) }; return; }
+    try { if (!swd.dap || swd.kind !== kind) await swdOpenProbe(kind); } catch (e) { voy.err.swd = { title: 'The probe could not be opened', text: swdProbeError(e) }; return; }
     let img;
     try { vSetProg('Fetching the full firmware image…'); img = await swdImageFor(vLatest()); }
     catch (e) { voy.err.swd = { title: 'No firmware image', text: e.message }; return; }
@@ -7103,8 +7117,35 @@ async function vSwdFlash(kind) {
       onProgress: pr => vSetProg(pr.phase === 'erase' ? `Clearing the old firmware: page ${pr.done + 1} of ${pr.total}…` : pr.phase === 'write' ? `Writing over SWD: ${pct(pr)} % · ⛵ making way` : `Checking what was written: ${pct(pr)} %`, pr.done, pr.total),
     });
     if (!r.ok) { voy.err.swd = { title: 'The SWD flash did not complete', text: swdProbeError(r.error) }; return; }
-    voy.swdDone = r.value; voy.err.firmware = null; voy.err.connect = null;
+    voy.swdDone = r.value; voy.swdCheck = null; voy.err.firmware = null; voy.err.connect = null;
     if (vConn() && ui.mode === 'app') voy.swdOpen = false;
+  });
+}
+/** Practice probes act on the simulated module, so the voyage then hails the simulator. */
+function vPracticeProbe() { return voy.swdKind === 'simst' || voy.swdKind === 'sim'; }
+function vSwdCurrent(v) {
+  const L = vLatest();
+  return /^Naiad v/.test(v.firmwareId || '') && !!(L && L.release.fwId && v.firmwareId.includes(L.release.fwId));
+}
+/** The read-only check, in plain words. */
+function vSwdCheckState(v) {
+  if (v.devId !== WL.DEV_ID) return vState('storm', `This is not an STM32WL55 (device ID 0x${v.devId.toString(16)})`, 'Check that the probe is wired to the Naiad module.');
+  if (v.problems.length) return vState('storm', 'The module is protected', `${v.problems.join('; ')}. This tool stops here.`);
+  const facts = [`firmware ${v.firmwareId || (v.app.ok ? 'not identified' : 'none')}`, `update bootloader ${v.bootloader.ok ? 'present' : 'missing'}`, `credentials ${v.credentials === 'present' ? 'stored' : 'none yet'}`].join(' · ');
+  const reset = v.underReset ? '' : ' The probe’s reset line did not reset the chip: fine while the module is awake; power-cycle a sleeping module just before flashing.';
+  const L = vLatest();
+  if (v.bootloader.ok && vSwdCurrent(v)) return vState('ok', `Found the module: already on ${L.release.tag}`, `${facts}. No SWD flash needed: hail it over the serial adapter.${reset}`);
+  return vState('info', v.bootloader.ok ? 'Found the module: an older firmware' : 'Found the module: it needs the SWD flash', `${facts}.${reset}`);
+}
+async function vSwdCheck(kind) {
+  await vDo('Checking the SWD connection', async () => {
+    voy.err.swd = null; voy.swdCheck = null;
+    vSetProg(kind === 'sim' || kind === 'simst' ? 'Connecting the simulated probe…' : 'Choose the probe in the browser’s list…');
+    try { if (!swd.dap || swd.kind !== kind) await swdOpenProbe(kind); } catch (e) { voy.err.swd = { title: 'The probe could not be opened', text: swdProbeError(e) }; return; }
+    const r = await runSwdOp('Checking the SWD connection', signal => swdInspect(swd.dap, { underReset: $('#swdUnderReset').checked, signal, onStep: m => vSetProg(m) }));
+    if (!r.ok) { voy.err.swd = { title: 'No connection to the module over SWD', text: swdProbeError(r.error) }; return; }
+    voy.swdCheck = r.value;
+    note(`SWD check: STM32WL55 0x${r.value.devId.toString(16)}, firmware ${r.value.firmwareId || 'unknown'}, bootloader ${r.value.bootloader.ok ? 'present' : 'missing'}, credentials ${r.value.credentials}`);
   });
 }
 
