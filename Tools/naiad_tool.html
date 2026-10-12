@@ -79,6 +79,8 @@ label.chk { display: inline-flex; align-items: center; gap: 5px; cursor: pointer
 fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 0; padding: 6px 10px 10px; }
 legend { font-size: 12px; color: var(--muted); font-weight: 600; padding: 0 4px; }
 .muted { color: var(--muted); }
+.st-diag { font-family: inherit; font-size: 12px; color: var(--muted); margin-top: 3px; white-space: normal; }
+.st-diag b { color: var(--text); font-weight: 600; }
 .small { font-size: 12px; }
 .msg { color: var(--muted); }
 .msg.err { color: var(--fail); } .msg.ok { color: var(--pass); } .msg.warn { color: var(--warn); }
@@ -341,6 +343,15 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
             <option value="2250">Low (2.25 V)</option>
             <option value="2050">Critical (2.05 V, tier CRIT)</option>
           </select></label>
+        <label class="field"><span class="lbl">GPS receiver</span>
+          <select id="simGps">
+            <option value="" selected>Working</option>
+            <option value="lo">Unpowered (enable not reaching it)</option>
+            <option value="fl">Data wire not connected</option>
+            <option value="baud">Set to 38400 baud</option>
+            <option value="nmea">Sends UBX only, no NMEA</option>
+            <option value="inv">Enable works backwards</option>
+          </select></label>
       </div>
       <div class="row" style="margin-top:8px">
         <label class="chk"><input type="checkbox" id="simWs85"> WS85 connected</label>
@@ -521,7 +532,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
     </div>
     <div class="row">
       <button id="btnStRun" class="btn primary" disabled>Run self-test now</button>
-      <button id="btnStWait" class="btn" disabled title="Polls AT+SELFTEST=? every 2 s (up to 150 s)">Wait for boot self-test</button>
+      <button id="btnStWait" class="btn" disabled title="Polls AT+SELFTEST=? every 2 s (up to 180 s)">Wait for boot self-test</button>
       <button id="btnStRead" class="btn" disabled>Read last result</button>
       <button id="btnStCancel" class="btn" data-cancel disabled>Cancel</button>
     </div>
@@ -780,7 +791,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.4.2';
+const TOOL_VERSION = '1.4.3';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -1298,6 +1309,57 @@ function txDeferral(r) {
   return null;
 }
 function isTxDeferred(r) { return !!txDeferral(r); }
+const GPS_BAUD = 9600;
+/**
+ * The GPS self-test detail in plain words (firmware 1.0.2 and later):
+ *   bytes=<n>,nmea=<n>,cs_err=<n>,fe=<n>,line=<off>/<on>[,off=bytes|nmea][,baud=<b>|none]
+ * line: the data line (P11/PB6) probed against the module's own pulls with the receiver
+ * switched off, then on: fl = nothing drives it, hi = held high (an idle receiver output),
+ * lo = held low (an unpowered receiver clamps it, or a short), act = data moving.
+ * off: heard while the enable (P3/PA1) was low. baud: a scan of the other common bauds.
+ * Returns { level: 'fail' | 'warn', title, text, fixes } or null (all fine, or an older detail).
+ */
+function gpsDiagnosis(r) {
+  if (!r || (r.item && r.item !== 'GPS') || !r.detail) return null;
+  const kv = {};
+  for (const part of r.detail.split(',')) { const i = part.indexOf('='); if (i > 0) kv[part.slice(0, i)] = part.slice(i + 1); }
+  if (!kv.line) return null;
+  const [off, on] = kv.line.split('/');
+  const driven = s => s === 'hi' || s === 'act';
+  const nmea = Number(kv.nmea) || 0, fe = Number(kv.fe) || 0;
+  const found = kv.baud && kv.baud !== 'none' ? kv.baud : null;
+  const enableFix = 'Measure the enable on pad P3 (PA1) while the test runs: it should read 3.3 V for about 5 s, then 0 V.';
+  if (kv.off === 'nmea') {
+    if (nmea || found) return { level: 'fail', title: 'The GPS never switches off',
+      text: 'It sent NMEA while its enable (P3/PA1) was low, so it would run all the time and flatten the battery.',
+      fixes: ['Check the enable wire: GPS connector pin 5 to module pad P3 (PA1).', 'Check that the GPS board\'s EN input really switches the receiver: with EN at 0 V its current should drop to almost nothing.'] };
+    return { level: 'fail', title: 'The GPS enable works backwards',
+      text: 'The receiver talked while its enable (P3/PA1) was low and went quiet when the module drove it high: this GPS board\'s EN input is active-low.',
+      fixes: ['Use a GPS board whose EN is active-high (high = on), or add an inverter. The firmware drives P3 (PA1) high to switch the GPS on.'] };
+  }
+  if (r.verdict === 'PASS') {
+    if (found) return { level: 'warn', title: `The GPS talks at ${found} baud`,
+      text: `The firmware expects ${GPS_BAUD} baud. It found the receiver at ${found} and uses that until the next restart, which checks again.`,
+      fixes: [`To make it permanent, set the receiver to ${GPS_BAUD} baud and save it to the receiver's flash (u-blox: u-center, UBX-CFG-PRT), or build the firmware with CC_GPS_BAUD ${found}.`] };
+    if (kv.off === 'bytes') return { level: 'warn', title: 'Bytes arrived while the GPS was switched off',
+      text: 'Something reached the data line (P11/PB6) while the enable (P3/PA1) was low. The GPS may not switch fully off.',
+      fixes: [enableFix] };
+    return null;
+  }
+  if (r.verdict !== 'FAIL') return null;
+  const backwards = driven(off) && !driven(on)
+    ? ' The line was driven while the GPS was switched off and went quiet when it was switched on, so its enable may work backwards (active-low).' : '';
+  if (driven(on) || fe) return { level: 'fail', title: 'The GPS is on and sending, but not NMEA the module can read',
+    text: `The data line (P11/PB6) is driven, yet no checksum-valid NMEA arrived at ${GPS_BAUD} baud${kv.baud === 'none' ? ' or any other common baud (4800 to 115200)' : ''}.${fe ? ` ${fe} framing errors.` : ''}`,
+    fixes: ['The receiver may be set to a binary protocol only (u-blox UBX): enable NMEA output on its UART and save it to the receiver\'s flash.', 'Check that only the GPS TX (connector pin 4) drives pad P11 (PB6).'] };
+  if (on === 'lo') return { level: 'fail', title: 'The GPS data line is held low',
+    text: `With the GPS switched on, pad P11 (PB6) stays low: the receiver looks unpowered (its output pin pulls the line down), or the line is shorted to ground.${backwards}`,
+    fixes: [enableFix, 'Measure the GPS supply on connector pin 1 (3.3 V) and ground on pin 2.', 'If the enable reads 3.3 V and the receiver still stays off, its EN input may be active-low or need a different voltage.', 'Check for a short between P11 (PB6) and ground.'] };
+  if (on === 'fl') return { level: 'fail', title: 'Nothing drives the GPS data line',
+    text: `With the GPS switched on, pad P11 (PB6) floats: no receiver output reaches the module.${backwards}`,
+    fixes: ['Check the GPS TX wire: GPS connector pin 4 to module pad P11 (PB6).', 'Measure the GPS supply on connector pin 1 (3.3 V) and ground on pin 2.', enableFix] };
+  return null;
+}
 /** Overall verdict from the REQUIRED items only: PASS only if every required item passed.
  *  PENDING_TX = every required item passed except TX, which is untested (not provisioned, or battery critical). */
 function evaluateSelftest(items, required) {
@@ -1320,7 +1382,7 @@ function evaluateSelftest(items, required) {
 
 /** Explicit run: AT+SELFTEST=[items]. Collects +ST= lines until +SELFTEST=PASS|FAIL. */
 async function runSelftest(link, items, opts = {}) {
-  const { signal, timeout = 120000, pendingTimeout = 240000 } = opts;
+  const { signal, timeout = 150000, pendingTimeout = 240000 } = opts;
   const onUpdate = opts.onUpdate || (() => {});
   const sel = ST_ITEMS.filter(i => items.includes(i));
   const bad = items.filter(i => !ST_ITEMS.includes(i));
@@ -1391,7 +1453,7 @@ function querySelftest(link, { signal, timeout = 3000 } = {}) {
 
 /** After a flash/reset: poll AT+SELFTEST=? until the automatic boot run has a result. */
 async function pollBootSelftest(link, opts = {}) {
-  const { signal, interval = 2000, maxWait = 150000 } = opts;
+  const { signal, interval = 2000, maxWait = 180000 } = opts;
   const onUpdate = opts.onUpdate || (() => {});
   const view = newRun('boot', ST_ITEMS);
   view.status = 'WAITING';
@@ -2382,12 +2444,22 @@ class NaiadSimulator {
     if (it === 'TX' && !this.prov) return { ms: 10, verdict: 'FAIL', detail: 'unprovisioned' };
     if (it === 'TX') { this._readBat(); if (this.batCrit) return { ms: 10, verdict: 'SKIP', detail: 'batt_crit' }; }
     if (it === 'ADC') { const mv = this._readBat(); if (!this.o.stFail.includes('ADC')) return { ms: 20, verdict: 'PASS', detail: `nimh=${mv},scap=${4790 + Math.floor(r * 20)}` }; }
+    if (it === 'GPS' && this.o.gpsFault) {
+      const d = {
+        lo: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=lo/lo'],
+        fl: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=fl/fl'],
+        baud: ['PASS', `bytes=${200 + Math.floor(r * 60)},nmea=0,cs_err=0,fe=${40 + Math.floor(r * 30)},line=lo/act,baud=38400`],
+        nmea: ['FAIL', `bytes=${300 + Math.floor(r * 90)},nmea=0,cs_err=0,fe=0,line=lo/act,baud=none`],
+        inv: ['FAIL', 'bytes=0,nmea=0,cs_err=0,fe=0,line=act/lo,off=nmea'],
+      }[this.o.gpsFault];
+      if (d) return { ms: d[1].includes('baud=') ? 13000 : 7000, verdict: d[0], detail: d[1] };
+    }
     if (this.o.stFail.includes(it)) {
-      const d = { GPS: 'bytes=0,nmea=0', WS85: 'silent', ENV: 'no_ack', ADC: 'nimh=900', TX: 'timeout' }[it];
+      const d = { GPS: 'bytes=0,nmea=0,cs_err=0,fe=0,line=lo/lo', WS85: 'silent', ENV: 'no_ack', ADC: 'nimh=900', TX: 'timeout' }[it];
       return { ms: it === 'WS85' ? 35000 : 1500, verdict: 'FAIL', detail: d };
     }
     switch (it) {
-      case 'GPS': return { ms: 1500 + r * 2500, verdict: 'PASS', detail: `bytes=${700 + Math.floor(r * 300)},nmea=${8 + Math.floor(r * 4)}` };
+      case 'GPS': return { ms: 2000 + r * 2500, verdict: 'PASS', detail: `bytes=${80 + Math.floor(r * 300)},nmea=1,cs_err=0,fe=0,line=lo/act` };
       case 'WS85': return this.o.ws85 ? { ms: 3000 + r * 29000, verdict: 'PASS', detail: `dir=${Math.floor(r * 360)},spd=${(r * 6).toFixed(1)}` } : { ms: 35000, verdict: 'FAIL', detail: 'silent' };
       case 'ENV': return { ms: 300, verdict: 'PASS', detail: `t=${(21 + r).toFixed(2)},p=${(1013 + r).toFixed(1)},rh=${45 + Math.floor(r * 5)}` };
       case 'ADC': return { ms: 20, verdict: 'PASS', detail: `nimh=${2640 + Math.floor(r * 30)},scap=${4790 + Math.floor(r * 20)}` };
@@ -3978,7 +4050,7 @@ const NaiadProtocol = {
   redactLine, LineSplitter, Mutex, Link, flushLine, WAKE_IDLE_MS,
   atCmd, atError, normalizeIdReadback, querySecKeyCrc, detectUnit, waitForApp, readUnitInfo, resetApp,
   parseKv, parseState, awakeDuty, deviceClock, parseRescueLine, UnitMonitor, parseCommission, getState, commissionCmd,
-  parseStLine, parseSelftestStatus, newRun, txDeferral, isTxDeferred, evaluateSelftest, runSelftest, querySelftest, pollBootSelftest,
+  parseStLine, parseSelftestStatus, newRun, txDeferral, isTxDeferred, gpsDiagnosis, evaluateSelftest, runSelftest, querySelftest, pollBootSelftest,
   WIZARD_STEPS, commissionUnit, lastOrBootSelftest,
   validateCredentials, parseCredentialText, seckeyCrc, readCredentials, compareCredentials, provisionCredentials, eraseCredentials,
   analyzeImage, writeOrder, sendOrderCrc, buildWriteLine, parseDfuInfo, dfuCmd, blPing, requestBoot, flashFirmware, bootloaderCheck, exitBootloader,
@@ -4200,7 +4272,7 @@ function simOptions() {
   return {
     appBaud: Number($('#simAppBaud').value), blBaud: Number($('#simBlBaud').value), ws85: $('#simWs85').checked,
     pendingChance: Number($('#simBusy').value), noDfu: $('#simNoDfu').checked,
-    crashOnBoot: $('#simCrash').checked, batMv: Number($('#simBat').value),
+    crashOnBoot: $('#simCrash').checked, batMv: Number($('#simBat').value), gpsFault: $('#simGps').value,
   };
 }
 function ensureSim(fresh) {
@@ -4597,7 +4669,11 @@ function renderSelftest() {
     const def = it === 'TX' ? txDeferral(r) : null;
     vc.innerHTML = '';
     if (def) { vc.append(badge('NOT TESTED', 'idle')); dc.textContent = `${r.verdict} ${r.detail}: ${def.reason}, ${def.hint}`; }
-    else if (r) { vc.append(badge(r.verdict)); dc.textContent = r.detail || ''; }
+    else if (r) {
+      vc.append(badge(r.verdict)); dc.textContent = r.detail || '';
+      const gd = it === 'GPS' ? gpsDiagnosis(r) : null;
+      if (gd) dc.append(el('div', { class: 'st-diag' }, el('b', { text: gd.title }), `: ${gd.text} ${gd.fixes.join(' ')}`));
+    }
     else if (live && run.requested.includes(it)) { vc.append(badge('WAIT', 'run')); dc.textContent = ''; }
     else { vc.textContent = '—'; dc.textContent = ''; }
   }
@@ -6452,7 +6528,7 @@ const VSTEPS = [
 ];
 const SENSOR_ITEMS = ['GPS', 'WS85', 'ENV', 'ADC'];
 const SENSOR_INFO = {
-  GPS: { name: 'GPS receiver', fix: "Check the GPS module's power and its serial wiring. This check only needs data from the receiver, not a position fix." },
+  GPS: { name: 'GPS receiver', fix: "Check the GPS module's power, its enable (P3) and its data wire to P11. This check only needs data from the receiver, not a position fix." },
   WS85: { name: 'WS85 wind sensor', fix: 'Check the WS85 cable and its power. On a bench without a WS85, make WS85 optional (Pro view → Self-test → Required).' },
   ENV: { name: 'BME280 air sensor', fix: 'Check the BME280 (I2C) solder joints and its 3.3 V supply.' },
   ADC: { name: 'Battery voltage', fix: 'Connect a charged NiMH pack: the reading must be between 1.8 and 3.3 V.' },
@@ -6773,7 +6849,7 @@ const VVIEWS = {
 
   sensors() {
     const out = [], run = ui.selftest, req = requiredItems();
-    out.push(vLead('The module checks its own lookouts: GPS receiver, WS85 wind sensor, BME280 air sensor and battery voltage. It takes up to 40 seconds (the wind sensor sends a reading every few seconds).'));
+    out.push(vLead('The module checks its own lookouts: GPS receiver, WS85 wind sensor, BME280 air sensor and battery voltage. It takes up to a minute (the wind sensor sends a reading every few seconds).'));
     out.push(el('ul', { class: 'vlist' }, SENSOR_ITEMS.map(it => {
       const r = run && run.items && run.items[it];
       const waiting = voy.busy && run && run.requested && run.requested.includes(it) && !r;
@@ -6782,13 +6858,16 @@ const VVIEWS = {
     })));
     if (voy.busy) { out.push(vProgress()); return out; }
     const ev = vSensorEval();
+    const gd = gpsDiagnosis(run && run.items && run.items.GPS);
     if (ev && ev.verdict === 'PASS') out.push(vState(ev.warnings.length ? 'warn' : 'ok', ev.warnings.length ? 'Required sensors fine, an optional one is not' : 'All lookouts report fair weather', ev.warnings.join(' · ')));
     else if (ev && ev.verdict === 'FAIL') {
       out.push(vState('storm', 'A sensor did not report', ev.reasons.join(' · ')));
-      out.push(vFixes(SENSOR_ITEMS.filter(i => run.items[i] && run.items[i].verdict === 'FAIL').map(i => `${SENSOR_INFO[i].name}: ${SENSOR_INFO[i].fix}`)));
+      const fixes = SENSOR_ITEMS.filter(i => run.items[i] && run.items[i].verdict === 'FAIL').flatMap(i => i === 'GPS' && gd ? [] : [`${SENSOR_INFO[i].name}: ${SENSOR_INFO[i].fix}`]);
+      if (fixes.length) out.push(vFixes(fixes));
     }
+    if (gd) { out.push(vState(gd.level === 'warn' ? 'warn' : 'storm', `GPS: ${gd.title}`, gd.text)); out.push(vFixes(gd.fixes)); }
     out.push(el('div', { class: 'vactions' },
-      vBtn(ev ? 'Check again' : 'Check the sensors', () => vDo('Checking the sensors', async () => { voy.skip.sensors = false; await vSelftest(SENSOR_ITEMS, 'Checking the sensors (up to 40 s)…'); }), { primary: !ev || ev.verdict !== 'PASS', disabled: !vConn() || ui.mode !== 'app' }),
+      vBtn(ev ? 'Check again' : 'Check the sensors', () => vDo('Checking the sensors', async () => { voy.skip.sensors = false; await vSelftest(SENSOR_ITEMS, 'Checking the sensors (up to a minute)…'); }), { primary: !ev || ev.verdict !== 'PASS', disabled: !vConn() || ui.mode !== 'app' }),
       ev && ev.verdict === 'FAIL' ? vLink('Continue anyway (recorded in the report)', () => { voy.skip.sensors = true; vRender(); }) : null));
     return out;
   },
@@ -7335,7 +7414,7 @@ function init() {
     // A different baud or DFU support is a different firmware build: re-boot the simulated unit with it.
     $(id).addEventListener('change', () => { if (ui.sim) { Object.assign(ui.sim.o, simOptions()); if (!(ui.link && ui.link.isOpen)) ui.sim.powerCycle(); } });
   }
-  for (const id of ['#simWs85', '#simBusy', '#simCrash', '#simBat']) $(id).addEventListener('change', () => { if (ui.sim) Object.assign(ui.sim.o, simOptions()); });
+  for (const id of ['#simWs85', '#simBusy', '#simCrash', '#simBat', '#simGps']) $(id).addEventListener('change', () => { if (ui.sim) Object.assign(ui.sim.o, simOptions()); });
   if ('serial' in navigator) {
     navigator.serial.getPorts().then(ports => { if (ports.length === 1 && !ui.port) { ui.port = ports[0]; showPortInfo(); } }).catch(() => {});
     navigator.serial.addEventListener('disconnect', e => {

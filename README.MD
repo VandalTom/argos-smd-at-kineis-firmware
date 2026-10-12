@@ -200,6 +200,25 @@ MAC's TX_DONE for one real frame (no satellite pass needed). Report:
 `+ST=<ITEM>,<PASS|FAIL|SKIP>,<detail>` per item, then
 `+SELFTEST=PASS` or `+SELFTEST=FAIL,<items>`.
 
+The GPS item also diagnoses itself (about 7 s, up to 15 s with a baud scan):
+`+ST=GPS,<verdict>,bytes=<n>,nmea=<n>,cs_err=<n>,fe=<n>,line=<off>/<on>[,off=bytes|nmea][,baud=<b>|none]`.
+
+- `line` is the data line (P11/PB6) probed against the module's own pull-down
+  and pull-up, first with the receiver switched off, then on:
+  - `fl`: nothing drives it.
+  - `hi`: held high (an idle receiver output).
+  - `lo`: held low (an unpowered receiver clamps it, or a short).
+  - `act`: data is moving.
+- Before switching the receiver on, the module listens for 1.2 s. If it hears
+  NMEA (`off=nmea`), the enable (P3/PA1) does not switch the receiver off,
+  which would drain the battery: FAIL.
+- A driven line with no NMEA at 9600 baud triggers a scan of 38400, 115200,
+  4800, 19200 and 57600 baud. A hit (`baud=<b>`) passes. The module then uses
+  that baud for its GPS windows until the next boot self-test re-learns it.
+- `fe` counts UART framing/noise errors.
+
+The web tool turns these into plain-words advice.
+
 **Deployment (commissioning) burst** — units are switched on indoors and
 deployed later with no button. The first GPS fix since power-up is the
 "outdoors now" signal: the unit transmits every 60 s (+0..5 s jitter) for

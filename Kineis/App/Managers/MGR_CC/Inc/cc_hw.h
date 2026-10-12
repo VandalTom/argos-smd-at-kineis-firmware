@@ -9,9 +9,10 @@
  *  - Power: one always-on 3.3 V rail feeds module + BME280 + I2C pull-ups
  *    (no switched VCCIO — the AP2112K era ended with the XIAO board). Only
  *    the GPS is hard-switched, via CC_GPS_EN.
- *  - USART1 time-share: session A = GPS on PB6/PB7 @ 9600, session B = WS85
- *    on PA10 @ 115200. The publish cycle is sequential, so one peripheral
- *    serves both; each open is a full deinit / pin-mux / init. RX is
+ *  - USART1 time-share: session A = GPS on PB6 (CR2.SWAP) @ CC_GPS_BAUD (or
+ *    the baud the self-test found it at), session B = WS85 on PA10 @ 115200.
+ *    The publish cycle is sequential, so one peripheral serves both; each
+ *    open is a full deinit / pin-mux / init, with the RX pin pulled up. RX is
  *    interrupt-driven into a ring buffer the app drains each loop pass.
  *  - I2C2 session: bus-idle check (bit-banged bus-clear if a slave holds SDA
  *    low) -> HAL init. Close parks SDA/SCL high-Z (analog): the pull-ups sit
@@ -32,7 +33,7 @@
 
 typedef enum {
 	CC_UART_NONE = 0,
-	CC_UART_GPS,   /**< session A: PB6/PB7, 9600 */
+	CC_UART_GPS,   /**< session A: PB6 (swapped to RX), CC_HW_gpsBaud() */
 	CC_UART_WS85,  /**< session B: PA10 RX, 115200 */
 } cc_uart_session_t;
 
@@ -42,12 +43,16 @@ void CC_HW_init(void);
 
 /* ---- USART1 sensor sessions ---- */
 
-/** Open a sensor UART session (closes any previous one). */
+/** Open a sensor UART session at its baud (closes any previous one). */
 bool CC_HW_uartOpen(cc_uart_session_t s);
+/** Same, at an explicit baud (the self-test's GPS baud scan). */
+bool CC_HW_uartOpenBaud(cc_uart_session_t s, uint32_t baud);
 /** Drain up to @p max ring bytes into @p buf; returns count (non-blocking). */
 uint16_t CC_HW_uartRead(uint8_t *buf, uint16_t max);
 /** Count of ring overruns since open (diagnostic). */
 uint16_t CC_HW_uartOverruns(void);
+/** Framing/noise errors since open: a sender at another baud, or noise. */
+uint16_t CC_HW_uartLineErrors(void);
 /** Close the session: UART off, pins parked, rail released. */
 void CC_HW_uartClose(void);
 
@@ -55,6 +60,17 @@ void CC_HW_uartClose(void);
 
 void CC_HW_gpsPowerOn(void);
 void CC_HW_gpsPowerOff(void);
+/** How long the receiver has been switched off (0 while on). */
+uint32_t CC_HW_gpsOffForMs(void);
+/** The GPS session baud: CC_GPS_BAUD until the self-test finds another. */
+uint32_t CC_HW_gpsBaud(void);
+void CC_HW_gpsSetBaud(uint32_t baud);
+/**
+ * Probe the GPS data line (PB6) with the MCU's own pulls, ~16 ms: is it
+ * high while pulled down, low while pulled up? (cc_selftest_line_class).
+ * Not while the GPS session is open (returns false). Leaves PB6 parked.
+ */
+bool CC_HW_gpsLineProbe(bool *high_when_pulled_down, bool *low_when_pulled_up);
 
 /* ---- I2C2 env-sensor session ---- */
 

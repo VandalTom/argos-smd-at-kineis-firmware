@@ -130,6 +130,13 @@
 #define CC_SELFTEST_AT_BOOT      1
 #define CC_SELFTEST_BOOT_ITEMS   0x1Fu     /**< GPS|WS85|ENV|ADC|TX (cc_selftest.h bits) */
 #define CC_SELFTEST_GPS_MS       5000UL    /**< first checksum-valid NMEA sentence */
+/* GPS diagnosis: before switching the receiver on, listen while it should be
+ * off (an enable that does not switch it off drains the battery); after a
+ * silent window on a driven line, try the other common bauds and adopt a hit
+ * for this power-up (the boot self-test re-learns it after every reset). */
+#define CC_SELFTEST_GPS_OFF_SETTLE_MS 500UL /**< off at least this long before listening */
+#define CC_SELFTEST_GPS_OFF_MS   1200UL    /**< listen while off (> one NMEA burst) */
+#define CC_SELFTEST_GPS_SCAN_MS  1500UL    /**< per scanned baud */
 #define CC_SELFTEST_WS85_MS      35000UL   /**< one broadcast (~30 s period) */
 #define CC_SELFTEST_TX_MS        60000UL   /**< MAC TX_DONE */
 #define CC_SELFTEST_NIMH_MIN_MV  1800      /**< 2S NiMH: 0.9 V/cell floor */

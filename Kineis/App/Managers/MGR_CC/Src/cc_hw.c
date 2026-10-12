@@ -23,6 +23,8 @@
 
 static bool s_gps_powered;
 static bool s_i2c_open;
+static uint32_t s_gps_off_tick;            /**< when the receiver was last switched off */
+static uint32_t s_gps_baud = CC_GPS_BAUD;  /**< survives CC_HW_init (re-run after every sleep) */
 
 /*******************************************************************************
  * Init: safe pin states
@@ -73,6 +75,7 @@ void CC_HW_init(void)
 	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
 
 	s_gps_powered = false;
+	s_gps_off_tick = HAL_GetTick();
 	s_i2c_open = false;
 }
 
@@ -87,12 +90,16 @@ static volatile uint8_t  s_ring[CC_UART_RING_SIZE];
 static volatile uint16_t s_ring_wr;
 static volatile uint16_t s_ring_rd;
 static volatile uint16_t s_ring_ovr;
+static volatile uint16_t s_line_err;
 static cc_uart_session_t s_session = CC_UART_NONE;
 
 void USART1_IRQHandler(void)
 {
 	uint32_t isr = USART1->ISR;
 
+	/* Framing/noise errors: a sender at another baud, or a noisy line */
+	if ((isr & (USART_ISR_FE | USART_ISR_NE)) && s_line_err != 0xFFFFU)
+		s_line_err++;
 	if (isr & USART_ISR_RXNE_RXFNE) {
 		uint8_t b = (uint8_t)USART1->RDR;
 		uint16_t next = (uint16_t)((s_ring_wr + 1U) & (CC_UART_RING_SIZE - 1U));
@@ -135,6 +142,11 @@ void CC_HW_uartClose(void)
 
 bool CC_HW_uartOpen(cc_uart_session_t s)
 {
+	return CC_HW_uartOpenBaud(s, s == CC_UART_GPS ? s_gps_baud : CC_WS85_BAUD);
+}
+
+bool CC_HW_uartOpenBaud(cc_uart_session_t s, uint32_t baud)
+{
 	if (s == CC_UART_NONE) {
 		CC_HW_uartClose();
 		return true;
@@ -143,24 +155,23 @@ bool CC_HW_uartOpen(cc_uart_session_t s)
 
 	GPIO_InitTypeDef g = {0};
 
+	/* Pull-up: an undriven RX line (sensor off, unplugged, mis-wired) then
+	 * idles instead of floating into noise that decodes as junk bytes. Both
+	 * senders are push-pull and powered while their session is open. */
 	g.Mode = GPIO_MODE_AF_PP;
-	g.Pull = GPIO_NOPULL;
+	g.Pull = GPIO_PULLUP;
 	g.Speed = GPIO_SPEED_FREQ_HIGH;
 	g.Alternate = GPIO_AF7_USART1;
-
-	uint32_t baud;
 
 	if (s == CC_UART_GPS) {
 		/* NMEA arrives on PB6 (USART1's TX-capable pad) — CR2.SWAP below
 		 * turns it into the receive pin. PB7 is unwired on this carrier. */
 		g.Pin = CC_GPS_NMEA_Pin;
 		HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
-		baud = CC_GPS_BAUD;
 	} else {
 		/* WS85: RX only — PA9 (bench config TX) is deliberately untouched */
 		g.Pin = CC_WS85_RX_Pin;
 		HAL_GPIO_Init(CC_WS85_RX_GPIO_Port, &g);
-		baud = CC_WS85_BAUD;
 	}
 
 	__HAL_RCC_USART1_CLK_ENABLE();
@@ -191,6 +202,7 @@ bool CC_HW_uartOpen(cc_uart_session_t s)
 	s_ring_wr = 0;
 	s_ring_rd = 0;
 	s_ring_ovr = 0;
+	s_line_err = 0;
 	s_session = s;
 
 	/* RXNE interrupt only — the ring is drained from the app loop */
@@ -216,6 +228,11 @@ uint16_t CC_HW_uartOverruns(void)
 	return s_ring_ovr;
 }
 
+uint16_t CC_HW_uartLineErrors(void)
+{
+	return s_line_err;
+}
+
 /*******************************************************************************
  * GPS power
  ******************************************************************************/
@@ -237,6 +254,63 @@ void CC_HW_gpsPowerOff(void)
 	MGR_LOG_DEBUG("[CCHW] GPS off\r\n");
 	HAL_GPIO_WritePin(CC_GPS_EN_GPIO_Port, CC_GPS_EN_Pin, GPIO_PIN_RESET);
 	s_gps_powered = false;
+	s_gps_off_tick = HAL_GetTick();
+}
+
+uint32_t CC_HW_gpsOffForMs(void)
+{
+	return s_gps_powered ? 0U : HAL_GetTick() - s_gps_off_tick;
+}
+
+uint32_t CC_HW_gpsBaud(void)
+{
+	return s_gps_baud;
+}
+
+void CC_HW_gpsSetBaud(uint32_t baud)
+{
+	if (baud != 0U && baud != s_gps_baud) {
+		MGR_LOG_INFO("[CCHW] GPS baud %lu -> %lu\r\n", (unsigned long)s_gps_baud, (unsigned long)baud);
+		s_gps_baud = baud;
+	}
+}
+
+#define CC_LINE_PROBE_SAMPLES 8U /* per pull, ~1 ms apart */
+
+bool CC_HW_gpsLineProbe(bool *high_when_pulled_down, bool *low_when_pulled_up)
+{
+	GPIO_InitTypeDef g = {0};
+	bool hi = false, lo = false;
+
+	*high_when_pulled_down = false;
+	*low_when_pulled_up = false;
+	if (s_session == CC_UART_GPS)
+		return false; /* the pin belongs to the open session */
+
+	g.Mode = GPIO_MODE_INPUT;
+	g.Pin = CC_GPS_NMEA_Pin;
+	g.Pull = GPIO_PULLDOWN;
+	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+	for (uint32_t i = 0; i < CC_LINE_PROBE_SAMPLES; i++) {
+		HAL_Delay(1);
+		if (HAL_GPIO_ReadPin(CC_GPS_NMEA_GPIO_Port, CC_GPS_NMEA_Pin) == GPIO_PIN_SET)
+			hi = true;
+	}
+	g.Pull = GPIO_PULLUP;
+	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+	for (uint32_t i = 0; i < CC_LINE_PROBE_SAMPLES; i++) {
+		HAL_Delay(1);
+		if (HAL_GPIO_ReadPin(CC_GPS_NMEA_GPIO_Port, CC_GPS_NMEA_Pin) == GPIO_PIN_RESET)
+			lo = true;
+	}
+	/* back to the low-leak parking state */
+	g.Mode = GPIO_MODE_ANALOG;
+	g.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+
+	*high_when_pulled_down = hi;
+	*low_when_pulled_up = lo;
+	return true;
 }
 
 /*******************************************************************************

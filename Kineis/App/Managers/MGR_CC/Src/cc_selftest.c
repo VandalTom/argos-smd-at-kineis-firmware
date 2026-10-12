@@ -127,6 +127,51 @@ cc_st_verdict_t cc_selftest_eval_gps(uint32_t bytes, uint32_t sentences)
 	return sentences > 0 ? CC_STV_PASS : CC_STV_FAIL;
 }
 
+cc_line_t cc_selftest_line_class(bool high_when_pulled_down, bool low_when_pulled_up)
+{
+	if (high_when_pulled_down && low_when_pulled_up)
+		return CC_LINE_ACTIVE;
+	if (high_when_pulled_down)
+		return CC_LINE_HIGH;
+	if (low_when_pulled_up)
+		return CC_LINE_LOW;
+	return CC_LINE_FLOAT;
+}
+
+const char *cc_selftest_line_name(cc_line_t l)
+{
+	switch (l) {
+	case CC_LINE_FLOAT:  return "fl";
+	case CC_LINE_HIGH:   return "hi";
+	case CC_LINE_LOW:    return "lo";
+	case CC_LINE_ACTIVE: return "act";
+	default:             return "-";
+	}
+}
+
+cc_st_verdict_t cc_selftest_eval_gps_diag(const cc_st_gps_t *g)
+{
+	if (g->off_heard == CC_OFF_NMEA)
+		return CC_STV_FAIL; /* never switches off: drains the battery */
+	return (g->sentences > 0 || g->scan_baud != 0) ? CC_STV_PASS : CC_STV_FAIL;
+}
+
+int cc_selftest_format_gps(char *buf, size_t n, const cc_st_gps_t *g)
+{
+	char off[12] = "", baud[20] = "";
+
+	if (g->off_heard != CC_OFF_SILENT)
+		snprintf(off, sizeof(off), ",off=%s", g->off_heard == CC_OFF_NMEA ? "nmea" : "bytes");
+	if (g->scan_baud)
+		snprintf(baud, sizeof(baud), ",baud=%lu", (unsigned long)g->scan_baud);
+	else if (g->scanned)
+		snprintf(baud, sizeof(baud), ",baud=none");
+	return snprintf(buf, n, "bytes=%lu,nmea=%lu,cs_err=%lu,fe=%lu,line=%s/%s%s%s",
+		(unsigned long)g->bytes, (unsigned long)g->sentences, (unsigned long)g->cs_errors,
+		(unsigned long)g->line_errors, cc_selftest_line_name(g->off_line),
+		cc_selftest_line_name(g->on_line), off, baud);
+}
+
 cc_st_verdict_t cc_selftest_eval_env(float tc, float hpa, float rh)
 {
 	if (tc < -40.0f || tc > 85.0f)

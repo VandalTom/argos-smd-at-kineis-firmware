@@ -162,6 +162,17 @@ static cc_st_step_t st_step;
 static bool st_entry;               /**< first call of the current step */
 static uint32_t st_step_tick;
 static uint32_t st_bytes;
+#if CC_ENABLE_GPS
+/* GPS item phases: settle (receiver off a while) -> listen while off (enable
+ * check) -> listen while on -> baud scan when a driven line stayed silent */
+typedef enum { STG_SETTLE, STG_OFF_LISTEN, STG_ON_LISTEN, STG_SCAN } cc_st_gps_phase_t;
+static cc_st_gps_phase_t st_gps_phase;
+static cc_st_gps_t st_gps;          /**< the GPS diagnosis being gathered */
+static uint32_t st_gps_tick;        /**< start of the current listening window */
+static uint32_t st_gps_cur;         /**< baud being scanned */
+static uint8_t st_gps_scan;         /**< next index into st_gps_bauds */
+static const uint32_t st_gps_bauds[] = { 9600UL, 38400UL, 115200UL, 4800UL, 19200UL, 57600UL };
+#endif
 static int st_tx_evt;               /**< 0 waiting, 1 TX_DONE, -1 timeout, -2 abort, -3 MAC error */
 static int st_tx_status;
 
@@ -881,7 +892,7 @@ static void st_goto(cc_st_step_t s)
 /** Record one item's verdict and print its "+ST=" line. */
 static void st_report(cc_st_item_t i, cc_st_verdict_t v, const char *detail)
 {
-	char line[96];
+	char line[112];
 
 	cc_selftest_set(&st, i, v, detail);
 	cc_selftest_format_item(line, sizeof(line), &st, i);
@@ -969,6 +980,153 @@ static void selftest_finish(void)
 	transition_to(CC_ST_CYCLE_WAIT);
 }
 
+#if CC_ENABLE_GPS
+/** What drives the GPS data line right now (no session may be open). */
+static cc_line_t st_gps_line(void)
+{
+	bool hi, lo;
+
+	if (!CC_HW_gpsLineProbe(&hi, &lo))
+		return CC_LINE_UNKNOWN;
+	return cc_selftest_line_class(hi, lo);
+}
+
+/** Drain the GPS session into the NMEA parser; returns the bytes read. */
+static uint32_t st_gps_pump(void)
+{
+	uint8_t buf[64];
+	uint16_t n = CC_HW_uartRead(buf, sizeof(buf));
+
+	for (uint16_t k = 0; k < n; k++)
+		(void)cc_nmea_feed(&nmea, buf[k]);
+	return n;
+}
+
+/** Start a listening window at @p baud with a fresh parser. */
+static bool st_gps_listen(uint32_t baud)
+{
+	cc_nmea_init(&nmea);
+	st_gps_tick = HAL_GetTick();
+	return CC_HW_uartOpenBaud(CC_UART_GPS, baud);
+}
+
+static bool st_gps_window_open(uint32_t ms)
+{
+	return nmea.sentences == 0 && HAL_GetTick() - st_gps_tick <= ms;
+}
+
+/** Next baud for the scan (the window's own is skipped); 0 when done. */
+static uint32_t st_gps_next_baud(void)
+{
+	while (st_gps_scan < sizeof(st_gps_bauds) / sizeof(st_gps_bauds[0])) {
+		uint32_t b = st_gps_bauds[st_gps_scan++];
+
+		if (b != st_gps.baud)
+			return b;
+	}
+	return 0;
+}
+
+/** Receiver off, verdict out. A scan hit becomes the session baud (the
+ *  cycle's GPS windows use it until the next boot self-test). */
+static void st_gps_finish(const char *fail)
+{
+	char d[CC_ST_DETAIL_LEN];
+
+	CC_HW_uartClose();
+	CC_HW_gpsPowerOff();
+	if (fail) {
+		st_report(CC_STI_GPS, CC_STV_FAIL, fail);
+		return;
+	}
+	if (st_gps.scan_baud)
+		CC_HW_gpsSetBaud(st_gps.scan_baud);
+	cc_selftest_format_gps(d, sizeof(d), &st_gps);
+	st_report(CC_STI_GPS, cc_selftest_eval_gps_diag(&st_gps), d);
+}
+
+/** The GPS item; true when it has reported. */
+static bool selftest_gps(void)
+{
+	if (st_entry) {
+		st_entry = false;
+		memset(&st_gps, 0, sizeof(st_gps));
+		st_gps.baud = CC_HW_gpsBaud();
+		st_gps_scan = 0;
+		st_gps_phase = STG_SETTLE;
+	}
+	switch (st_gps_phase) {
+	case STG_SETTLE:
+		/* The self-test may have just switched the receiver off */
+		if (CC_HW_gpsOffForMs() < CC_SELFTEST_GPS_OFF_SETTLE_MS)
+			return false;
+		st_gps.off_line = st_gps_line();
+		if (!st_gps_listen(st_gps.baud)) {
+			st_gps_finish("uart");
+			return true;
+		}
+		st_gps_phase = STG_OFF_LISTEN;
+		return false;
+
+	case STG_OFF_LISTEN:
+		/* Switched off, it must be silent: NMEA here means the enable
+		 * (PA1) does not switch it off */
+		if (st_gps_pump() && st_gps.off_heard == CC_OFF_SILENT)
+			st_gps.off_heard = CC_OFF_BYTES;
+		if (nmea.sentences)
+			st_gps.off_heard = CC_OFF_NMEA;
+		if (st_gps_window_open(CC_SELFTEST_GPS_OFF_MS))
+			return false;
+		CC_HW_uartClose();
+		CC_HW_gpsPowerOn();
+		if (!st_gps_listen(st_gps.baud)) {
+			st_gps_finish("uart");
+			return true;
+		}
+		st_gps_phase = STG_ON_LISTEN;
+		return false;
+
+	case STG_ON_LISTEN:
+		st_gps.bytes += st_gps_pump();
+		if (st_gps_window_open(CC_SELFTEST_GPS_MS))
+			return false;
+		st_gps.sentences = nmea.sentences;
+		st_gps.cs_errors = nmea.cs_errors;
+		st_gps.line_errors = CC_HW_uartLineErrors();
+		CC_HW_uartClose();
+		st_gps.on_line = st_gps_line(); /* still powered */
+		if (st_gps.sentences == 0 &&
+		    (st_gps.bytes || st_gps.line_errors || st_gps.on_line == CC_LINE_HIGH || st_gps.on_line == CC_LINE_ACTIVE)) {
+			/* Something drives the line but not at this baud: try the others */
+			st_gps.scanned = true;
+			st_gps_cur = st_gps_next_baud();
+			if (st_gps_cur && st_gps_listen(st_gps_cur)) {
+				st_gps_phase = STG_SCAN;
+				return false;
+			}
+		}
+		st_gps_finish(NULL);
+		return true;
+
+	case STG_SCAN:
+	default:
+		(void)st_gps_pump();
+		if (nmea.sentences) {
+			st_gps.scan_baud = st_gps_cur;
+			st_gps_finish(NULL);
+			return true;
+		}
+		if (st_gps_window_open(CC_SELFTEST_GPS_SCAN_MS))
+			return false;
+		st_gps_cur = st_gps_next_baud();
+		if (st_gps_cur && st_gps_listen(st_gps_cur))
+			return false;
+		st_gps_finish(NULL);
+		return true;
+	}
+}
+#endif
+
 /** One self-test step per loop call; never blocks longer than the ENV read. */
 static void selftest_run(void)
 {
@@ -984,33 +1142,8 @@ static void selftest_run(void)
 			return;
 		}
 #if CC_ENABLE_GPS
-		if (st_entry) {
-			st_entry = false;
-			st_bytes = 0;
-			cc_nmea_init(&nmea);
-			CC_HW_gpsPowerOn();
-			if (!CC_HW_uartOpen(CC_UART_GPS)) {
-				CC_HW_gpsPowerOff();
-				st_report(CC_STI_GPS, CC_STV_FAIL, "uart");
-				st_goto(STS_WS85);
-				return;
-			}
-		}
-		{
-			uint8_t buf[64];
-			uint16_t n = CC_HW_uartRead(buf, sizeof(buf));
-
-			st_bytes += n;
-			for (uint16_t k = 0; k < n; k++)
-				(void)cc_nmea_feed(&nmea, buf[k]);
-		}
-		if (nmea.sentences == 0 && st_elapsed() <= CC_SELFTEST_GPS_MS)
+		if (!selftest_gps())
 			return;
-		CC_HW_uartClose();
-		CC_HW_gpsPowerOff();
-		snprintf(d, sizeof(d), "bytes=%lu,nmea=%lu,cs_err=%lu", (unsigned long)st_bytes,
-			(unsigned long)nmea.sentences, (unsigned long)nmea.cs_errors);
-		st_report(CC_STI_GPS, cc_selftest_eval_gps(st_bytes, nmea.sentences), d);
 #else
 		st_report(CC_STI_GPS, CC_STV_SKIP, "disabled");
 #endif
@@ -1164,7 +1297,7 @@ static void selftest_run(void)
 /** AT+SELFTEST=? — replay the last report (or its status). */
 static void selftest_replay(void)
 {
-	char line[96];
+	char line[112];
 
 	if (st.running) {
 		MCU_AT_CONSOLE_send("+SELFTEST=RUNNING\r\n");

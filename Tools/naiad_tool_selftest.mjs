@@ -205,6 +205,30 @@ await test('Self-test parsing and required-item verdict', () => {
   eq(c.state, 'BURST', 'comm state'); eq(c.sent, 3, 'sent'); eq(c.target, 30, 'target'); eq(c.extra.next, '42', 'extra');
 });
 
+await test('GPS self-test diagnosis (line probe, enable check, baud scan)', () => {
+  const d = l => P.gpsDiagnosis(P.parseStLine(l));
+  eq(d('+ST=GPS,PASS,bytes=812,nmea=9'), null, 'pre-1.0.2 detail: no diagnosis');
+  eq(d('+ST=GPS,FAIL,bytes=39,nmea=0,cs_err=0'), null, 'pre-1.0.2 failure: the generic advice stays');
+  eq(d('+ST=GPS,PASS,bytes=812,nmea=1,cs_err=0,fe=0,line=lo/act'), null, 'healthy receiver: nothing to say');
+  eq(d('+ST=WS85,FAIL,silent'), null, 'other items ignored');
+  const fl = d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=fl/fl');
+  eq(fl.title, 'Nothing drives the GPS data line', 'floating line'); assert(/pin 4 to module pad P11/.test(fl.fixes.join(' ')), 'TX wire named');
+  const lo = d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=lo/lo');
+  eq(lo.title, 'The GPS data line is held low', 'unpowered receiver'); assert(/P3 \(PA1\)/.test(lo.fixes[0]), 'enable measurement first');
+  assert(!/backwards/.test(lo.text), 'no polarity hint without evidence');
+  assert(/backwards/.test(d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=hi/lo').text), 'driven while off, quiet while on: polarity hint');
+  const none = d('+ST=GPS,FAIL,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=none');
+  eq(none.title, 'The GPS is on and sending, but not NMEA the module can read', 'driven, no NMEA'); assert(/4800 to 115200/.test(none.text) && /57 framing errors/.test(none.text), 'scan + errors explained');
+  const baud = d('+ST=GPS,PASS,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=38400');
+  eq(baud.level, 'warn', 'adopted baud: a warning, not a failure'); eq(baud.title, 'The GPS talks at 38400 baud', 'baud named');
+  const inv = d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=act/lo,off=nmea');
+  eq(inv.title, 'The GPS enable works backwards', 'talks only while off: active-low enable');
+  eq(d('+ST=GPS,FAIL,bytes=700,nmea=1,cs_err=0,fe=0,line=act/act,off=nmea').title, 'The GPS never switches off', 'talks both ways: never off');
+  eq(d('+ST=GPS,PASS,bytes=700,nmea=1,cs_err=0,fe=0,line=lo/act,off=bytes').level, 'warn', 'stray bytes while off: a warning');
+  const ev = P.evaluateSelftest({ GPS: P.parseStLine('+ST=GPS,PASS,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=38400') }, ['GPS']);
+  eq(ev.verdict, 'PASS', 'an adopted baud still passes');
+});
+
 await test('Credential validation and CLS paste parsing', () => {
   const key = '00112233445566778899AABBCCDDEEFF', rc = 'A1B2C3D4E5F60718293A4B5C6D7E8F90';
   const ok = P.validateCredentials({ id: ' 1234567 ', addr: '0a1b2c3d', seckey: key.toLowerCase(), rconf: '' });
