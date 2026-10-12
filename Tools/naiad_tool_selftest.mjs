@@ -220,6 +220,9 @@ await test('GPS self-test diagnosis (line probe, enable check, baud scan)', () =
   const quiet = d('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=lo/hi,baud=none');
   eq(quiet.title, 'The GPS data line sits high but carries nothing', 'held high, silent: not "sending"');
   assert(/RX input/.test(quiet.text) && /connector pin 3 is not connected/.test(quiet.fixes[0]), 'swapped TX/RX suspected');
+  const sparse = d('+ST=GPS,FAIL,bytes=40,nmea=0,cs_err=0,fe=39,line=hi/hi,baud=none');   // VG7669 on the 3.3 V carrier, 2026-10-12
+  eq(sparse.title, 'Only scattered, broken bytes from the GPS', 'a few broken bytes: not a stream');
+  assert(/39 of them broken/.test(sparse.text) && /connector pin 1/.test(sparse.fixes[0]), 'supply suspected first');
   const none = d('+ST=GPS,FAIL,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=none');
   eq(none.title, 'The GPS is on and sending, but not NMEA the module can read', 'driven, no NMEA'); assert(/4800 to 115200/.test(none.text) && /57 framing errors/.test(none.text), 'scan + errors explained');
   const baud = d('+ST=GPS,PASS,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=38400');
