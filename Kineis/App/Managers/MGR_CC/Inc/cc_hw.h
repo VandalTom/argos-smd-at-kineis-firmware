@@ -29,12 +29,17 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "cc_i2c_sens.h"
+#include "cc_conf.h"
 
 typedef enum {
 	CC_UART_NONE = 0,
 	CC_UART_GPS,   /**< session A: PB6 (swapped to RX), CC_HW_gpsBaud() */
 	CC_UART_WS85,  /**< session B: PA10 RX, 115200 */
+#if CC_GPS_LOOPBACK
+	CC_UART_GPS_LOOP, /**< bench: session A plus PB7 (swapped to TX) */
+#endif
 } cc_uart_session_t;
 
 /** One-time init: drive every rail/control pin to its safe state
@@ -71,6 +76,36 @@ void CC_HW_gpsSetBaud(uint32_t baud);
  * Not while the GPS session is open (returns false). Leaves PB6 parked.
  */
 bool CC_HW_gpsLineProbe(bool *high_when_pulled_down, bool *low_when_pulled_up);
+
+#if CC_GPS_LOOPBACK
+/* ---- GPS UART loopback (bench, PB6/P11 bridged to a USART1 TX pin) ---- */
+
+/** The pins CR2.SWAP turns into USART1 TX, either of which can feed PB6. */
+typedef enum {
+	CC_LOOP_TX_NONE = 0,
+	CC_LOOP_TX_PB7,   /**< P12 */
+	CC_LOOP_TX_PA10,  /**< P33, the WS85 data pad (WS85 unplugged) */
+} cc_loop_tx_t;
+
+/** Open the CC_UART_GPS_LOOP session: RX on PB6, TX on @p tx. */
+bool CC_HW_gpsLoopOpen(cc_loop_tx_t tx, uint32_t baud);
+/** Send @p len bytes on the CC_UART_GPS_LOOP session (blocking). */
+bool CC_HW_uartWrite(const uint8_t *buf, uint16_t len);
+/**
+ * DC continuity through the bridge, ~4 ms: @p tx driven low with PB6 pulled
+ * up, then high with PB6 pulled down. Not while a session is open, nor for
+ * CC_LOOP_TX_NONE (returns false). Leaves both pins parked.
+ */
+bool CC_HW_gpsLoopDc(cc_loop_tx_t tx, bool *pb6_low_when_tx_low, bool *pb6_high_when_tx_high);
+/**
+ * Which MCU pins are wired to P11: PB6 driven low then high while every pin
+ * parked analog (bar PB6 and the LSE crystal pins) is read against the
+ * opposite pull. Writes their names to @p out ("PB7 ", or "none") and the
+ * TX pin to loop through to @p tx. Only call when nothing else drives P11
+ * (idle "fl"). Leaves every pin as found.
+ */
+bool CC_HW_gpsLoopFind(char *out, size_t n, cc_loop_tx_t *tx);
+#endif
 
 /* ---- I2C2 env-sensor session ---- */
 

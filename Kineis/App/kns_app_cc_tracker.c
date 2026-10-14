@@ -1625,6 +1625,9 @@ void KNS_APP_cc_tracker_init(void)
 	MGR_LOG_INFO("[COMM] %s\r\n", comm.phase == CC_COMM_DONE ?
 		"commissioned (flag kept since power-up)" :
 		"waiting for the first GPS fix to start the deployment burst");
+#if CC_GPS_LOOPBACK
+	MCU_AT_CONSOLE_send("+LOOP=READY,bridge P11(PB6)-P12(PB7) or P33(PA10),GPS+WS85 unplugged,radio off\r\n");
+#endif
 
 	transition_to(CC_ST_BOOT);
 }
@@ -1651,6 +1654,94 @@ static void poll_provisioning(void)
 		transition_to(CC_ST_INIT_MAC);
 }
 
+#if CC_GPS_LOOPBACK
+
+/* ---- GPS UART loopback (bench build: no radio, no cycle) ----
+ * Once a second, with the GPS unplugged and PB6 (P11) bridged to a pin that
+ * CR2.SWAP makes USART1 TX — PB7 (P12), or PA10 (P33, WS85 unplugged):
+ *   idle  PB6 with everything released (cc_selftest_line_class): "fl" =
+ *         nothing drives P11; "hi"/"lo" = something does (GPS plugged in?).
+ *         Every step below needs "fl": it never drives into another output.
+ *   p11   every unused MCU pin that follows PB6: what the bridge really
+ *         reaches ("PB7 " expected, "none" = nothing); tx = the one used
+ *   dc    tx (PB7 if none found) driven low then high against PB6's opposite
+ *         pull: "ok" = PB6 follows; "open" = no bridge; "held_*" = P11 held
+ *   uart  one frame out of tx and back in on PB6, alternating 9600 / 115200;
+ *         SKIP when any check above failed
+ * then one +LOOP line on the console, plus +LOOPDIFF at the first wrong byte. */
+
+/** Test frame: a counter, then the bit patterns a marginal edge breaks first. */
+static uint16_t gps_loop_frame(uint8_t *f, uint32_t n)
+{
+	static const uint8_t pat[] = { 0x55, 0xAA, 0x00, 0xFF, 0x0F, 0xF0, 0x01, 0x80 };
+	uint16_t len = (uint16_t)snprintf((char *)f, 16, "LOOP %05lu ", (unsigned long)(n % 100000UL));
+
+	memcpy(f + len, pat, sizeof(pat));
+	len += sizeof(pat);
+	f[len++] = '\r';
+	f[len++] = '\n';
+	return len;
+}
+
+static void gps_loop_poll(void)
+{
+	static const uint32_t bauds[] = { CC_GPS_BAUD, 115200UL };
+	static uint32_t last_tick, n, passes;
+	uint8_t frame[32], rx[64];
+	bool hd, lu, lo, hi, sent = false;
+	uint16_t got = 0, match = 0, fe = 0, bad = 0;
+
+	if (n != 0U && HAL_GetTick() - last_tick < CC_GPS_LOOP_PERIOD_MS)
+		return;
+	last_tick = HAL_GetTick();
+	uint32_t baud = bauds[n % 2U];
+	uint16_t len = gps_loop_frame(frame, ++n);
+
+	(void)CC_HW_gpsLineProbe(&hd, &lu);
+	cc_line_t idle = cc_selftest_line_class(hd, lu);
+	cc_loop_tx_t tx = CC_LOOP_TX_NONE;
+	char p11[48] = "-";
+	bool tested = false;
+
+	/* Drive nothing into P11 unless it floats: never fight another output */
+	if (idle == CC_LINE_FLOAT) {
+		(void)CC_HW_gpsLoopFind(p11, sizeof(p11), &tx);
+		/* PB7 (P12) is the expected partner when the finder saw neither */
+		tested = CC_HW_gpsLoopDc(tx != CC_LOOP_TX_NONE ? tx : CC_LOOP_TX_PB7, &lo, &hi);
+	} else {
+		lo = hi = false;
+	}
+	const char *dc = !tested ? "-" : (lo && hi) ? "ok" : (!lo && !hi) ? "open" :
+		!lo ? "held_hi" : "held_lo";
+	bool clear = tested && tx != CC_LOOP_TX_NONE && lo && hi;
+
+	if (clear && CC_HW_gpsLoopOpen(tx, baud)) {
+		HAL_Delay(2); /* idle-high line before the first start bit */
+		sent = CC_HW_uartWrite(frame, len);
+		HAL_Delay(5); /* last stop bit + RX interrupt */
+		got = CC_HW_uartRead(rx, sizeof(rx));
+		fe = CC_HW_uartLineErrors();
+		CC_HW_uartClose();
+	}
+	for (uint16_t i = 0; i < got && i < len; i++) {
+		if (rx[i] == frame[i])
+			match++;
+		else if (bad++ == 0U)
+			MCU_AT_CONSOLE_send("+LOOPDIFF=%u,want=%02X,got=%02X\r\n", i, frame[i], rx[i]);
+	}
+
+	bool pass = lo && hi && sent && got == len && match == len && fe == 0U;
+
+	if (pass)
+		passes++;
+	MCU_AT_CONSOLE_send("+LOOP=%lu,baud=%lu,idle=%s,p11=%s,tx=%s,dc=%s,sent=%u,recv=%u,match=%u,fe=%u,%s,passes=%lu\r\n",
+		(unsigned long)n, (unsigned long)baud, cc_selftest_line_name(idle), p11,
+		tx == CC_LOOP_TX_PB7 ? "PB7" : tx == CC_LOOP_TX_PA10 ? "PA10" : "-", dc,
+		sent ? len : 0U, got, match, fe, pass ? "PASS" : clear ? "FAIL" : "SKIP", (unsigned long)passes);
+}
+
+#endif /* CC_GPS_LOOPBACK */
+
 void KNS_APP_cc_tracker_loop(void)
 {
 	MGR_WDG_refresh();
@@ -1662,6 +1753,13 @@ void KNS_APP_cc_tracker_loop(void)
 		boot_stable = true;
 		boot_attempts_write(0);
 	}
+
+#if CC_GPS_LOOPBACK
+	if (!rescue) {
+		gps_loop_poll(); /* instead of the cycle: the MAC never starts */
+		return;
+	}
+#endif
 
 	switch (cc_state) {
 

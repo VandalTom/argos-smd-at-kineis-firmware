@@ -78,6 +78,17 @@
  * PB6 the receive pin. The session is RX-only (no wire toward the GPS). */
 #define CC_GPS_UART_SWAP        1
 #define CC_GPS_BAUD             9600UL
+
+/* Bench loopback build (make ... GPS_LOOPBACK=1): never starts the radio or
+ * the cycle. With PB6 (P11) bridged to a pin CR2.SWAP makes USART1's TX —
+ * PB7 (P12), or PA10 (P33) with the WS85 unplugged — and the GPS unplugged,
+ * it sends a test frame out of that pin once a second and reports on the
+ * console what came back on PB6 (+LOOP=...). The console, AT+BOOT and
+ * AT+RESET keep working. */
+#ifndef CC_GPS_LOOPBACK
+#define CC_GPS_LOOPBACK         0
+#endif
+#define CC_GPS_LOOP_PERIOD_MS   1000UL
 #define CC_GPS_TTFF_BUDGET_MS   90000UL   /**< one search window */
 #define CC_GPS_MAX_DURATIONS    6         /**< adaptive ramp: max chained windows
                                            *   (6 x 90 s = 9 min ephemeris download) */

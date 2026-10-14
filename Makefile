@@ -672,6 +672,12 @@ ifdef LOG_LEVEL
 CFLAGS += -DLOG_DEFAULT_LEVEL=$(LOG_LEVEL)
 endif
 
+# GPS_LOOPBACK=1 (APP=CC_TRACKER) — bench build that loops USART1 back through
+# a bridge from P11 to P12 or P33 instead of running the tracker (cc_conf.h).
+ifeq ($(GPS_LOOPBACK),1)
+CFLAGS += -DCC_GPS_LOOPBACK=1
+endif
+
 ifeq ($(DEBUG), 1)
 CFLAGS += -g -gdwarf-2
 endif
@@ -752,7 +758,7 @@ ifeq ($(APP),CC_TRACKER)
 NAIAD_VER := $(strip $(shell cat NAIAD_VERSION 2>/dev/null))
 NAIAD_AHEAD := $(strip $(shell git rev-list --count v$(NAIAD_VER)..HEAD 2>/dev/null || echo dev))
 NAIAD_SUFFIX := $(if $(filter 0,$(NAIAD_AHEAD)),,$(if $(filter dev,$(NAIAD_AHEAD)),-dev,+$(NAIAD_AHEAD)))
-NAIAD_FW_ID := Naiad v$(NAIAD_VER)$(NAIAD_SUFFIX) ($(current_repo_commit)$(if $(current_repo_status),*))$(if $(filter 1,$(DEBUG)), bench)
+NAIAD_FW_ID := Naiad v$(NAIAD_VER)$(NAIAD_SUFFIX) ($(current_repo_commit)$(if $(current_repo_status),*))$(if $(filter 1,$(DEBUG)), bench)$(if $(filter 1,$(GPS_LOOPBACK)), loopback)
 endif
 
 #######################################
@@ -1114,6 +1120,7 @@ help:
 	@echo "       On the current power-latch HW it can reboot-loop or leave a unit wakeable only"
 	@echo "       by NRST/SWD. Do NOT use it for potted units: the default is the STOP2 soft-off."
 	@echo "       LOG_LEVEL=0..4  JLINK_SPEED=<kHz>  JLINK_SERIAL=<sn>"
+	@echo "       GPS_LOOPBACK=1 (CC_TRACKER bench: USART1 loopback, P11 bridged to P12 or P33, no radio)"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all (default)   build app -> build/$(TARGET).{elf,hex,bin}"

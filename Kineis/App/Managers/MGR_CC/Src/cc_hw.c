@@ -10,6 +10,7 @@
 
 #if defined(USE_CC_TRACKER_APP)
 
+#include <stdio.h>
 #include <string.h>
 #include "stm32wlxx_hal.h"
 #include "cc_hw.h"
@@ -93,6 +94,21 @@ static volatile uint16_t s_ring_ovr;
 static volatile uint16_t s_line_err;
 static cc_uart_session_t s_session = CC_UART_NONE;
 
+#if CC_GPS_LOOPBACK
+static cc_loop_tx_t s_loop_tx = CC_LOOP_TX_PB7;
+
+/** USART1 pins that turn TX under CR2.SWAP: PB7 (P12) or PA10 (P33). */
+static uint16_t loop_tx_pin(cc_loop_tx_t tx, GPIO_TypeDef **port)
+{
+	if (tx == CC_LOOP_TX_PA10) {
+		*port = CC_WS85_RX_GPIO_Port;
+		return CC_WS85_RX_Pin;
+	}
+	*port = CC_GPS_LOOP_TX_GPIO_Port;
+	return CC_GPS_LOOP_TX_Pin;
+}
+#endif
+
 void USART1_IRQHandler(void)
 {
 	uint32_t isr = USART1->ISR;
@@ -131,9 +147,17 @@ void CC_HW_uartClose(void)
 
 	g.Mode = GPIO_MODE_ANALOG;
 	g.Pull = GPIO_NOPULL;
-	if (s_session == CC_UART_GPS) {
+	if (s_session != CC_UART_WS85) {
 		g.Pin = CC_GPS_NMEA_Pin;
 		HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+#if CC_GPS_LOOPBACK
+		if (s_session == CC_UART_GPS_LOOP) {
+			GPIO_TypeDef *port;
+
+			g.Pin = loop_tx_pin(s_loop_tx, &port);
+			HAL_GPIO_Init(port, &g);
+		}
+#endif
 	} else {
 		g.Pin = CC_WS85_RX_Pin;
 		HAL_GPIO_Init(CC_WS85_RX_GPIO_Port, &g);
@@ -164,11 +188,21 @@ bool CC_HW_uartOpenBaud(cc_uart_session_t s, uint32_t baud)
 	g.Speed = GPIO_SPEED_FREQ_HIGH;
 	g.Alternate = GPIO_AF7_USART1;
 
-	if (s == CC_UART_GPS) {
+	if (s != CC_UART_WS85) {
 		/* NMEA arrives on PB6 (USART1's TX-capable pad) — CR2.SWAP below
 		 * turns it into the receive pin. PB7 is unwired on this carrier. */
 		g.Pin = CC_GPS_NMEA_Pin;
 		HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+#if CC_GPS_LOOPBACK
+		if (s == CC_UART_GPS_LOOP) {
+			/* bench loopback: PB7 or PA10 (swapped to TX) drives the bridge */
+			GPIO_TypeDef *port;
+
+			g.Pull = GPIO_NOPULL;
+			g.Pin = loop_tx_pin(s_loop_tx, &port);
+			HAL_GPIO_Init(port, &g);
+		}
+#endif
 	} else {
 		/* WS85: RX only — PA9 (bench config TX) is deliberately untouched */
 		g.Pin = CC_WS85_RX_Pin;
@@ -189,12 +223,16 @@ bool CC_HW_uartOpenBaud(cc_uart_session_t s, uint32_t baud)
 	cc_huart1.Init.StopBits = UART_STOPBITS_1;
 	cc_huart1.Init.Parity = UART_PARITY_NONE;
 	cc_huart1.Init.Mode = UART_MODE_RX; /* both sensor sessions only listen */
+#if CC_GPS_LOOPBACK
+	if (s == CC_UART_GPS_LOOP)
+		cc_huart1.Init.Mode = UART_MODE_TX_RX;
+#endif
 	cc_huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
 	cc_huart1.Init.OverSampling = UART_OVERSAMPLING_16;
 	cc_huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
 	cc_huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
 #if CC_GPS_UART_SWAP
-	if (s == CC_UART_GPS) {
+	if (s != CC_UART_WS85) {
 		cc_huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_SWAP_INIT;
 		cc_huart1.AdvancedInit.Swap = UART_ADVFEATURE_SWAP_ENABLE;
 	}
@@ -319,6 +357,164 @@ bool CC_HW_gpsLineProbe(bool *high_when_pulled_down, bool *low_when_pulled_up)
 	*low_when_pulled_up = lo;
 	return true;
 }
+
+#if CC_GPS_LOOPBACK
+
+bool CC_HW_uartWrite(const uint8_t *buf, uint16_t len)
+{
+	if (s_session != CC_UART_GPS_LOOP)
+		return false;
+	/* 10 bits a byte at the session baud, doubled, + 10 ms */
+	uint32_t ms = (uint32_t)len * 20000UL / cc_huart1.Init.BaudRate + 10UL;
+
+	return HAL_UART_Transmit(&cc_huart1, buf, len, ms) == HAL_OK;
+}
+
+bool CC_HW_gpsLoopOpen(cc_loop_tx_t tx, uint32_t baud)
+{
+	if (tx == CC_LOOP_TX_NONE)
+		return false;
+	CC_HW_uartClose(); /* parks the previous TX pin before switching */
+	s_loop_tx = tx;
+	return CC_HW_uartOpenBaud(CC_UART_GPS_LOOP, baud);
+}
+
+bool CC_HW_gpsLoopDc(cc_loop_tx_t tx, bool *pb6_low_when_tx_low, bool *pb6_high_when_tx_high)
+{
+	GPIO_InitTypeDef g = {0};
+	GPIO_TypeDef *port;
+	uint16_t pin;
+
+	*pb6_low_when_tx_low = false;
+	*pb6_high_when_tx_high = false;
+	if (tx == CC_LOOP_TX_NONE || s_session != CC_UART_NONE)
+		return false; /* nothing to drive, or the pins belong to the open session */
+	pin = loop_tx_pin(tx, &port);
+
+	HAL_GPIO_WritePin(port, pin, GPIO_PIN_RESET);
+	g.Mode = GPIO_MODE_OUTPUT_PP;
+	g.Pull = GPIO_NOPULL;
+	g.Speed = GPIO_SPEED_FREQ_LOW;
+	g.Pin = pin;
+	HAL_GPIO_Init(port, &g);
+
+	/* TX pin low against PB6's pull-up */
+	g.Mode = GPIO_MODE_INPUT;
+	g.Pull = GPIO_PULLUP;
+	g.Pin = CC_GPS_NMEA_Pin;
+	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+	HAL_Delay(2);
+	*pb6_low_when_tx_low =
+		HAL_GPIO_ReadPin(CC_GPS_NMEA_GPIO_Port, CC_GPS_NMEA_Pin) == GPIO_PIN_RESET;
+
+	/* TX pin high against PB6's pull-down */
+	HAL_GPIO_WritePin(port, pin, GPIO_PIN_SET);
+	g.Pull = GPIO_PULLDOWN;
+	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+	HAL_Delay(2);
+	*pb6_high_when_tx_high =
+		HAL_GPIO_ReadPin(CC_GPS_NMEA_GPIO_Port, CC_GPS_NMEA_Pin) == GPIO_PIN_SET;
+
+	/* back to the low-leak parking state */
+	g.Mode = GPIO_MODE_ANALOG;
+	g.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+	g.Pin = pin;
+	HAL_GPIO_Init(port, &g);
+	return true;
+}
+
+bool CC_HW_gpsLoopFind(char *out, size_t n, cc_loop_tx_t *tx)
+{
+	static const struct {
+		GPIO_TypeDef *port;
+		char name;
+		uint16_t skip;
+	} ports[] = {
+		{ GPIOA, 'A', 0U },
+		{ GPIOB, 'B', CC_GPS_NMEA_Pin },
+		{ GPIOC, 'C', GPIO_PIN_14 | GPIO_PIN_15 }, /* LSE crystal */
+	};
+	enum { NP = sizeof(ports) / sizeof(ports[0]) };
+	uint16_t cand[NP], low[NP], high[NP];
+	GPIO_InitTypeDef g = {0};
+	size_t used = 0;
+
+	out[0] = '\0';
+	if (s_session != CC_UART_NONE)
+		return false;
+	__HAL_RCC_GPIOC_CLK_ENABLE();
+
+	/* candidates: every pin parked analog (MODER = 11), i.e. unused */
+	for (unsigned i = 0; i < NP; i++) {
+		uint32_t moder = ports[i].port->MODER;
+
+		cand[i] = 0;
+		for (unsigned p = 0; p < 16U; p++)
+			if (((moder >> (2U * p)) & 3U) == 3U && !(ports[i].skip & (1U << p)))
+				cand[i] |= (uint16_t)(1U << p);
+	}
+
+	/* PB6 low, candidates pulled up */
+	HAL_GPIO_WritePin(CC_GPS_NMEA_GPIO_Port, CC_GPS_NMEA_Pin, GPIO_PIN_RESET);
+	g.Mode = GPIO_MODE_OUTPUT_PP;
+	g.Pull = GPIO_NOPULL;
+	g.Speed = GPIO_SPEED_FREQ_LOW;
+	g.Pin = CC_GPS_NMEA_Pin;
+	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+	g.Mode = GPIO_MODE_INPUT;
+	g.Pull = GPIO_PULLUP;
+	for (unsigned i = 0; i < NP; i++) {
+		if (cand[i]) {
+			g.Pin = cand[i];
+			HAL_GPIO_Init(ports[i].port, &g);
+		}
+	}
+	HAL_Delay(2);
+	for (unsigned i = 0; i < NP; i++)
+		low[i] = (uint16_t)(~ports[i].port->IDR & cand[i]);
+
+	/* PB6 high, candidates pulled down */
+	HAL_GPIO_WritePin(CC_GPS_NMEA_GPIO_Port, CC_GPS_NMEA_Pin, GPIO_PIN_SET);
+	g.Pull = GPIO_PULLDOWN;
+	for (unsigned i = 0; i < NP; i++) {
+		if (cand[i]) {
+			g.Pin = cand[i];
+			HAL_GPIO_Init(ports[i].port, &g);
+		}
+	}
+	HAL_Delay(2);
+	for (unsigned i = 0; i < NP; i++)
+		high[i] = (uint16_t)(ports[i].port->IDR & cand[i]);
+
+	/* everything back to analog */
+	g.Mode = GPIO_MODE_ANALOG;
+	g.Pull = GPIO_NOPULL;
+	for (unsigned i = 0; i < NP; i++) {
+		if (cand[i]) {
+			g.Pin = cand[i];
+			HAL_GPIO_Init(ports[i].port, &g);
+		}
+	}
+	g.Pin = CC_GPS_NMEA_Pin;
+	HAL_GPIO_Init(CC_GPS_NMEA_GPIO_Port, &g);
+
+	for (unsigned i = 0; i < NP; i++)
+		for (unsigned p = 0; p < 16U; p++)
+			if ((low[i] & high[i] & (1U << p)) && used + 6U < n)
+				used += (size_t)snprintf(out + used, n - used, "P%c%u ", ports[i].name, p);
+	if (used == 0U)
+		snprintf(out, n, "none");
+
+	/* a USART1 pin that turns TX under CR2.SWAP: PB7 (P12), else PA10 (P33) */
+	if (low[1] & high[1] & CC_GPS_LOOP_TX_Pin)
+		*tx = CC_LOOP_TX_PB7;
+	else if (low[0] & high[0] & CC_WS85_RX_Pin)
+		*tx = CC_LOOP_TX_PA10;
+	return true;
+}
+
+#endif /* CC_GPS_LOOPBACK */
 
 /*******************************************************************************
  * I2C2 session

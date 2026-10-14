@@ -77,6 +77,11 @@
  * receive pin. PB7 (P12) is not wired on this carrier. */
 #define CC_GPS_NMEA_Pin         GPIO_PIN_6
 #define CC_GPS_NMEA_GPIO_Port   GPIOB
+/* PB7 (P12): USART1's TX under CR2.SWAP. Unwired here; the bench loopback
+ * build (CC_GPS_LOOPBACK) sends on it through a P11-P12 bridge. Same port as
+ * PB6. */
+#define CC_GPS_LOOP_TX_Pin      GPIO_PIN_7
+#define CC_GPS_LOOP_TX_GPIO_Port GPIOB
 
 /* USART1 session B — WS85 @ 115200: PA10 RX (P33), AF7. The WS85 lives on
  * the always-on 3V3 rail (rain counter) and broadcasts unprompted; PA9 (P34)
