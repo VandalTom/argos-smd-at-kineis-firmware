@@ -29,10 +29,9 @@ uint16_t cc_ws85_crc16(const uint8_t *data, uint16_t len)
 	return crc; /* transmitted low byte first */
 }
 
-/* Decode the 14-register broadcast into a frame. Raw 0xFFFF = channel absent. */
-static void parse_measurement(const cc_ws85_parser_t *p, cc_ws85_frame_t *out)
+/* Decode the 14-register broadcast in b[] into a frame. Raw 0xFFFF = channel absent. */
+static void parse_measurement(const uint8_t *b, cc_ws85_frame_t *out)
 {
-	const uint8_t *b = p->buf;
 	uint16_t regs[14];
 
 	for (int i = 0; i < 14; i++)
@@ -82,14 +81,45 @@ static bool process(cc_ws85_parser_t *p, cc_ws85_frame_t *out)
 	if (p->func == 0x06)         /* write echo — bench traffic, ignore */
 		return false;
 	if (p->func == 0x03 && p->buf[2] == 0x1C) {  /* the broadcast */
-		parse_measurement(p, out);
+		parse_measurement(p->buf, out);
 		p->frames++;
 		return true;
 	}
 	return false;                 /* targeted register read — ignore */
 }
 
-bool cc_ws85_feed(cc_ws85_parser_t *p, uint8_t b, cc_ws85_frame_t *out)
+/*
+ * The frame ending on this byte, if its first 1-4 bytes were lost: put back
+ * addr 03 1C 00 (the model's high byte is 0x00 on every Ecowitt sensor) in
+ * front of the bytes that arrived. Accepted only when the CRC matches, the
+ * address register is ours and the baud code is a real one (1-4).
+ */
+static bool recover(cc_ws85_parser_t *p, cc_ws85_frame_t *out)
+{
+	const uint8_t prefix[4] = { p->addr, 0x03, 0x1C, 0x00 };
+	uint8_t f[CC_WS85_FRAME_LEN];
+
+	for (uint8_t lost = 1; lost <= sizeof(prefix); lost++) {
+		uint8_t keep = (uint8_t)(CC_WS85_FRAME_LEN - lost);
+
+		if (p->tail_n < keep)
+			continue;
+		memcpy(f, prefix, lost);
+		memcpy(f + lost, p->tail + p->tail_n - keep, keep);
+		if (cc_ws85_crc16(f, CC_WS85_FRAME_LEN - 2) != (uint16_t)(f[31] | (f[32] << 8)))
+			continue;
+		if (f[7] != 0x00 || f[8] != p->addr || f[5] != 0x00 || f[6] < 1 || f[6] > 4)
+			continue;
+		parse_measurement(f, out);
+		p->frames++;
+		p->recovered++;
+		return true;
+	}
+	return false;
+}
+
+/* The Modbus state machine; true when a whole, intact frame decoded on this byte. */
+static bool feed_frame(cc_ws85_parser_t *p, uint8_t b, cc_ws85_frame_t *out)
 {
 	if (p->pos == 0) {
 		if (b == p->addr)
@@ -130,4 +160,23 @@ bool cc_ws85_feed(cc_ws85_parser_t *p, uint8_t b, cc_ws85_frame_t *out)
 		return false;
 	p->pos = 0;
 	return process(p, out);
+}
+
+bool cc_ws85_feed(cc_ws85_parser_t *p, uint8_t b, cc_ws85_frame_t *out)
+{
+	if (p->tail_n == CC_WS85_FRAME_LEN) {
+		memmove(p->tail, p->tail + 1, CC_WS85_FRAME_LEN - 1);
+		p->tail_n--;
+	}
+	p->tail[p->tail_n++] = b;
+
+	bool got = feed_frame(p, b, out);
+
+	if (!got && recover(p, out)) {
+		p->pos = 0;          /* whatever the state machine had started was this frame's tail */
+		got = true;
+	}
+	if (got)
+		p->tail_n = 0;       /* never decode the same frame twice */
+	return got;
 }

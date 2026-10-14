@@ -167,6 +167,140 @@ void test_crc16_known(void)
 	TEST_PASS();
 }
 
+/* The bench capture (unit SMD60C00360040, WS85 V1.1.8 at 115200): the line
+ * idled low, so the header 85 03 1C 00 arrived as E1 E0 0C. */
+static const uint8_t k_bench[32] = {
+	0xE1, 0xE0, 0x0C, 0x85, 0x00, 0x04, 0x00, 0x85, 0x00, 0x00, 0x27, 0xF8, 0xFF, 0xFF, 0xFF, 0xFF,
+	0x02, 0x7A, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x37, 0x00, 0x00, 0xFF, 0xFF, 0x7B, 0x5A,
+};
+
+void test_recovers_bench_capture(void)
+{
+	cc_ws85_parser_t p;
+	cc_ws85_frame_t f = {0};
+	int got = 0;
+
+	cc_ws85_init(&p, 0x85);
+	for (uint8_t i = 0; i < sizeof(k_bench); i++)
+		if (cc_ws85_feed(&p, k_bench[i], &f))
+			got++;
+	ASSERT_EQ(1, got);
+	ASSERT_EQ(1, p.frames);
+	ASSERT_EQ(1, p.recovered);
+	ASSERT_EQ(0x0085, f.model);
+	ASSERT_TRUE(f.has_temp && f.temp_c > 23.39f && f.temp_c < 23.41f);
+	ASSERT_TRUE(f.has_wind && f.wind_ms < 0.01f);
+	ASSERT_EQ(311, f.dir_deg);
+	TEST_PASS();
+}
+
+void test_recovers_each_lost_length(void)
+{
+	uint8_t frame[33];
+
+	build_broadcast(frame, k_regs);
+	for (uint8_t lost = 1; lost <= 4; lost++) {
+		cc_ws85_parser_t p;
+		cc_ws85_frame_t f = {0};
+		int got = 0;
+
+		cc_ws85_init(&p, 0x85);
+		cc_ws85_feed(&p, 0x00, &f);              /* the break byte the line leaves */
+		for (uint8_t i = 0; i < lost - 1; i++)   /* fewer garbled bytes than lost */
+			cc_ws85_feed(&p, 0xE1, &f);
+		for (uint8_t i = lost; i < 33; i++)
+			if (cc_ws85_feed(&p, frame[i], &f))
+				got++;
+		ASSERT_EQ(1, got);
+		ASSERT_EQ(1, p.recovered);
+		ASSERT_EQ(270, f.dir_deg);
+	}
+	TEST_PASS();
+}
+
+void test_intact_frame_not_double_counted(void)
+{
+	cc_ws85_parser_t p;
+	cc_ws85_frame_t f = {0};
+	uint8_t frame[33];
+	int got = 0;
+
+	build_broadcast(frame, k_regs);
+	cc_ws85_init(&p, 0x85);
+	for (int rep = 0; rep < 3; rep++)
+		for (uint8_t i = 0; i < 33; i++)
+			if (cc_ws85_feed(&p, frame[i], &f))
+				got++;
+	ASSERT_EQ(3, got);
+	ASSERT_EQ(3, p.frames);
+	ASSERT_EQ(0, p.recovered);
+	TEST_PASS();
+}
+
+void test_recovery_needs_crc_and_fields(void)
+{
+	uint8_t frame[33];
+	uint16_t regs[14];
+	cc_ws85_frame_t f = {0};
+
+	/* a corrupted data byte behind a lost header: CRC rejects it */
+	{
+		cc_ws85_parser_t p;
+		bool got = false;
+
+		build_broadcast(frame, k_regs);
+		frame[20] ^= 0x01;
+		cc_ws85_init(&p, 0x85);
+		for (uint8_t i = 4; i < 33; i++)
+			got |= cc_ws85_feed(&p, frame[i], &f);
+		ASSERT_FALSE(got);
+	}
+	/* another sensor's address, valid CRC: not ours */
+	{
+		cc_ws85_parser_t p;
+		bool got = false;
+
+		memcpy(regs, k_regs, sizeof(regs));
+		regs[2] = 0x0090;
+		build_broadcast(frame, regs);
+		cc_ws85_init(&p, 0x85);
+		for (uint8_t i = 4; i < 33; i++)
+			got |= cc_ws85_feed(&p, frame[i], &f);
+		ASSERT_FALSE(got);
+	}
+	/* an impossible baud code, valid CRC */
+	{
+		cc_ws85_parser_t p;
+		bool got = false;
+
+		memcpy(regs, k_regs, sizeof(regs));
+		regs[1] = 0x0009;
+		build_broadcast(frame, regs);
+		cc_ws85_init(&p, 0x85);
+		for (uint8_t i = 4; i < 33; i++)
+			got |= cc_ws85_feed(&p, frame[i], &f);
+		ASSERT_FALSE(got);
+	}
+	TEST_PASS();
+}
+
+void test_noise_never_decodes(void)
+{
+	cc_ws85_parser_t p;
+	cc_ws85_frame_t f = {0};
+	uint32_t x = 12345u;
+	int got = 0;
+
+	cc_ws85_init(&p, 0x85);
+	for (uint32_t i = 0; i < 200000u; i++) {
+		x = x * 1664525u + 1013904223u;
+		if (cc_ws85_feed(&p, (uint8_t)(x >> 24), &f))
+			got++;
+	}
+	ASSERT_EQ(0, got);
+	TEST_PASS();
+}
+
 int main(void)
 {
 	TEST_SUITE_START("CC_TRACKER WS85 frame parser");
@@ -176,6 +310,11 @@ int main(void)
 	RUN_TEST(test_two_frames);
 	RUN_TEST(test_absent_channels);
 	RUN_TEST(test_crc16_known);
+	RUN_TEST(test_recovers_bench_capture);
+	RUN_TEST(test_recovers_each_lost_length);
+	RUN_TEST(test_intact_frame_not_double_counted);
+	RUN_TEST(test_recovery_needs_crc_and_fields);
+	RUN_TEST(test_noise_never_decodes);
 	TEST_SUITE_END();
 	return tests_failed ? 1 : 0;
 }

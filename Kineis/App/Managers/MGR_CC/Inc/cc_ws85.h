@@ -34,6 +34,8 @@ typedef struct {
 	float    rain_mm;        bool has_rain;  /**< cumulative counter */
 } cc_ws85_frame_t;
 
+#define CC_WS85_FRAME_LEN 33U   /**< addr 03 1C <28 data> CRC */
+
 /** Parser state — zero-init (or cc_ws85_init) before a capture session. */
 typedef struct {
 	uint8_t  addr;           /**< Modbus slave address (0x85) */
@@ -41,8 +43,11 @@ typedef struct {
 	uint8_t  pos;
 	uint8_t  func;
 	uint8_t  frame_len;
-	uint32_t frames;         /**< CRC-valid broadcasts seen */
+	uint8_t  tail[CC_WS85_FRAME_LEN]; /**< the latest bytes, oldest first */
+	uint8_t  tail_n;
+	uint32_t frames;         /**< CRC-valid broadcasts seen (recovered ones included) */
 	uint32_t crc_errors;     /**< frames dropped on CRC mismatch */
+	uint32_t recovered;      /**< broadcasts rebuilt after their first bytes were lost */
 } cc_ws85_parser_t;
 
 /** Reset the parser for a fresh capture session. */
@@ -50,6 +55,12 @@ void cc_ws85_init(cc_ws85_parser_t *p, uint8_t addr);
 
 /**
  * @brief Feed one received byte.
+ *
+ * A broadcast whose first bytes were lost is still decoded: when the data line
+ * idles low between frames the UART misses the first start bit and garbles the
+ * header, but every broadcast starts addr 03 1C 00, so those are put back in
+ * front of the bytes that did arrive and the frame is accepted only when its CRC,
+ * its address register and its baud code agree.
  * @param out filled when a complete CRC-valid broadcast decodes on this byte.
  * @return true when @p out was just filled.
  */

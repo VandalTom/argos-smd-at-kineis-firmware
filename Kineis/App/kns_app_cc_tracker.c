@@ -1257,6 +1257,8 @@ static void selftest_run(void)
 				(int)ws_cache.wind_ms, (unsigned)((int)(ws_cache.wind_ms * 10) % 10),
 				ws_cache.dir_deg, (unsigned long)ws_parser.frames);
 
+			if (ws_parser.recovered && len > 0 && (size_t)len < sizeof(d))
+				len += snprintf(d + len, sizeof(d) - (size_t)len, ",rec=%lu", (unsigned long)ws_parser.recovered);
 			if (st_ws_baud != CC_WS85_BAUD && len > 0 && (size_t)len < sizeof(d))
 				snprintf(d + len, sizeof(d) - (size_t)len, ",baud=%lu", (unsigned long)st_ws_baud);
 			st_report(CC_STI_WS85, CC_STV_PASS, d);
