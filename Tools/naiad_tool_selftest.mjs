@@ -32,6 +32,8 @@ const watchdog = setTimeout(() => { console.error('Global timeout (10 min): abor
 const results = [];
 function assert(cond, msg) { if (!cond) throw new Error('assertion failed: ' + msg); }
 function eq(a, b, msg) { if (a !== b) throw new Error(`${msg}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); }
+/** The error fn() throws, or null. */
+function throws(fn) { try { fn(); } catch (e) { return e; } return null; }
 async function rejects(promise, check, msg) {
   try { await promise; } catch (e) { if (check && !check(e)) throw new Error(`${msg}: unexpected error ${e.name}: ${e.message}`); return e; }
   throw new Error(`${msg}: expected a rejection`);
@@ -1123,6 +1125,106 @@ await test('Releases: the image offered first is the newest field build without 
   eq(P.defaultRelease([list[2]]), null, 'nothing safe to offer');
   eq(P.releaseLabel(list[1], list[1].assets[1]), 'v1.1.0 · field build · 2026-11-02', 'label');
   assert(/bench build.*DO NOT DEPLOY/.test(P.releaseLabel({ ...list[2], date: '' }, a('bench'))), 'warning in the label');
+});
+
+/* ---------- WS85 wind sensor firmware (Ecowitt HID ISP) ---------- */
+
+const S85 = (o = {}) => new P.SimWs85({ delayMs: 0, ...o });   // no per-frame timer: 2140 frames in milliseconds
+
+await test('WS85: frames are byte-identical to the EcowittISPTool captures (Breezedude README)', () => {
+  const W = P.WS85;
+  const hx = f => P.bytesToHex(f.subarray(0, 6 + ((f[2] << 8) | f[3]))).toLowerCase();
+  const cases = [
+    [P.ws85Frame(W.INIT), '680100006916'],
+    [P.ws85Frame(W.GET_FW), '680400006c16'],
+    [P.ws85Frame(W.SET_TARGET, W.APP_TARGET), '6830000408000800ac16'],
+    [P.ws85Frame(W.PREPARE), '680600006e16'],
+    [P.ws85Frame(W.WRITE, P.hexToBytes('ecb8c904589df2afa037c3d16e704e7bec06cda5b2ade2cdec06cda5b2ade2cd')), '68220020ecb8c904589df2afa037c3d16e704e7bec06cda5b2ade2cdec06cda5b2ade2cda716'],
+    [P.ws85Frame(W.FIN1, [0x00, 0x01, 0x09, 0xA0, 0x00, 0x84, 0x08, 0x6D]), '68330008000109a00084086d4616'],
+    [P.ws85Frame(W.FIN2, W.FIN2_ARGS), '682300080600f5e0000000107e16'],
+    [P.ws85Frame(W.SET_TARGET, W.TAIL_TARGET), '683000040803fe00a516'],
+    [P.ws85Frame(W.WRITE, W.TAIL_RECORD), '68220010ceae4931420d01f3eff667c83a2e0c99f416'],
+    [P.ws85Frame(W.UUID), '680f00007716'],
+  ];
+  for (const [f, want] of cases) { eq(hx(f), want, want); eq(f.length, 64, 'one 64-byte report'); assert(f.subarray(6 + ((f[2] << 8) | f[3])).every(b => b === 0), 'zero-padded'); }
+  assert(throws(() => P.ws85Frame(W.WRITE, new Uint8Array(33))), '33-byte payload refused');
+  eq(P.ws85VersionText(116), 'V1.1.6', '116'); eq(P.ws85VersionText(101), 'V1.0.1', '101'); eq(P.ws85VersionText(null), null, 'unknown');
+});
+
+await test('WS85: Intel HEX parsing and image checks', () => {
+  const rec = (type, addr, data) => {
+    const b = [data.length, addr >> 8, addr & 0xFF, type, ...data];
+    return ':' + P.bytesToHex(new Uint8Array([...b, (0x100 - (b.reduce((s, x) => s + x, 0) & 0xFF)) & 0xFF]));
+  };
+  const seg = (hi, addr, n, v) => [rec(4, 0, [hi >> 8, hi & 0xFF]), rec(0, addr, new Array(n).fill(v))];
+  // contiguous across a 64 KB boundary (two type-04 records), as Ecowitt's file is
+  const ok = [rec(4, 0, [0x08, 0x00]), rec(0, 0xFFF0, new Array(16).fill(1)), rec(4, 0, [0x08, 0x01]), rec(0, 0x0000, new Array(16).fill(2)), rec(1, 0, [])].join('\r\n');
+  const h = P.parseIntelHex(ok);
+  eq(h.start, 0x0800FFF0, 'start'); eq(h.bytes.length, 32, 'size'); eq(h.bytes[15] * 10 + h.bytes[16], 12, 'joined in order');
+  const bad = [
+    ['not hex', 'hello', /Not an Intel HEX/],
+    ['checksum', ':10000000' + '00'.repeat(16) + '00', /checksum/],
+    ['gap', [...seg(0x0800, 0, 16, 0), rec(0, 0x20, new Array(16).fill(0)), rec(1, 0, [])].join('\n'), /not contiguous/],
+    ['no EOF', seg(0x0800, 0, 16, 0).join('\n'), /end-of-file/],
+    ['empty', rec(1, 0, []), /no data/],
+  ];
+  for (const [what, text, re] of bad) { const e = throws(() => P.parseIntelHex(text)); assert(e && re.test(e.message), `${what}: ${e && e.message}`); }
+  // only images for 0x08008000 are WS85 application images
+  const naiad = [rec(4, 0, [0x08, 0x00]), ...Array.from({ length: 1100 }, (_, i) => rec(0, i * 16, new Array(16).fill(i & 0xFF))), rec(1, 0, [])].join('\n');
+  assert(/starts at 0x08000000/.test(throws(() => P.ws85Image(naiad, 'naiad.hex')).message), 'a Naiad image is refused');
+  const tiny = [rec(4, 0, [0x08, 0x00]), rec(0, 0x8000, new Array(16).fill(0)), rec(1, 0, [])].join('\n');
+  assert(/16 bytes/.test(throws(() => P.ws85Image(tiny, 'x')).message), 'too small to be an application');
+});
+
+await test('WS85: the preloaded V1.1.8 is byte-identical to Tools/ws85/WS85_V1.1.8_APP.hex', async () => {
+  const file = path.join(here, 'ws85', P.WS85_FW.file);
+  const raw = readFileSync(file);
+  const { createHash } = await import('node:crypto');
+  eq(createHash('sha256').update(raw).digest('hex'), P.WS85_FW.hexSha256, 'the repo file is the one embedded');
+  const fromFile = P.ws85Image(raw.toString('latin1'), P.WS85_FW.file), builtin = P.ws85Builtin();
+  eq(builtin.size, fromFile.size, 'size'); eq(builtin.size, 68320, '68320 bytes');
+  assert(builtin.bytes.every((b, i) => b === fromFile.bytes[i]), 'same bytes');
+  eq(builtin.sum, 0x00856355, 'byte sum (FIN1)');
+  eq(`${builtin.version} ${builtin.versionNum}`, 'V1.1.8 118', 'version from the file name');
+  eq(P.bytesToHex(builtin.bytes.subarray(0, 8)), 'ECB8C904589DF2AF', 'same header as the captured V1.1.6 update');
+});
+
+await test('WS85: update a simulated sensor V1.1.6 -> V1.1.8 in the captured order', async () => {
+  const sim = S85({ firmware: 116, installs: 118 }), img = P.ws85Builtin();
+  let last = 0;
+  const r = await P.ws85Flash(sim, img, { onProgress: (d, t) => { assert(d >= last && t === img.size, 'progress'); last = d; } });
+  eq(`${r.ok} ${r.upToDate} ${r.from} ${r.to} ${r.bootloader}`, 'true false V1.1.6 V1.1.8 V1.0.1', 'result');
+  eq(last, img.size, 'progress reached the end');
+  assert(sim.accepted && sim.image.length === img.size && sim.image.every((b, i) => b === img.bytes[i]), 'image received intact');
+  eq(P.bytesToHex(new Uint8Array(sim.tail)), P.bytesToHex(new Uint8Array(P.WS85.TAIL_RECORD)), 'tail record written');
+  const W = P.WS85, cmds = sim.frames.map(f => f[1]);
+  const want = [W.INIT, W.INIT, W.INIT, W.GET_FW, W.SET_TARGET, W.PREPARE, ...new Array(2135).fill(W.WRITE), W.FIN1, W.FIN2, W.SET_TARGET, W.PREPARE, W.WRITE, W.UUID];
+  eq(cmds.join(','), want.join(','), 'command order as EcowittISPTool');
+  eq(sim.firmware, 118, 'sensor reports V1.1.8');
+});
+
+await test('WS85: up-to-date sensors are left alone; refusals, silence and cancel are reported', async () => {
+  const img = P.ws85Builtin();
+  const same = S85({ firmware: 118 });
+  const r = await P.ws85Flash(same, img);
+  assert(r.ok && r.upToDate && same.writes === 0 && !same.accepted, 'nothing written');
+  const newer = S85({ firmware: 119 });
+  const rn = await P.ws85Flash(newer, img);
+  assert(rn.upToDate && newer.writes === 0 && rn.from === 'V1.1.9', 'a newer sensor is never downgraded');
+  const forced = S85({ firmware: 118 });
+  assert(!(await P.ws85Flash(forced, img, { force: true })).upToDate && forced.accepted, 'force rewrites');
+  const e1 = await rejects(P.ws85Flash(S85({ refuseWrite: 100 }), img), e => e.code === 'refused', 'refused write');
+  assert(/refused command 0x22/.test(e1.message), e1.message);
+  await rejects(P.ws85Flash(S85({ silentWrite: 50 }), img), e => e.code === 'timeout' && /did not answer/.test(e.message), 'unplugged mid-update');
+  const ac = new AbortController();
+  const sim = S85();
+  const p = P.ws85Flash(sim, img, { signal: ac.signal, onProgress: d => { if (d >= 3200) ac.abort(); } });
+  await rejects(p, e => e.name === 'CancelledError', 'cancel');
+  assert(!sim.accepted && sim.writes < 200, 'stopped early, nothing accepted');
+  const wrongSum = { ...img, sum: (img.sum + 1) >>> 0 };
+  await rejects(P.ws85Flash(S85(), wrongSum), e => e.code === 'refused', 'a bad checksum is refused at FIN2');
+  const unknown = await P.ws85Flash(S85({ firmware: 118 }), { ...img, version: null, versionNum: null });
+  assert(!unknown.upToDate, 'a file without a version in its name is always written');
 });
 
 const realBin = path.join(here, '..', 'build', 'argos-smd-at-kineis-firmware.bin');
