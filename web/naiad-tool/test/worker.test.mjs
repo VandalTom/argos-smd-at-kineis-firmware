@@ -156,7 +156,7 @@ await test('releases: Naiad app images only, no drafts or odd tags, notes per re
 	eq(v101.assets.map(a => `${a.variant}/${a.kind}`), ['release/app', 'bench/app', 'release/full'], 'app images + the full image for SWD');
 	eq(v101.assets[0].url, '/api/firmware/v1.0.1/naiad-carrier-release__argos-smd-at-kineis-firmware.bin', 'proxied url');
 	eq(v101.fwId, 'Naiad v1.0.1 (', 'fw id');
-	eq(v101.warn, '', 'no warning');
+	ok(/GPS port loses its data.*fixed in v1\.0\.3/.test(v101.warn), 'v1.0.1 flagged: GPS port');
 	ok(/Do not deploy/.test(r.data.releases[1].warn), 'v1.0.0 flagged');
 	eq(r.data.releases[1].fwId, '', 'v1.0.0 had the long id');
 });

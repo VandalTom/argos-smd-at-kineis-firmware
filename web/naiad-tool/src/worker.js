@@ -25,8 +25,11 @@ const assetInfo = name => { const m = RELEASE_ASSET.exec(name); return { variant
 const VARIANTS = ['release', 'bench'];
 const TAG = /^v\d+\.\d+\.\d+$/;
 /** Per-release notes shown in the tool. fwId: false = predates the short 'Naiad vX.Y.Z (sha)' ID. */
+const GPS_PORT_WARN = 'Do not deploy: the GPS port loses its data whenever the processor idles, so position fixes fail; the WS85 wind sensor shares that port (fixed in v1.0.3).';
 const RELEASE_NOTES = {
 	'v1.0.0': { warn: 'Do not deploy: units stop transmitting after their first deep sleep (fixed in v1.0.1).', fwId: false },
+	'v1.0.1': { warn: GPS_PORT_WARN },
+	'v1.0.2': { warn: GPS_PORT_WARN },
 };
 const STATUSES = ['free', 'in use', 'retired'];
 const EDITABLE = ['addr', 'key_enc', 'rconf', 'status', 'sn', 'fw', 'assigned', 'note'];
