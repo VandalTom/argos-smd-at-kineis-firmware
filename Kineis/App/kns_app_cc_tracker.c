@@ -374,6 +374,11 @@ static bool process_mac_events(void)
 			break;
 
 		case KNS_MAC_TX_DONE:
+			/* The MAC raises the PA supply enable (P9) for a frame and
+			 * never lowers it; every end of a frame does, so a carrier
+			 * that switches the PA supply on P9 has it off while the
+			 * unit is awake between frames (STOP2 entry lowers it too). */
+			MCU_MISC_turn_off_pa();
 			MGR_LOG_DEBUG("[CC] TX done (#%lu)\r\n", (unsigned long)tx_count);
 			MGR_EVTLOG_log(EVT_TX_DONE, (uint16_t)tx_count);
 			if (cc_state == CC_ST_SELFTEST) {
@@ -386,6 +391,7 @@ static bool process_mac_events(void)
 
 		case KNS_MAC_TX_TIMEOUT:
 		case KNS_MAC_TX_ABORT:
+			MCU_MISC_turn_off_pa();
 			MGR_LOG_DEBUG("[CC] TX %s\r\n",
 				(evt.id == KNS_MAC_TX_ABORT) ? "abort" : "timeout");
 			MGR_ERR_log(ERR_TX_TIMEOUT);
@@ -399,6 +405,7 @@ static bool process_mac_events(void)
 			break;
 
 		case KNS_MAC_ERROR:
+			MCU_MISC_turn_off_pa();
 			MGR_LOG_DEBUG("[CC] MAC error: %d\r\n", evt.status);
 			MGR_EVTLOG_log(EVT_MAC_ERROR, (uint16_t)evt.status);
 			if (cc_state == CC_ST_SELFTEST) {
@@ -1368,6 +1375,7 @@ static void selftest_run(void)
 		process_mac_events();
 		if (st_tx_evt == 0 && st_elapsed() <= CC_SELFTEST_TX_MS)
 			return;
+		MCU_MISC_turn_off_pa();
 		if (st_tx_evt == 1) {
 			snprintf(d, sizeof(d), "ms=%lu", (unsigned long)st_elapsed());
 			st_report(CC_STI_TX, CC_STV_PASS, d);
@@ -2283,6 +2291,7 @@ void KNS_APP_cc_tracker_loop(void)
 			return;
 		if (state_elapsed_ms() > CC_TX_RESULT_TIMEOUT_MS) {
 			MGR_LOG_DEBUG("[CC] TX result timeout\r\n");
+			MCU_MISC_turn_off_pa();
 			MGR_ERR_log(ERR_TX_TIMEOUT);
 			MGR_EVTLOG_log(EVT_TIMEOUT, (uint16_t)CC_ST_WAIT_TX_DONE);
 			tx_outcome(false);
