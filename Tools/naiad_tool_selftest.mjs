@@ -271,28 +271,36 @@ await test('WS85 self-test diagnosis: old firmware, unreadable data, another spe
   eq(P.sensorDiagnosis('ENV', P.parseStLine('+ST=ENV,FAIL,x'), null), null, 'other items: none');
 });
 
+await test("RCONF: Naiad's key and the keys decoded on a unit", () => {
+  eq(P.NAIAD_RCONF, '3D678AF16B5A572078F3DBC95A1104E7', "Naiad's key");
+  eq(P.simDecodeRconf(P.NAIAD_RCONF), '401620000,401680000,27,LDA2', 'ESS4 401.62-401.68 MHz, 27 dBm, LDA2');
+  eq(P.simDecodeRconf('249944c834bbd3a7edd3dcf03efeede2'), '401610000,401680000,27,LDA2', 'previous Naiad');
+  eq(P.simDecodeRconf('2C93600D6BE3BAC0CCFE9047C02C058E'), '402890000,402990000,27,LDA2', 'Arribada samples');
+});
+
 await test('Credential validation and CLS paste parsing', () => {
   const key = '00112233445566778899AABBCCDDEEFF', rc = 'A1B2C3D4E5F60718293A4B5C6D7E8F90';
-  const ok = P.validateCredentials({ id: ' 1234567 ', addr: '0a1b2c3d', seckey: key.toLowerCase(), rconf: '' });
-  assert(ok.ok, 'valid set'); eq(ok.values.addr, '0A1B2C3D', 'addr upper'); eq(ok.values.seckey, key, 'key upper');
-  const bad = P.validateCredentials({ id: '0', addr: '0A1B2C3', seckey: key + 'F', rconf: 'XYZ' });
-  assert(!bad.ok && bad.errors.id && bad.errors.addr && bad.errors.seckey && bad.errors.rconf, 'all four fields rejected');
+  const ok = P.validateCredentials({ id: ' 1234567 ', addr: '0a1b2c3d', seckey: key.toLowerCase(), rconf: 'XYZ' });
+  assert(ok.ok, 'valid set (an RCONF given with it is not part of it)'); eq(ok.values.addr, '0A1B2C3D', 'addr upper'); eq(ok.values.seckey, key, 'key upper');
+  assert(!('rconf' in ok.values), 'a credential set is ID, ADDR, SECKEY');
+  const bad = P.validateCredentials({ id: '0', addr: '0A1B2C3', seckey: key + 'F' });
+  assert(!bad.ok && bad.errors.id && bad.errors.addr && bad.errors.seckey, 'all three fields rejected');
   assert(!P.validateCredentials({ id: '2147483649', addr: '0A1B2C3D', seckey: key }).ok, 'ID > 2^31 rejected');
   assert(P.validateCredentials({ id: '2147483648', addr: '0A1B2C3D', seckey: key }).ok, 'ID = 2^31 accepted');
   assert(P.validateCredentials({ id: '12345678', addr: '0A1B2C3D', seckey: key }).warnings.length === 1, '8-digit ID warns');
   const kv = P.parseCredentialText(`ID=1234567\nADDR: 0A1B2C3D\nSecret key = ${key}\nRadio conf = ${rc}`).values;
-  eq(kv.id, '1234567', 'kv id'); eq(kv.addr, '0A1B2C3D', 'kv addr'); eq(kv.seckey, key, 'kv key'); eq(kv.rconf, rc, 'kv rconf');
+  eq(kv.id, '1234567', 'kv id'); eq(kv.addr, '0A1B2C3D', 'kv addr'); eq(kv.seckey, key, 'kv key'); assert(!('rconf' in kv), 'kv: RCONF ignored');
   const csv = P.parseCredentialText(`device_id;address;seckey;rconf\n1234567;0A1B2C3D;${key};${rc}`);
-  eq(csv.method, 'csv-header', 'csv method'); eq(csv.values.rconf, rc, 'csv rconf'); eq(csv.values.seckey, key, 'csv key');
+  eq(csv.method, 'csv-header', 'csv method'); assert(!('rconf' in csv.values), 'csv: RCONF column ignored'); eq(csv.values.seckey, key, 'csv key');
   const pos = P.parseCredentialText(`1234567, 0A1B2C3D, ${key}, ${rc}`).values;
-  eq(pos.id, '1234567', 'pos id'); eq(pos.addr, '0A1B2C3D', 'pos addr'); eq(pos.seckey, key, 'pos key'); eq(pos.rconf, rc, 'pos rconf');
+  eq(pos.id, '1234567', 'pos id'); eq(pos.addr, '0A1B2C3D', 'pos addr'); eq(pos.seckey, key, 'pos key'); assert(!('rconf' in pos), 'pos: a second key-sized token ignored');
 });
 
 await test('Report and CSV: no key material, escaping, column count', () => {
   const key = 'DEADBEEF00112233445566778899AABB';
   const checks = P.compareCredentials(P.validateCredentials({ id: '1234567', addr: '0A1B2C3D', seckey: key }).values, null,
     { id: '1234567', addr: '0A1B2C3D', seckeyCrc: P.seckeyCrc(key), rconf: '401620000,401680000,27,LDA2' });
-  assert(checks.filter(c => c.ok === true).length === 3, 'three verified fields');
+  assert(checks.filter(c => c.ok === true).length === 4, "three credential fields and Naiad's RCONF verified");
   const run = P.newRun('boot'); run.status = 'FAIL'; run.summary = '+SELFTEST=FAIL,WS85';
   for (const l of ['+ST=GPS,PASS,bytes=1,nmea=2', '+ST=WS85,FAIL,silent', '+ST=ENV,PASS,t=1', '+ST=ADC,PASS,nimh=2650', '+ST=TX,PASS,ms=9']) { const x = P.parseStLine(l); run.items[x.item] = x; run.lines.push(l); }
   run.lines.push(run.summary);
@@ -498,15 +506,17 @@ await test('Provision credentials (BUSY retries, SAVE_RCONF, reset, readbacks, S
   try {
     const rnd = P.mulberry32(31337);
     const creds = { id: String(1000000 + Math.floor(rnd() * 8999999)), addr: randomHex(rnd, 8), seckey: randomHex(rnd, 32), rconf: randomHex(rnd, 32) };
+    r.sim.nvm.rconfSaved = '249944C834BBD3A7EDD3DCF03EFEEDE2'; r.sim.rconfRam = r.sim.nvm.rconfSaved;   // a unit on the previous Naiad key
     r.sim._startTx('test', 4000);                      // first write lands on a busy radio
     const steps = [];
     const res = await P.provisionCredentials(r.link, creds, { onStep: (k, s, l, d) => steps.push(`${k}:${s}:${d || ''}`) });
     assert(res.ok, 'provisioning verified: ' + JSON.stringify(res.checks));
     eq(r.sim.nvm.id, Number(creds.id), 'sim stored ID'); eq(r.sim.nvm.addr, creds.addr.toLowerCase(), 'sim stored ADDR');
-    eq(P.bytesToHex(r.sim.nvm.seckey), creds.seckey, 'sim stored key'); eq(r.sim.nvm.rconfSaved, creds.rconf, 'sim saved RCONF');
+    eq(P.bytesToHex(r.sim.nvm.seckey), creds.seckey, 'sim stored key'); eq(r.sim.nvm.rconfSaved, P.NAIAD_RCONF, "Naiad's RCONF written, not the set's");
     eq(res.post.seckeyCrc, P.seckeyCrc(creds.seckey), 'SECKEYCRC readback matches the local CRC');
     eq(res.post.id, creds.id, 'ID after reset'); eq(res.post.addr, creds.addr, 'ADDR after reset');
-    eq(res.post.rconf, res.pre.rconf, 'RCONF persisted across the reset');
+    eq(res.pre.rconf, P.NAIAD_RCONF_DECODED, "Naiad's RCONF before the reset"); eq(res.post.rconf, P.NAIAD_RCONF_DECODED, 'and after');
+    assert(r.log.some(l => l === `> AT+RCONF=${P.NAIAD_RCONF}`), "Naiad's key sent");
     const busy = steps.filter(s => s.includes('BUSY')).length;
     assert(busy >= 1, 'BUSY retry exercised');
     assert(steps.some(s => s.startsWith('reset:ok')) && steps.some(s => s.startsWith('readback2:ok')), 'reset and second readback ran');
@@ -516,13 +526,13 @@ await test('Provision credentials (BUSY retries, SAVE_RCONF, reset, readbacks, S
     const rep = P.buildReport({ unit: { id: res.post.id, addr: res.post.addr, seckeyCrc: res.post.seckeyCrc }, creds: res });
     assert(!JSON.stringify(rep).toUpperCase().includes(creds.seckey), 'key never in the report');
     assert(!P.buildCsv([P.reportToCsvRow(rep)]).toUpperCase().includes(creds.seckey), 'key never in the CSV');
-    // RCONF written but not saved -> reverts after reset, and the comparison catches it.
-    await P.atCmd(r.link, `AT+RCONF=${randomHex(rnd, 32)}`);
+    // Another key, even saved, is flagged, and the boot puts Naiad's back (firmware v1.0.5+)
+    await P.atCmd(r.link, 'AT+RCONF=2C93600D6BE3BAC0CCFE9047C02C058E'); await P.atCmd(r.link, 'AT+SAVE_RCONF=');
     const pre = await P.readCredentials(r.link);
+    eq(P.compareCredentials({}, pre, null).find(c => c.field === 'RCONF').ok, false, "another band flagged: not Naiad's");
     await P.resetApp(r.link);
     const post = await P.readCredentials(r.link);
-    const rc = P.compareCredentials({ rconf: 'X'.repeat(32) }, pre, post).find(c => c.field === 'RCONF');
-    eq(rc.ok, false, 'unsaved RCONF flagged');
+    eq(post.rconf, P.NAIAD_RCONF_DECODED, "the boot restored Naiad's RCONF");
     const bad = await rejects(P.atCmd(r.link, 'AT+ADDR=XYZ'), e => e.code === '1200', 'bad ADDR format');
     assert(/bad parameter format/.test(bad.message), 'format error text');
     await rejects(P.provisionCredentials(r.link, { id: '0', addr: creds.addr, seckey: creds.seckey }), e => /Invalid input/.test(e.message), 'invalid input refused before sending');

@@ -552,7 +552,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
   <div class="body">
     <label class="field"><span class="lbl">Paste a CLS line or CSV (optional; fills the fields below, then clears itself)</span>
       <div class="inline">
-        <textarea id="credPaste" class="mono" rows="2" autocomplete="off" spellcheck="false" placeholder="id=1234567, addr=0A1B2C3D, seckey=…, rconf=…   or   1234567,0A1B2C3D,&lt;32 hex key&gt;,&lt;32 hex rconf&gt;"></textarea>
+        <textarea id="credPaste" class="mono" rows="2" autocomplete="off" spellcheck="false" placeholder="id=1234567, addr=0A1B2C3D, seckey=…   or   1234567,0A1B2C3D,&lt;32 hex key&gt;"></textarea>
         <button id="btnCredParse" class="btn">Parse</button>
       </div>
     </label>
@@ -572,9 +572,6 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
         <button id="btnKeyShow" class="btn small" aria-pressed="false" type="button">Show</button></span>
         <span class="err" id="errKey"></span>
         <span class="muted small" id="credKeyCrc"></span></label>
-      <label class="field"><span class="lbl">RCONF (32 hex, optional)</span>
-        <input type="text" id="credRconf" class="mono" autocomplete="off" spellcheck="false">
-        <span class="err" id="errRconf"></span></label>
     </div>
     <div id="credWarn" class="msg warn small"></div>
     <div class="row">
@@ -632,7 +629,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
       </div>
       <div id="teamPreview" class="callout" hidden></div>
       <div class="vaultwrap">
-        <table class="vault"><thead><tr id="teamHead"><th>#</th><th data-f="id">ID</th><th data-f="addr">ADDR</th><th data-f="key_crc">Key</th><th data-f="rconf">RCONF</th><th data-f="status">Status</th><th data-f="sn">Device SN</th><th data-f="assigned">Assigned</th><th data-f="note">Notes</th><th data-f="updated">Changed</th><th></th></tr></thead>
+        <table class="vault"><thead><tr id="teamHead"><th>#</th><th data-f="id">ID</th><th data-f="addr">ADDR</th><th data-f="key_crc">Key</th><th data-f="status">Status</th><th data-f="sn">Device SN</th><th data-f="assigned">Assigned</th><th data-f="note">Notes</th><th data-f="updated">Changed</th><th></th></tr></thead>
         <tbody id="teamBody"></tbody></table>
       </div>
       <div class="row small">
@@ -690,7 +687,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
       </div>
       <div id="vaultPreview" class="callout" hidden></div>
       <div class="vaultwrap">
-        <table class="vault"><thead><tr id="vaultHead"><th>#</th><th data-f="id">ID</th><th data-f="addr">ADDR</th><th data-f="key">Key</th><th data-f="rconf">RCONF</th><th data-f="status">Status</th><th data-f="sn">Device SN</th><th data-f="assigned">Assigned</th><th data-f="note">Notes</th><th></th></tr></thead>
+        <table class="vault"><thead><tr id="vaultHead"><th>#</th><th data-f="id">ID</th><th data-f="addr">ADDR</th><th data-f="key">Key</th><th data-f="status">Status</th><th data-f="sn">Device SN</th><th data-f="assigned">Assigned</th><th data-f="note">Notes</th><th></th></tr></thead>
         <tbody id="vaultBody"></tbody></table>
       </div>
       <div class="row small">
@@ -794,7 +791,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.5.1';
+const TOOL_VERSION = '1.5.2';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -806,6 +803,11 @@ const BAUDS = [115200, 9600];
 const ST_ITEMS = ['GPS', 'WS85', 'ENV', 'ADC', 'TX'];
 const ST_VERDICTS = ['PASS', 'FAIL', 'SKIP', 'NOTRUN'];
 const BL_VERSION_STRING = 'BL_V1.0.0'; // simulator
+/** Naiad's radio configuration: a product setting, never part of a credential set (an RCONF only encodes
+ *  band, power and modulation). Provisioning writes it; firmware v1.0.5+ also writes it at every boot when
+ *  the unit holds another one. */
+const NAIAD_RCONF = '3D678AF16B5A572078F3DBC95A1104E7';
+const NAIAD_RCONF_DECODED = '401620000,401680000,27,LDA2';     // what AT+RCONF=? reports: ESS4, 27 dBm, LDA2
 const ROM_RECOVERY_CMD = 'python Tools/rom_uart_flash.py --port <port> --wait 120 --flash build/argos-smd-at-kineis-firmware_full.bin';
 
 /* ---------- time (Clock.scale < 1 speeds up the simulator AND every protocol delay/timeout) ---------- */
@@ -1548,7 +1550,7 @@ async function pollBootSelftest(link, opts = {}) {
 function validateCredentials(input) {
   const errors = {}, warnings = [];
   const clean = (s, strip) => { let t = String(s == null ? '' : s).trim(); if (strip) t = t.replace(/[\s:-]+/g, ''); return t.replace(/^0x/i, ''); };
-  const v = { id: clean(input.id), addr: clean(input.addr, true), seckey: clean(input.seckey, true), rconf: clean(input.rconf, true) };
+  const v = { id: clean(input.id), addr: clean(input.addr, true), seckey: clean(input.seckey, true) };
   if (!/^\d+$/.test(v.id)) errors.id = 'ID must be a decimal number';
   else {
     const n = Number(v.id);
@@ -1557,8 +1559,7 @@ function validateCredentials(input) {
   }
   if (!isHex(v.addr, 8)) errors.addr = 'ADDR must be exactly 8 hex characters';
   if (!isHex(v.seckey, 32)) errors.seckey = 'SECKEY must be exactly 32 hex characters (16 bytes)';
-  if (v.rconf && !isHex(v.rconf, 32)) errors.rconf = 'RCONF must be exactly 32 hex characters, or empty';
-  v.addr = v.addr.toUpperCase(); v.seckey = v.seckey.toUpperCase(); v.rconf = v.rconf.toUpperCase();
+  v.addr = v.addr.toUpperCase(); v.seckey = v.seckey.toUpperCase();
   return { ok: Object.keys(errors).length === 0, errors, warnings, values: v };
 }
 
@@ -1567,10 +1568,9 @@ function credKey(name) {
   if (/^(id|deviceid|devid|argosid|kineisid|platformid|ptt|pttid|decid|iddec)$/.test(k)) return 'id';
   if (/^(addr|address|deviceaddr|deviceaddress|devaddr|argosaddr|hexid|idhex)$/.test(k)) return 'addr';
   if (/^(seckey|secretkey|secret|key|devicekey|aeskey|dsk|devicesecretkey|devicesecret)$/.test(k)) return 'seckey';
-  if (/^(rconf|radioconf|radioconfig|radioconfiguration|radio|rconfig)$/.test(k)) return 'rconf';
   return null;
 }
-/** Best effort: CSV with a header row, key=value pairs, or positional "id, addr, seckey[, rconf]". */
+/** Best effort: CSV with a header row, key=value pairs, or positional "id, addr, seckey" (anything else is ignored). */
 function parseCredentialText(text) {
   const out = {};
   const t = String(text || '').trim();
@@ -1594,7 +1594,7 @@ function parseCredentialText(text) {
   for (const tok of tokens) {
     if (!out.id && /^\d{1,10}$/.test(tok)) out.id = tok;
     else if (!out.addr && isHex(tok, 8)) out.addr = tok;
-    else if (isHex(tok, 32)) { if (!out.seckey) out.seckey = tok; else if (!out.rconf) out.rconf = tok; }
+    else if (!out.seckey && isHex(tok, 32)) out.seckey = tok;
   }
   return { values: out, method: 'positional' };
 }
@@ -1634,13 +1634,10 @@ function compareCredentials(v, pre, post) {
     const ok = fin.seckeyCrc === exp;
     row('SECKEY CRC-32', exp, fin.seckeyCrc != null ? fin.seckeyCrc : fin.seckeyCrcError, ok, ok ? preNote('seckeyCrc', exp) : (fin.seckeyCrcError || 'key mismatch'));
   } else row('SECKEY CRC-32', '', fin.seckeyCrc != null ? fin.seckeyCrc : fin.seckeyCrcError, null, 'not checked');
-  const wellFormed = s => typeof s === 'string' && s.split(',').length >= 4;
-  if (v.rconf) {
-    const persisted = !(pre && post) || pre.rconf === post.rconf;
-    const ok = wellFormed(fin.rconf) && persisted;
-    row('RCONF', 'blob written (unit reports decoded values)', fin.rconf != null ? fin.rconf : fin.rconfError, ok,
-      ok ? (pre && post ? 'unchanged across the reset (saved)' : 'present') : (!wellFormed(fin.rconf) ? (fin.rconfError || 'no valid readback') : `changed across the reset (before: ${pre.rconf}): not saved?`));
-  } else row('RCONF', '', fin.rconf != null ? fin.rconf : fin.rconfError, null, 'not written');
+  // The radio configuration is Naiad's whatever the set: it must read back as such
+  const rcOk = fin.rconf === NAIAD_RCONF_DECODED;
+  row('RCONF', NAIAD_RCONF_DECODED, fin.rconf != null ? fin.rconf : fin.rconfError, rcOk,
+    rcOk ? "Naiad's radio configuration" : fin.rconf == null ? (fin.rconfError || 'no readback') : "not Naiad's radio configuration");
   if (fin.prov != null) {
     const full = !!(v.id && v.addr && v.seckey);
     row('Provisioned', full ? 'prov=1' : '', `prov=${fin.prov}`, full ? fin.prov === '1' : null, fin.prov === '1' ? 'radio enabled' : 'NO_CREDS: the radio stays off');
@@ -1680,7 +1677,7 @@ async function eraseCredentials(link, { signal, onBusy, maxBusyMs = 240000, retr
   return waitForApp(link, { bauds: uniq([link.baud, ...(bauds || BAUDS)]), signal, settle: 2000 });
 }
 
-/** Full provisioning: write -> (save rconf) -> read back -> reset -> wait for app -> read back -> compare. */
+/** Full provisioning: write ID/ADDR/SECKEY and Naiad's RCONF -> read back -> reset -> wait for app -> read back -> compare. */
 async function provisionCredentials(link, input, opts = {}) {
   const { signal } = opts;
   const onStep = opts.onStep || (() => {});
@@ -1688,7 +1685,7 @@ async function provisionCredentials(link, input, opts = {}) {
   if (!val.ok) throw new ProtocolError('Invalid input: ' + Object.values(val.errors).join('; '));
   const v = val.values;
   link.secrets.add(v.seckey);
-  const res = { ok: false, at: new Date().toISOString(), expected: { id: v.id, addr: v.addr, seckeyCrc: seckeyCrc(v.seckey), rconfWritten: !!v.rconf }, pre: null, post: null, checks: [], warnings: val.warnings.slice(), fw: null };
+  const res = { ok: false, at: new Date().toISOString(), expected: { id: v.id, addr: v.addr, seckeyCrc: seckeyCrc(v.seckey), rconf: NAIAD_RCONF_DECODED }, pre: null, post: null, checks: [], warnings: val.warnings.slice(), fw: null };
   const step = async (key, label, fn) => {
     onStep(key, 'run', label);
     try {
@@ -1704,10 +1701,9 @@ async function provisionCredentials(link, input, opts = {}) {
     await step('id', 'Write ID', () => writeWithBusyRetry(link, `AT+ID=${v.id}`, 'AT+ID=', { signal, onBusy: busy('id', 'Write ID') }));
     await step('addr', 'Write ADDR', () => writeWithBusyRetry(link, `AT+ADDR=${v.addr}`, 'AT+ADDR=', { signal, onBusy: busy('addr', 'Write ADDR') }));
     await step('seckey', 'Write SECKEY', () => writeWithBusyRetry(link, `AT+SECKEY=${v.seckey}`, 'AT+SECKEY=<redacted>', { signal, onBusy: busy('seckey', 'Write SECKEY') }));
-    if (v.rconf) {
-      await step('rconf', 'Write RCONF', () => writeWithBusyRetry(link, `AT+RCONF=${v.rconf}`, 'AT+RCONF=', { signal, onBusy: busy('rconf', 'Write RCONF') }));
-      await step('save', 'Save RCONF', () => writeWithBusyRetry(link, 'AT+SAVE_RCONF=', 'AT+SAVE_RCONF=', { signal, onBusy: busy('save', 'Save RCONF') }));
-    } else { onStep('rconf', 'skip', 'Write RCONF', 'not given'); onStep('save', 'skip', 'Save RCONF', 'not given'); }
+    // Not part of the set: Naiad's radio configuration, every time (firmware v1.0.5+ also sets it at boot)
+    await step('rconf', "Write Naiad's RCONF", () => writeWithBusyRetry(link, `AT+RCONF=${NAIAD_RCONF}`, 'AT+RCONF=', { signal, onBusy: busy('rconf', "Write Naiad's RCONF") }));
+    await step('save', 'Save RCONF', () => writeWithBusyRetry(link, 'AT+SAVE_RCONF=', 'AT+SAVE_RCONF=', { signal, onBusy: busy('save', 'Save RCONF') }));
     // An unprovisioned unit re-checks every second and prints +PROV=OK once ID, ADDR and SECKEY are all set.
     res.provEvent = await step('prov', 'Wait for +PROV=OK', async () => {
       const t0 = Clock.now();
@@ -1971,7 +1967,7 @@ function mergeRuns(base, extra) {
 
 /**
  * Production order: Flash -> boot self-test (sensors) -> Provision -> +PROV=OK -> AT+RESET -> boot self-test incl. TX.
- * plan = { mode: 'app'|'bl', image?, imageName?, expectFw?, forceFlash?, creds?: {id, addr, seckey, rconf}, required?, signal }
+ * plan = { mode: 'app'|'bl', image?, imageName?, expectFw?, forceFlash?, creds?: {id, addr, seckey}, required?, signal }
  * hooks = { onStep(key, status, detail), onFlashPhase, onFlashProgress, onSelftest(run), onCredStep }
  * Resolves with the result (result.ok) or rejects with err.wizard = partial result; err.step = failing step.
  */
@@ -2187,7 +2183,14 @@ function strtoulHex(s) {
   const v = parseInt(s.slice(start, i), 16);
   return { value: v > 0xFFFFFFFF ? 0xFFFFFFFF : v >>> 0, n: i };
 }
+/** Keys decoded on a real unit (AT+RCONF=?), for the simulator. */
+const SIM_KNOWN_RCONF = {
+  [NAIAD_RCONF]: NAIAD_RCONF_DECODED,
+  '249944C834BBD3A7EDD3DCF03EFEEDE2': '401610000,401680000,27,LDA2',     // previous Naiad (KIM2)
+  '2C93600D6BE3BAC0CCFE9047C02C058E': '402890000,402990000,27,LDA2',     // Arribada samples, LinkIt V4
+};
 function simDecodeRconf(hex) {
+  if (SIM_KNOWN_RCONF[String(hex).toUpperCase()]) return SIM_KNOWN_RCONF[String(hex).toUpperCase()];
   const b = hexToBytes(hex);
   const mods = ['LDA2', 'LDA2L', 'VLDA4', 'HDA4'];
   const power = [22, 24, 27, 30];
@@ -2386,6 +2389,7 @@ class NaiadSimulator {
     this.state = 'BOOT'; this.macReady = false; this.radioBusy = false; this.txCount = 0;
     this.pend = { reset: false, boot: false, selftest: null };
     this.st = { status: 'NONE', mask: [], items: {} };
+    if (this.nvm.rconfSaved !== NAIAD_RCONF) { this.nvm.rconfSaved = NAIAD_RCONF; this._log("[I] [CC] radio configuration set to Naiad's (ESS4 401.62-401.68 MHz, 27 dBm, LDA2)"); }
     this.rconfRam = this.nvm.rconfSaved;
     this.fw = this._fwFromFlash();
     this.cycleTimer = null; this.nextCycleAt = 0;
@@ -2982,7 +2986,6 @@ const VAULT_HEADERS = {
   id: ['id', 'deviceid', 'platformid', 'argosid', 'kineisid', 'ptt', 'pttid', 'identifiant', 'iddec', 'beaconid'],
   addr: ['addr', 'address', 'deviceaddress', 'adresse', 'addrhex', 'hexaddr', 'hexid'],
   key: ['key', 'seckey', 'secretkey', 'aeskey', 'devicekey', 'cle', 'clef', 'securitykey', 'secret'],
-  rconf: ['rconf', 'radioconf', 'radioconfig', 'radioconfiguration'],
   sn: ['sn', 'serial', 'serialnumber', 'devicesn', 'modulesn'],
   status: ['status', 'state', 'statut'],
   note: ['note', 'notes', 'comment', 'comments', 'remark'],
@@ -2998,7 +3001,7 @@ function vaultNormalize(src) {
   const clean = s => String(s == null ? '' : s).trim().replace(/[\s:-]+/g, '').replace(/^0x/i, '');
   const r = {
     id: String(src.id == null ? '' : src.id).trim(), addr: clean(src.addr).toUpperCase(), key: clean(src.key).toUpperCase(),
-    rconf: clean(src.rconf).toUpperCase(), sn: String(src.sn || '').trim(), note: String(src.note || '').trim(),
+    sn: String(src.sn || '').trim(), note: String(src.note || '').trim(),
     status: VAULT_STATUSES.includes(String(src.status || '').toLowerCase()) ? String(src.status).toLowerCase() : 'free',
   };
   const errors = {};
@@ -3006,7 +3009,6 @@ function vaultNormalize(src) {
   else r.id = String(Number(r.id));
   if (!isHex(r.addr, 8)) errors.addr = '8 hex';
   if (!isHex(r.key, 32)) errors.key = '32 hex';
-  if (r.rconf && !isHex(r.rconf, 32)) errors.rconf = '32 hex or empty';
   return { rec: r, errors };
 }
 
@@ -3019,7 +3021,7 @@ function credentialRowsToRecords(rows) {
     const fields = rows[0].map(c => headerField(val(c)));
     if (fields.includes('id') && fields.filter(Boolean).length >= 2) { map = fields; start = 1; }
   }
-  if (!map) { map = ['id', 'addr', 'key', 'rconf']; notes.push('No header row: columns read as ID, ADDR, KEY, RCONF'); }
+  if (!map) { map = ['id', 'addr', 'key']; notes.push('No header row: columns read as ID, ADDR, KEY'); }
   const records = [], invalid = [];
   for (let i = start; i < rows.length; i++) {
     const o = {};
@@ -3111,7 +3113,7 @@ function vaultCounts(data) {
 
 /** CSV of the vault; keys only when asked for (plaintext secret material). */
 function vaultCsv(data, { keys = false } = {}) {
-  const cols = ['id', 'addr', ...(keys ? ['key'] : []), 'rconf', 'status', 'sn', 'fw', 'assigned', 'note', 'source'];
+  const cols = ['id', 'addr', ...(keys ? ['key'] : []), 'status', 'sn', 'fw', 'assigned', 'note', 'source'];
   const esc = v => { const s = String(v == null ? '' : v); return /[",\r\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   return [cols.join(','), ...data.records.map(r => cols.map(c => esc(r[c])).join(','))].join('\r\n') + '\r\n';
 }
@@ -3171,7 +3173,7 @@ async function teamVaultUnlock(kdf, pass) {
 async function teamSealRecords(key, records) {
   const out = [];
   for (const r of records) {
-    out.push({ id: r.id, addr: r.addr, key_enc: await teamSealKey(key, r.id, r.key), key_crc: seckeyCrc(r.key), rconf: r.rconf || '',
+    out.push({ id: r.id, addr: r.addr, key_enc: await teamSealKey(key, r.id, r.key), key_crc: seckeyCrc(r.key), rconf: '',     // unused Worker column (NOT NULL)
       status: r.status || 'free', sn: r.sn || '', fw: r.fw || '', assigned: r.assigned || '', note: r.note || '' });
   }
   return out;
@@ -4326,6 +4328,7 @@ const NaiadProtocol = {
   teamImportPreview, teamSealKey, teamOpenKey, teamVaultNew, teamVaultUnlock, teamSealRecords, defaultRelease, releaseLabel,
   DAP_CMD, WL, SWD_APP_PAGES, SWD_BL_PAGES, DapError, CmsisDap, SwdTarget, swdConnect, swdProtectionProblems, analyzeSwdImage, swdFlashStm32wl, SimDapProbe,
   STL, StLinkProbe, StLinkTarget, SimStLinkIo, swdInspect, swdFindFirmwareId,
+  NAIAD_RCONF, NAIAD_RCONF_DECODED, SIM_KNOWN_RCONF, simDecodeRconf,
   WS85, Ws85Error, ws85Frame, ws85VersionText, parseIntelHex, ws85Image, ws85Cmd, ws85Hello, ws85Flash, SimWs85, WS85_FW, ws85Builtin,
 };
 // ==== PROTOCOL END ====
@@ -5003,14 +5006,14 @@ async function doBootPoll() {
 
 /* ---------- credentials ---------- */
 
-const CRED_STEPS = [['id', 'Write ID'], ['addr', 'Write ADDR'], ['seckey', 'Write SECKEY'], ['rconf', 'Write RCONF'], ['save', 'Save RCONF'], ['prov', 'Wait for +PROV=OK'],
+const CRED_STEPS = [['id', 'Write ID'], ['addr', 'Write ADDR'], ['seckey', 'Write SECKEY'], ['rconf', "Write Naiad's RCONF"], ['save', 'Save RCONF'], ['prov', 'Wait for +PROV=OK'],
   ['readback1', 'Read back (before reset)'], ['reset', 'Reset (AT+RESET=)'], ['reboot', 'Wait for the app to come back'], ['readback2', 'Read back (after reset)']];
 
-function credInputs() { return { id: $('#credId').value, addr: $('#credAddr').value, seckey: $('#credKey').value, rconf: $('#credRconf').value }; }
+function credInputs() { return { id: $('#credId').value, addr: $('#credAddr').value, seckey: $('#credKey').value }; }
 function credValidateUi(showAll) {
   const inp = credInputs();
   const v = validateCredentials(inp);
-  const map = [['id', '#credId', '#errId'], ['addr', '#credAddr', '#errAddr'], ['seckey', '#credKey', '#errKey'], ['rconf', '#credRconf', '#errRconf']];
+  const map = [['id', '#credId', '#errId'], ['addr', '#credAddr', '#errAddr'], ['seckey', '#credKey', '#errKey']];
   for (const [k, inId, errId] of map) {
     const show = showAll || String(inp[k] || '').trim() !== '';
     const msg = show ? (v.errors[k] || '') : '';
@@ -5055,7 +5058,6 @@ function parsePasteBox() {
   if (values.id) { $('#credId').value = values.id; got.push('ID'); }
   if (values.addr) { $('#credAddr').value = values.addr; got.push('ADDR'); }
   if (values.seckey) { $('#credKey').value = values.seckey; got.push('SECKEY'); }
-  if (values.rconf) { $('#credRconf').value = values.rconf; got.push('RCONF'); }
   box.value = '';                    // the paste may contain the key: don't leave it visible
   setMsg('#credMsg', got.length ? `Parsed ${got.join(', ')} (${method}). Check the fields before writing.` : 'Nothing recognisable in the pasted text.', got.length ? 'ok' : 'warn');
   credValidateUi(false);
@@ -5064,7 +5066,7 @@ async function doProvision() {
   const v = credValidateUi(true);
   if (!v.ok) { setMsg('#credMsg', 'Fix the highlighted fields first.', 'err'); return; }
   const x = v.values;
-  const body = `ID ${x.id}\nADDR ${x.addr}\nSECKEY (CRC-32 ${seckeyCrc(x.seckey)})\nRCONF ${x.rconf ? x.rconf : '(not written)'}\n\nThe unit is reset afterwards and read back.`;
+  const body = `ID ${x.id}\nADDR ${x.addr}\nSECKEY (CRC-32 ${seckeyCrc(x.seckey)})\nRCONF: Naiad's (ESS4 401.62-401.68 MHz, 27 dBm, LDA2)\n\nThe unit is reset afterwards and read back.`;
   if (!(await confirmDialog('Write credentials?', body, 'Write & verify'))) return;
   const states = {};
   renderCredSteps(states); renderCredChecks([]);
@@ -5102,7 +5104,7 @@ async function doCredRead() {
   const inp = credInputs();
   const v = validateCredentials(inp).values;
   const partial = {
-    id: /^\d+$/.test(v.id) ? v.id : '', addr: isHex(v.addr, 8) ? v.addr : '', seckey: isHex(v.seckey, 32) ? v.seckey : '', rconf: '',
+    id: /^\d+$/.test(v.id) ? v.id : '', addr: isHex(v.addr, 8) ? v.addr : '', seckey: isHex(v.seckey, 32) ? v.seckey : '',
   };
   const r = await runOp('Reading credentials', signal => readCredentials(ui.link, { signal }));
   if (!r.ok) return;
@@ -5123,7 +5125,7 @@ async function doCredRead() {
 
 const VAULT_STORE = 'naiad.vault.v1', VAULT_PENDING = 'naiad.vault.pending.v1', VAULT_IDLE_MS = 15 * 60000;
 const vault = { open: false, data: null, key: null, salt: null, iter: 0, saveTimer: null, idleTimer: null, preview: null, sort: { col: null, dir: 1 }, shown: new Set(), hist: new Set() };
-const VAULT_COLS = [['id', 'ID'], ['addr', 'ADDR'], ['key', 'Key'], ['rconf', 'RCONF'], ['status', 'Status'], ['sn', 'Device SN'], ['assigned', 'Assigned'], ['note', 'Notes']];
+const VAULT_COLS = [['id', 'ID'], ['addr', 'ADDR'], ['key', 'Key'], ['status', 'Status'], ['sn', 'Device SN'], ['assigned', 'Assigned'], ['note', 'Notes']];
 
 function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function storeSet(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } }
@@ -5373,8 +5375,8 @@ function vaultCellChanged(el) {
   if (!r) return;
   const before = r[f] || '';
   const trial = vaultNormalize({ ...r, [f]: el.value });
-  let val = f === 'status' ? el.value : (['id', 'addr', 'key', 'rconf'].includes(f) ? trial.rec[f] : el.value.trim());
-  let err = ['id', 'addr', 'key', 'rconf'].includes(f) ? trial.errors[f] : null;
+  let val = f === 'status' ? el.value : (['id', 'addr', 'key'].includes(f) ? trial.rec[f] : el.value.trim());
+  let err = ['id', 'addr', 'key'].includes(f) ? trial.errors[f] : null;
   if (f === 'assigned' && val && !/^\d{4}-\d{2}-\d{2}$/.test(val)) err = 'YYYY-MM-DD or empty';
   if (!err && (f === 'id' || f === 'addr') && val && vault.data.records.some(x => x !== r && x[f] === val)) err = `another set already has this ${f.toUpperCase()}`;
   const td = el.closest('td');
@@ -5392,7 +5394,7 @@ async function vaultUse(uid) {
   const r = vault.data.records.find(x => x.uid === uid);
   if (!r) return;
   if (r.status !== 'free' && !(await confirmDialog(`ID ${r.id} is ${r.status}`, `${r.sn ? `The vault has it on ${r.sn}. ` : ''}Use it for this unit anyway?`, 'Use it', { focusCancel: true }))) return;
-  $('#credId').value = r.id; $('#credAddr').value = r.addr; $('#credKey').value = r.key; $('#credRconf').value = r.rconf || '';
+  $('#credId').value = r.id; $('#credAddr').value = r.addr; $('#credKey').value = r.key;
   credValidateUi(false);
   ui.vaultPick = r.id;
   setMsg('#credMsg', `Filled from the offline vault: ID ${r.id}. "Write, reset & verify" provisions it; the vault marks it in use once verified.`, 'ok');
@@ -5428,7 +5430,7 @@ async function vaultDelete(uid) {
 function vaultAddRow() {
   vaultTouch();
   const now = new Date().toISOString();
-  const r = { uid: vaultUid(), id: '', addr: '', key: '', rconf: '', status: 'free', sn: '', fw: '', assigned: '', note: '', source: 'manual', added: now, history: [{ t: now, ev: 'added by hand', by: vaultBy(), note: '' }] };
+  const r = { uid: vaultUid(), id: '', addr: '', key: '', status: 'free', sn: '', fw: '', assigned: '', note: '', source: 'manual', added: now, history: [{ t: now, ev: 'added by hand', by: vaultBy(), note: '' }] };
   vault.data.records.push(r);
   vault.shown.add(r.uid);
   vault.sort.col = null; $('#vaultSearch').value = ''; $('#vaultFilter').value = '';
@@ -5487,7 +5489,7 @@ const team = {
   state: 'unknown', email: '', msg: '', kdf: null, key: null, salt: null, iter: 0, records: [], sort: { col: null, dir: 1 },
   keys: new Map(), hist: new Map(), preview: null, poll: null, loadedAt: 0, idleTimer: null,
 };
-const TEAM_COLS = ['id', 'addr', 'key', 'rconf', 'status', 'sn', 'assigned', 'note'];
+const TEAM_COLS = ['id', 'addr', 'key', 'status', 'sn', 'assigned', 'note'];
 class TeamAuthError extends Error {}
 const teamOpen = () => team.state === 'in' && !!team.key;
 
@@ -5685,7 +5687,7 @@ async function teamUse(id) {
   let key;
   try { key = await teamFetchKey(id, 'provision'); }
   catch (e) { if (!(e instanceof TeamAuthError)) setMsg('#credMsg', `Team vault: ${e.message}`, 'err'); return; }
-  $('#credId').value = r.id; $('#credAddr').value = r.addr; $('#credKey').value = key; $('#credRconf').value = r.rconf || '';
+  $('#credId').value = r.id; $('#credAddr').value = r.addr; $('#credKey').value = key;
   key = '';
   credValidateUi(false);
   ui.vaultPick = r.id;
@@ -5765,7 +5767,7 @@ async function teamUploadLocal() {
   teamTouch();
   if (!vault.open) { setMsg('#teamSaved', 'Unlock the offline vault below first.', 'warn'); goTo('#cardVault', '#vaultPass'); return; }
   await teamReload();
-  const records = vault.data.records.filter(vaultRecValid).map(r => ({ id: r.id, addr: r.addr, key: r.key, rconf: r.rconf || '', status: r.status, sn: r.sn || '', fw: r.fw || '', assigned: r.assigned || '', note: r.note || '' }));
+  const records = vault.data.records.filter(vaultRecValid).map(r => ({ id: r.id, addr: r.addr, key: r.key, status: r.status, sn: r.sn || '', fw: r.fw || '', assigned: r.assigned || '', note: r.note || '' }));
   team.preview = { kind: 'local', name: "this browser's offline vault", parsed: { records, invalid: [], notes: [] }, merge: teamImportPreview(team.records, records) };
   renderTeamPreview();
 }
@@ -5793,7 +5795,7 @@ async function teamCommitPreview() {
 async function teamAddOne() {
   teamTouch();
   const v = id => ($('#' + id) || {}).value || '';
-  const { rec, errors } = vaultNormalize({ id: v('teamAddId'), addr: v('teamAddAddr'), key: v('teamAddKey'), rconf: v('teamAddRconf'), note: v('teamAddNote') });
+  const { rec, errors } = vaultNormalize({ id: v('teamAddId'), addr: v('teamAddAddr'), key: v('teamAddKey'), note: v('teamAddNote') });
   if (Object.keys(errors).length) { setMsg('#teamPreviewMsg', Object.entries(errors).map(([k, e]) => `${k.toUpperCase()}: ${e}`).join(' · '), 'err'); return; }
   let res;
   try { res = await teamSend([rec], 'added by hand'); }
@@ -5808,7 +5810,7 @@ async function teamAddOne() {
 async function teamBackupBlob(why) {
   const j = await teamApi('export?why=' + encodeURIComponent(why));
   const recs = [];
-  for (const r of j.records) recs.push({ id: r.id, addr: r.addr, key: await teamOpenKey(team.key, r.id, r.key_enc), rconf: r.rconf || '', status: r.status, sn: r.sn || '', fw: r.fw || '', assigned: r.assigned || '', note: r.note || '', source: r.source || '' });
+  for (const r of j.records) recs.push({ id: r.id, addr: r.addr, key: await teamOpenKey(team.key, r.id, r.key_enc), status: r.status, sn: r.sn || '', fw: r.fw || '', assigned: r.assigned || '', note: r.note || '', source: r.source || '' });
   const data = vaultNewData();
   vaultMerge(data, recs, { commit: true, source: 'team vault', by: team.email });
   recs.length = 0;
@@ -5843,7 +5845,7 @@ function renderTeamPreview() {
   if (p.kind === 'add') {
     box.append(h('div', 'New credential set (from CLS):'));
     const row = h('div', null, 'row');
-    for (const [id, ph, w] of [['teamAddId', 'ID (decimal)', 110], ['teamAddAddr', 'ADDR (8 hex)', 110], ['teamAddKey', 'KEY (32 hex)', 280], ['teamAddRconf', 'RCONF (optional)', 280], ['teamAddNote', 'Note', 160]]) {
+    for (const [id, ph, w] of [['teamAddId', 'ID (decimal)', 110], ['teamAddAddr', 'ADDR (8 hex)', 110], ['teamAddKey', 'KEY (32 hex)', 280], ['teamAddNote', 'Note', 160]]) {
       const inp = h('input'); inp.id = id; inp.placeholder = ph; inp.autocomplete = 'off'; inp.spellcheck = false; inp.className = 'mono'; inp.style.width = w + 'px';
       if (id === 'teamAddKey') inp.type = 'password';
       row.append(inp);
@@ -6163,7 +6165,7 @@ async function doWizard() {
     const v = credValidateUi(true);
     if (!v.ok) { setMsg('#wizMsg', 'Fix the credential fields first, or untick "Write the entered credentials".', 'err'); goTo('#cardCred', '#credId'); return; }
     plan.creds = inp;
-    lines.push(`Credentials: ID ${v.values.id}, ADDR ${v.values.addr}, key CRC ${seckeyCrc(v.values.seckey)}${v.values.rconf ? ', RCONF' : ''}, then reset`);
+    lines.push(`Credentials: ID ${v.values.id}, ADDR ${v.values.addr}, key CRC ${seckeyCrc(v.values.seckey)}, Naiad's RCONF, then reset`);
   } else lines.push('Credentials: unchanged');
   lines.push(`Required self-test items: ${plan.required.join(', ') || 'none'}`);
   if (!(await confirmDialog('Commission this unit?', lines.join('\n'), 'Start'))) return;
@@ -7262,9 +7264,8 @@ const VVIEWS = {
       out.push(el('div', { class: 'vfields' },
         el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'Argos ID (decimal)' }), el('input', { type: 'text', id: 'vId', class: 'mono', autocomplete: 'off', spellcheck: 'false' })),
         el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'ADDR (8 hex)' }), el('input', { type: 'text', id: 'vAddr', class: 'mono', autocomplete: 'off', spellcheck: 'false' })),
-        el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'Secret key (32 hex)' }), el('input', { type: 'password', id: 'vKey', class: 'mono', autocomplete: 'off', spellcheck: 'false' })),
-        el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'RCONF (optional)' }), el('input', { type: 'text', id: 'vRconf', class: 'mono', autocomplete: 'off', spellcheck: 'false' }))));
-      out.push(el('div', { class: 'vactions' }, vBtn('Write to the module', () => vProvisionSet({ id: $('#vId').value, addr: $('#vAddr').value, key: $('#vKey').value, rconf: $('#vRconf').value }, 'by hand'), { primary: !teamOpen() })));
+        el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'Secret key (32 hex)' }), el('input', { type: 'password', id: 'vKey', class: 'mono', autocomplete: 'off', spellcheck: 'false' }))));
+      out.push(el('div', { class: 'vactions' }, vBtn('Write to the module', () => vProvisionSet({ id: $('#vId').value, addr: $('#vAddr').value, key: $('#vKey').value }, 'by hand'), { primary: !teamOpen() })));
     }
     return out;
   },
@@ -7418,15 +7419,15 @@ async function vUnlock() {
   $('#teamPass').value = f.value; f.value = '';
   await vDo('Unlocking the team vault', async () => { await teamUnlock(); if (!team.key) team.msg = $('#teamState').textContent || 'Wrong team passphrase'; });
 }
-/** Write a credential set (fields: id, addr, key, rconf), reset, read back: same steps as "Write, reset & verify". */
+/** Write a credential set (fields: id, addr, key) and Naiad's RCONF, reset, read back: same steps as "Write, reset & verify". */
 async function vProvision(set, source) {
-  $('#credId').value = set.id; $('#credAddr').value = set.addr; $('#credKey').value = set.key; $('#credRconf').value = set.rconf || '';
+  $('#credId').value = set.id; $('#credAddr').value = set.addr; $('#credKey').value = set.key;
   const v = credValidateUi(true);
   $('#credKey').value = '';
   if (!v.ok) { voy.err.papers = { title: 'These credentials are not valid', text: Object.entries(v.errors).map(([k, e]) => `${k.toUpperCase()}: ${e}`).join(' · ') }; return; }
   voy.err.papers = null;
   const labels = Object.fromEntries(CRED_STEPS);
-  const r = await runOp('Provisioning credentials', signal => provisionCredentials(ui.link, { id: set.id, addr: set.addr, seckey: set.key, rconf: set.rconf || '' }, {
+  const r = await runOp('Provisioning credentials', signal => provisionCredentials(ui.link, { id: set.id, addr: set.addr, seckey: set.key }, {
     signal,
     onStep: (key, status, label) => {
       if (key === 'reset' && status === 'ok') ui.mode = null;
@@ -7459,7 +7460,7 @@ async function vProvisionTeam(id) {
     let key;
     try { key = await teamFetchKey(id, 'provision'); }
     catch (e) { voy.err.papers = { title: 'The key could not be fetched', text: e.message }; return; }
-    await vProvision({ id: r.id, addr: r.addr, key, rconf: r.rconf || '' }, 'team vault');
+    await vProvision({ id: r.id, addr: r.addr, key }, 'team vault');
   });
 }
 async function vProvisionSet(set, source) { await vDo('Writing the papers', () => vProvision(set, source)); }
@@ -7875,7 +7876,7 @@ function init() {
 
   $('#btnCredParse').addEventListener('click', parsePasteBox);
   $('#credPaste').addEventListener('paste', () => setTimeout(parsePasteBox, 0));
-  for (const id of ['#credId', '#credAddr', '#credKey', '#credRconf']) {
+  for (const id of ['#credId', '#credAddr', '#credKey']) {
     $(id).addEventListener('input', () => credValidateUi(false));
     $(id).addEventListener('blur', () => credValidateUi(false));
   }
