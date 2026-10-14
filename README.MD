@@ -183,7 +183,7 @@ console can drive the radio behind the tracker's back:
 | Command | Reply |
 |---------|-------|
 | `AT+FW=?` `AT+VERSION=?` `AT+PING=?` `AT+ID=?` `AT+ADDR=?` `AT+SN=?` `AT+RCONF=?` | standard `+X=...` then `+OK` |
-| `AT+ID=<dec>` `AT+ADDR=<8hex>` `AT+SECKEY=<32hex>` `AT+RCONF=<32hex>` `AT+SAVE_RCONF=` | `+OK`; `+ERROR=BUSY` while transmitting; effective after `AT+RESET` |
+| `AT+ID=<dec>` `AT+ADDR=<8hex>` `AT+SECKEY=<32hex>` `AT+RCONF=<32hex>` `AT+SAVE_RCONF=` | `+OK`; `+ERROR=BUSY` while transmitting; effective after `AT+RESET` (the boot puts Naiad's RCONF back, see Provisioning) |
 | `AT+SECKEY=?` | `+SECKEYCRC=<8hex>` — CRC-32 of the key; the key is never echoed |
 | `AT+PROV=ERASE` | `+PROV=ERASED` then `+RESET=OK`: ID, ADDR, SECKEY and the credential mirror blanked (RCONF kept), unit reboots into `NO_CREDS`; `+ERROR=BUSY` while transmitting |
 | `AT+STATE=?` | `+STATE=<state>,up=<s>,tx=<n>,mac=<0/1>,comm=<phase>,st=<NONE/RUNNING/PASS/FAIL>,slp=<s in STOP2>,prov=<0/1>,bat=<mV>,tier=<HIGH/MID/LOW/CRIT>,utc=<unix, 0 = no fix yet>` |
@@ -271,9 +271,13 @@ BKP8R/BKP9R). The calendar and the anchor survive every reset — watchdog,
 until the next fix instead of dropping to 0; power loss clears both. GPS
 dates before 2025 (week-rollover receivers) are ignored.
 
-**Provisioning** — credentials (ID, ADDR, SECKEY from CLS; RCONF optional)
-are written over the console. A CRC-protected mirror (`MGR_CRED`, page
-`0x08032800`) restores them if a brownout wipes page 0. A unit with no
+**Provisioning** — credentials (ID, ADDR, SECKEY from CLS) are written over
+the console. The radio configuration is not part of a credential set: Naiad's
+RCONF (`3d678af1…`, ESS4 401.62-401.68 MHz, 27 dBm, LDA2; `CC_RCONF_BYTES` in
+cc_conf.h) is written by every boot when the stored one differs (so once per
+unit), and the web tool writes and checks it as well, so a key written over
+the console lasts only until the next boot. A CRC-protected mirror
+(`MGR_CRED`, page `0x08032800`) restores the credentials if a brownout wipes page 0. A unit with no
 credentials never starts the radio (it would otherwise transmit under the
 Kineis test identity): it reports `+PROV=NONE`, sits in state `NO_CREDS`
 (`AT+STATE=?` shows `prov=0`), still runs the sensor self-test, and resumes
