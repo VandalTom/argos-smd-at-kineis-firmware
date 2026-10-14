@@ -219,6 +219,11 @@ The GPS item also diagnoses itself (about 7 s, up to 15 s with a baud scan):
 
 The web tool turns these into plain-words advice.
 
+Before v1.0.3, USART1 lost its clock each time the CPU idled between loop
+passes, so GPS (and WS85) data arrived as a few broken bytes a second
+(`fe` high, no NMEA) whatever the receiver did. Update such units before
+reading anything into their GPS results.
+
 Two bench builds (never released) take the GPS path apart; neither starts
 the radio, and both keep the console, `AT+BOOT` and `AT+RESET`:
 - `make ... GPS_LOOPBACK=1 full`: with the GPS and WS85 unplugged and the GPS
