@@ -677,6 +677,11 @@ endif
 ifeq ($(GPS_LOOPBACK),1)
 CFLAGS += -DCC_GPS_LOOPBACK=1
 endif
+# GPS_MONITOR=1 (APP=CC_TRACKER) — bench build that cycles the GPS on/off and
+# reports what it sends once a second instead of running the tracker.
+ifeq ($(GPS_MONITOR),1)
+CFLAGS += -DCC_GPS_MONITOR=1
+endif
 
 ifeq ($(DEBUG), 1)
 CFLAGS += -g -gdwarf-2
@@ -758,7 +763,7 @@ ifeq ($(APP),CC_TRACKER)
 NAIAD_VER := $(strip $(shell cat NAIAD_VERSION 2>/dev/null))
 NAIAD_AHEAD := $(strip $(shell git rev-list --count v$(NAIAD_VER)..HEAD 2>/dev/null || echo dev))
 NAIAD_SUFFIX := $(if $(filter 0,$(NAIAD_AHEAD)),,$(if $(filter dev,$(NAIAD_AHEAD)),-dev,+$(NAIAD_AHEAD)))
-NAIAD_FW_ID := Naiad v$(NAIAD_VER)$(NAIAD_SUFFIX) ($(current_repo_commit)$(if $(current_repo_status),*))$(if $(filter 1,$(DEBUG)), bench)$(if $(filter 1,$(GPS_LOOPBACK)), loopback)
+NAIAD_FW_ID := Naiad v$(NAIAD_VER)$(NAIAD_SUFFIX) ($(current_repo_commit)$(if $(current_repo_status),*))$(if $(filter 1,$(DEBUG)), bench)$(if $(filter 1,$(GPS_LOOPBACK)), loopback)$(if $(filter 1,$(GPS_MONITOR)), gpsmon)
 endif
 
 #######################################
@@ -1121,6 +1126,7 @@ help:
 	@echo "       by NRST/SWD. Do NOT use it for potted units: the default is the STOP2 soft-off."
 	@echo "       LOG_LEVEL=0..4  JLINK_SPEED=<kHz>  JLINK_SERIAL=<sn>"
 	@echo "       GPS_LOOPBACK=1 (CC_TRACKER bench: USART1 loopback, P11 bridged to P12 or P33, no radio)"
+	@echo "       GPS_MONITOR=1  (CC_TRACKER bench: GPS on/off cycle, what it sends each second, no radio)"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all (default)   build app -> build/$(TARGET).{elf,hex,bin}"

@@ -1628,6 +1628,11 @@ void KNS_APP_cc_tracker_init(void)
 #if CC_GPS_LOOPBACK
 	MCU_AT_CONSOLE_send("+LOOP=READY,bridge P11(PB6)-P12(PB7) or P33(PA10),GPS+WS85 unplugged,radio off\r\n");
 #endif
+#if CC_GPS_MONITOR
+	MCU_AT_CONSOLE_send("+GPSMON=READY,GPS on %lu s / off %lu s at %lu baud,radio off\r\n",
+		(unsigned long)(CC_GPS_MON_ON_MS / 1000UL), (unsigned long)(CC_GPS_MON_OFF_MS / 1000UL),
+		(unsigned long)CC_HW_gpsBaud());
+#endif
 
 	transition_to(CC_ST_BOOT);
 }
@@ -1742,6 +1747,163 @@ static void gps_loop_poll(void)
 
 #endif /* CC_GPS_LOOPBACK */
 
+#if CC_GPS_MONITOR
+
+/* ---- GPS monitor (bench build: no radio, no cycle) ----
+ * The receiver goes on for CC_GPS_MON_ON_MS, then off for CC_GPS_MON_OFF_MS,
+ * over and over. While on, the GPS session listens at CC_HW_gpsBaud() and
+ * every byte goes through an NMEA parser. Once a second, one console line:
+ *   on   bytes, valid NMEA, checksum and framing errors this second; last
+ *        GGA satellites and fix; rx = the first bytes this second ('.' =
+ *        unprintable, so CR LF shows as "..")
+ *   off  line = the data line's state (cc_selftest_line_class)
+ * While on, the session baud steps through gps_mon_bauds every
+ * CC_GPS_MON_BAUD_MS, and every 10 s a +GPSSCOPE line reports what PB6 itself
+ * did over one second (gps_mon_scope): independent of any baud setting. */
+
+static const uint32_t gps_mon_bauds[] = { 9600UL, 4800UL, 19200UL, 38400UL, 57600UL, 115200UL };
+#define CC_GPS_MON_BAUD_MS 5000UL
+#define CC_GPS_MON_GLITCH_US 2UL /* shorter pulses are noise, not bits */
+
+/**
+ * Sample PB6 in a tight loop for @p ms against the core cycle counter (the
+ * USART keeps receiving: IDR reads the pin in AF mode too). Reports the edges
+ * seen, the shortest low and high pulse of at least CC_GPS_MON_GLITCH_US (the
+ * shortest low is one bit: a start bit before a 1 data bit) and the glitches
+ * below it. Blocks the loop for @p ms.
+ */
+static void gps_mon_scope(uint32_t ms)
+{
+	uint32_t per_us = HAL_RCC_GetHCLKFreq() / 1000000UL;
+	uint32_t glitch = CC_GPS_MON_GLITCH_US * per_us;
+	uint32_t span = ms * 1000UL * per_us;
+	uint32_t edges = 0, glitches = 0, lo_min = UINT32_MAX, hi_min = UINT32_MAX;
+
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+	uint32_t t0 = DWT->CYCCNT, last = t0;
+	uint32_t level = CC_GPS_NMEA_GPIO_Port->IDR & CC_GPS_NMEA_Pin;
+	bool first = true; /* the pulse in progress at t0 has no true start */
+
+	for (;;) {
+		uint32_t t = DWT->CYCCNT;
+		uint32_t l = CC_GPS_NMEA_GPIO_Port->IDR & CC_GPS_NMEA_Pin;
+
+		if (t - t0 >= span)
+			break;
+		if (l == level)
+			continue;
+		uint32_t w = t - last;
+
+		edges++;
+		if (!first) {
+			if (w < glitch)
+				glitches++;
+			else if (level && w < hi_min)
+				hi_min = w;
+			else if (!level && w < lo_min)
+				lo_min = w;
+		}
+		first = false;
+		level = l;
+		last = t;
+	}
+	MCU_AT_CONSOLE_send("+GPSSCOPE=edges=%lu,lo_min_us=%lu,hi_min_us=%lu,glitches=%lu,baud_est=%lu,idle=%s\r\n",
+		(unsigned long)edges,
+		lo_min == UINT32_MAX ? 0UL : (unsigned long)(lo_min / per_us),
+		hi_min == UINT32_MAX ? 0UL : (unsigned long)(hi_min / per_us),
+		(unsigned long)glitches,
+		lo_min == UINT32_MAX ? 0UL : (unsigned long)((uint64_t)per_us * 1000000ULL / lo_min),
+		level ? "hi" : "lo");
+}
+
+static void gps_mon_poll(void)
+{
+	static uint32_t report_tick, state_tick, baud_tick, n;
+	static bool started, on;
+	static uint8_t baud_i;
+	static uint16_t bytes, fe_base;
+	static uint32_t nmea_base, cs_base;
+	static char peek[33];
+	static uint8_t peek_len;
+	static cc_nmea_parser_t mon;
+	uint32_t now = HAL_GetTick();
+
+	if (!started || (!on && now - state_tick >= CC_GPS_MON_OFF_MS)) {
+		started = true;
+		on = true;
+		state_tick = baud_tick = now;
+		baud_i = 0;
+		cc_nmea_init(&mon);
+		nmea_base = cs_base = 0;
+		CC_HW_gpsPowerOn();
+		(void)CC_HW_uartOpenBaud(CC_UART_GPS, gps_mon_bauds[baud_i]);
+		fe_base = 0;
+	} else if (on && now - baud_tick >= CC_GPS_MON_BAUD_MS) {
+		baud_tick = now;
+		baud_i = (uint8_t)((baud_i + 1U) % (sizeof(gps_mon_bauds) / sizeof(gps_mon_bauds[0])));
+		(void)CC_HW_uartOpenBaud(CC_UART_GPS, gps_mon_bauds[baud_i]);
+		fe_base = 0;
+	}
+	if (on && now - state_tick >= CC_GPS_MON_ON_MS) {
+		on = false;
+		state_tick = now;
+		CC_HW_uartClose();
+		CC_HW_gpsPowerOff();
+	}
+
+	if (on) {
+		uint8_t buf[64];
+		uint16_t k;
+
+		while ((k = CC_HW_uartRead(buf, sizeof(buf))) > 0U) {
+			for (uint16_t i = 0; i < k; i++) {
+				(void)cc_nmea_feed(&mon, buf[i]);
+				if (peek_len < sizeof(peek) - 1U)
+					peek[peek_len++] = (buf[i] >= 0x20U && buf[i] < 0x7FU && buf[i] != '"') ?
+						(char)buf[i] : '.';
+			}
+			bytes += k;
+		}
+	}
+
+	if (now - report_tick < 1000UL)
+		return;
+	report_tick = now;
+	n++;
+	peek[peek_len] = '\0';
+	if (on) {
+		uint16_t fe = CC_HW_uartLineErrors();
+		uint32_t t = (now - state_tick) / 1000UL;
+
+		MCU_AT_CONSOLE_send("+GPSMON=%lu,gps=on,t=%lu,baud=%lu,bytes=%u,nmea=%lu,cs_err=%lu,fe=%u,sats=%u,fix=%u,rx=\"%s\"\r\n",
+			(unsigned long)n, (unsigned long)t, (unsigned long)gps_mon_bauds[baud_i], bytes,
+			(unsigned long)(mon.sentences - nmea_base), (unsigned long)(mon.cs_errors - cs_base),
+			(unsigned)(uint16_t)(fe - fe_base), (unsigned)mon.last_sats,
+			cc_nmea_fix(&mon)->valid ? 1u : 0u, peek);
+		fe_base = fe;
+		nmea_base = mon.sentences;
+		cs_base = mon.cs_errors;
+		if (t % 10UL == 3UL) {
+			MGR_WDG_refresh();
+			gps_mon_scope(1000UL);
+			report_tick = HAL_GetTick(); /* the scope second is not a report second */
+		}
+	} else {
+		bool hd, lu;
+
+		(void)CC_HW_gpsLineProbe(&hd, &lu);
+		MCU_AT_CONSOLE_send("+GPSMON=%lu,gps=off,t=%lu,line=%s\r\n",
+			(unsigned long)n, (unsigned long)((now - state_tick) / 1000UL),
+			cc_selftest_line_name(cc_selftest_line_class(hd, lu)));
+	}
+	bytes = 0;
+	peek_len = 0;
+}
+
+#endif /* CC_GPS_MONITOR */
+
 void KNS_APP_cc_tracker_loop(void)
 {
 	MGR_WDG_refresh();
@@ -1754,9 +1916,14 @@ void KNS_APP_cc_tracker_loop(void)
 		boot_attempts_write(0);
 	}
 
-#if CC_GPS_LOOPBACK
+#if CC_GPS_LOOPBACK || CC_GPS_MONITOR
 	if (!rescue) {
-		gps_loop_poll(); /* instead of the cycle: the MAC never starts */
+		/* bench builds run instead of the cycle: the MAC never starts */
+#if CC_GPS_LOOPBACK
+		gps_loop_poll();
+#else
+		gps_mon_poll();
+#endif
 		return;
 	}
 #endif

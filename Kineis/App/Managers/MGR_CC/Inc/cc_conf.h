@@ -89,6 +89,21 @@
 #define CC_GPS_LOOPBACK         0
 #endif
 #define CC_GPS_LOOP_PERIOD_MS   1000UL
+
+/* Bench GPS monitor build (make ... GPS_MONITOR=1): never starts the radio or
+ * the cycle. The receiver is switched on for CC_GPS_MON_ON_MS and off for
+ * CC_GPS_MON_OFF_MS in turn, so a meter on the GPS connector sees both states,
+ * and once a second the console gets what it sent (+GPSMON=...): bytes, valid
+ * NMEA, checksum and framing errors, satellites, the first bytes as text;
+ * while off, the data line's state. */
+#ifndef CC_GPS_MONITOR
+#define CC_GPS_MONITOR          0
+#endif
+#define CC_GPS_MON_ON_MS        60000UL
+#define CC_GPS_MON_OFF_MS       10000UL
+#if CC_GPS_LOOPBACK && CC_GPS_MONITOR
+#error "GPS_LOOPBACK and GPS_MONITOR are separate bench builds"
+#endif
 #define CC_GPS_TTFF_BUDGET_MS   90000UL   /**< one search window */
 #define CC_GPS_MAX_DURATIONS    6         /**< adaptive ramp: max chained windows
                                            *   (6 x 90 s = 9 min ephemeris download) */

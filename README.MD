@@ -219,6 +219,17 @@ The GPS item also diagnoses itself (about 7 s, up to 15 s with a baud scan):
 
 The web tool turns these into plain-words advice.
 
+Two bench builds (never released) take the GPS path apart; neither starts
+the radio, and both keep the console, `AT+BOOT` and `AT+RESET`:
+- `make ... GPS_LOOPBACK=1 full`: with the GPS and WS85 unplugged and the GPS
+  data pin (P11) bridged to P12 or the WS85 data pin (P33), sends a frame
+  out of USART1 once a second at 9600 and 115200 and checks it comes back
+  (`+LOOP=...`); `p11=` names every MCU pin the bridge actually reaches.
+- `make ... GPS_MONITOR=1 full`: switches the GPS on for 60 s and off for
+  10 s in turn, steps the baud 9600 → 115200, and prints bytes, valid NMEA,
+  errors and the first bytes each second (`+GPSMON=...`); every 10 s
+  `+GPSSCOPE=...` times the data pin itself (true bit time, glitches).
+
 **Deployment (commissioning) burst** — units are switched on indoors and
 deployed later with no button. The first GPS fix since power-up is the
 "outdoors now" signal: the unit transmits every 60 s (+0..5 s jitter) for
