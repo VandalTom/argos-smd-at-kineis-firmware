@@ -215,7 +215,7 @@ await test('GPS self-test diagnosis: what the test saw, then assembly checks onl
     ['+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=fl/fl', 'No connection to the GPS data line', /pad P11/],
     ['+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=lo/lo', 'The GPS data line is stuck low', /pins 1 and 2/],
     ['+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=lo/hi,baud=none', 'No data from the GPS', /pin 1 to pin 1/],
-    ['+ST=GPS,FAIL,bytes=40,nmea=0,cs_err=0,fe=39,line=hi/hi,baud=none', 'Broken data from the GPS', /dropping when the GPS switches on/],
+    ['+ST=GPS,FAIL,bytes=40,nmea=0,cs_err=0,fe=39,line=hi/hi,baud=none', 'Broken data from the GPS', /pad P11/],
     ['+ST=GPS,FAIL,bytes=211,nmea=0,cs_err=0,fe=57,line=lo/act,baud=none', 'Unreadable data from the GPS', /specified part/],
     ['+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=act/lo,off=nmea', 'The GPS does not follow its on/off control', /pad P3/],
     ['+ST=GPS,FAIL,bytes=700,nmea=1,cs_err=0,fe=0,line=act/act,off=nmea', 'The GPS does not follow its on/off control', /pad P3/],
@@ -233,6 +233,25 @@ await test('GPS self-test diagnosis: what the test saw, then assembly checks onl
   eq(d(cases[3][0]).text, 'It sent only 40 bytes, 39 of them corrupted, and no readable position messages.', 'counts quoted plainly');
   eq(d(cases[7][0]).level, 'warn', 'an adopted speed is a warning, not a failure');
   eq(P.evaluateSelftest({ GPS: P.parseStLine(cases[7][0]) }, ['GPS']).verdict, 'PASS', 'an adopted speed still passes');
+  assert(!/dropping|supply/.test(d(cases[3][0]).fixes[0]), 'broken data no longer points at the supply first');
+
+  // Before v1.0.3 the unit itself broke the GPS data (USART1 unclocked whenever the CPU idled).
+  const dv = (l, fw) => P.gpsDiagnosis(P.parseStLine(l), fw);
+  const broken = cases[3][0], unreadable = cases[4][0];
+  for (const fw of ['Naiad v1.0.2 (84c68c7)', 'Naiad v1.0.1+3 (abc1234*) bench', 'Naiad v0.9.9 (x)']) {
+    for (const l of [broken, unreadable]) {
+      const x = dv(l, fw);
+      eq(x && x.title, 'Update the unit before judging its GPS', `${fw}: ${l}`);
+      assert(/latest release/.test(x.fixes.join(' ')), 'tells them to update');
+      assert(x.text.startsWith(fw.match(/Naiad v[\d.]+/)[0]), 'names the version');
+      assert(!design.test([x.title, x.text, ...x.fixes].join(' ')), 'still no design advice');
+    }
+  }
+  for (const fw of ['Naiad v1.0.3 (ff789a5)', 'Naiad v1.1.0 (x)', 'Naiad v2.0.0 (x)', 'CC_TRACKER v0.9.0-factory (sim)', null, undefined, { fw: 1 }])
+    eq(dv(broken, fw).title, 'Broken data from the GPS', `${String(fw)}: assembly checks`);
+  eq(dv(cases[2][0], 'Naiad v1.0.2 (x)').title, 'No data from the GPS', 'a silent receiver is real on any version');
+  eq(dv(cases[5][0], 'Naiad v1.0.2 (x)').title, 'The GPS does not follow its on/off control', 'on/off fault is real on any version');
+  eq(dv('+ST=GPS,PASS,bytes=700,nmea=1,cs_err=0,fe=0,line=fl/act', 'Naiad v1.0.2 (x)'), null, 'a pass is a pass');
 });
 
 await test('Credential validation and CLS paste parsing', () => {

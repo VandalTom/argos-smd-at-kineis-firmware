@@ -349,7 +349,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
             <option value="lo">Not powered</option>
             <option value="fl">Data wire open</option>
             <option value="swap">Cable wired to the wrong pins</option>
-            <option value="sparse">Loose supply connection</option>
+            <option value="sparse">Intermittent data connection</option>
             <option value="baud">Module set to 38400 baud</option>
             <option value="nmea">Wrong module fitted</option>
             <option value="inv">Enable wire fault</option>
@@ -793,7 +793,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.4.6';
+const TOOL_VERSION = '1.4.7';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -1332,7 +1332,19 @@ const GPS_CHECK = {
   part: 'Check the GPS module fitted is the specified part.',
   spare: 'Swap in a known-good GPS module and test again.',
 };
-function gpsDiagnosis(r) {
+/** Before this Naiad version the sensor UART lost its clock whenever the CPU idled: a working
+ *  GPS arrived as a few broken bytes, so such results say nothing about the hardware. */
+const GPS_RX_FIXED = [1, 0, 3];
+function naiadVersion(fw) {
+  const m = /Naiad v(\d+)\.(\d+)\.(\d+)/.exec(typeof fw === 'string' ? fw : '');
+  return m ? { text: m[0], v: m.slice(1).map(Number) } : null;
+}
+/** a < b for [major, minor, patch]. */
+function versionBefore(a, b) {
+  const i = a.findIndex((x, k) => x !== b[k]);
+  return i >= 0 && a[i] < b[i];
+}
+function gpsDiagnosis(r, fw) {
   if (!r || (r.item && r.item !== 'GPS') || !r.detail) return null;
   const kv = {};
   for (const part of r.detail.split(',')) { const i = part.indexOf('='); if (i > 0) kv[part.slice(0, i)] = part.slice(i + 1); }
@@ -1355,12 +1367,16 @@ function gpsDiagnosis(r) {
     return null;
   }
   if (r.verdict !== 'FAIL') return null;
+  const nv = naiadVersion(fw);
+  if (nv && versionBefore(nv.v, GPS_RX_FIXED) && (bytes || fe) && !nmea) return { level: 'fail', title: 'Update the unit before judging its GPS',
+    text: `${nv.text} loses most of what the GPS sends, so this result does not show whether the GPS is fitted correctly.`,
+    fixes: ['Update the unit to the latest release, then run the self-test again.'] };
   if (on === 'hi' && !bytes && !fe) return { level: 'fail', title: 'No data from the GPS',
     text: 'The GPS data line stayed idle: the module sent nothing while switched on.',
     fixes: [C.seated, C.harness, C.data, C.supply, C.enable, C.spare] };
   if ((driven || fe) && bytes < 200 && kv.baud === 'none') return { level: 'fail', title: 'Broken data from the GPS',
     text: `It sent only ${bytes} bytes${fe ? `, ${fe} of them corrupted` : ''}, and no readable position messages.`,
-    fixes: [C.seated, `${C.supply} Watch for it dropping when the GPS switches on.`, C.joints, C.spare] };
+    fixes: [C.seated, C.data, C.supply, C.spare] };
   if (driven || fe) return { level: 'fail', title: 'Unreadable data from the GPS',
     text: 'The GPS is sending, but not in the expected format or speed.',
     fixes: [C.part, 'Check for a solder bridge between pad P11 and its neighbours.', C.spare] };
@@ -4685,7 +4701,7 @@ function renderSelftest() {
     if (def) { vc.append(badge('NOT TESTED', 'idle')); dc.textContent = `${r.verdict} ${r.detail}: ${def.reason}, ${def.hint}`; }
     else if (r) {
       vc.append(badge(r.verdict)); dc.textContent = r.detail || '';
-      const gd = it === 'GPS' ? gpsDiagnosis(r) : null;
+      const gd = it === 'GPS' ? gpsDiagnosis(r, ui.unit.fw) : null;
       if (gd) dc.append(el('div', { class: 'st-diag' }, el('b', { text: gd.title }), `: ${gd.text} ${gd.fixes.join(' ')}`));
     }
     else if (live && run.requested.includes(it)) { vc.append(badge('WAIT', 'run')); dc.textContent = ''; }
@@ -6872,7 +6888,7 @@ const VVIEWS = {
     })));
     if (voy.busy) { out.push(vProgress()); return out; }
     const ev = vSensorEval();
-    const gd = gpsDiagnosis(run && run.items && run.items.GPS);
+    const gd = gpsDiagnosis(run && run.items && run.items.GPS, ui.unit.fw);
     if (ev && ev.verdict === 'PASS') out.push(vState(ev.warnings.length ? 'warn' : 'ok', ev.warnings.length ? 'Required sensors fine, an optional one is not' : 'All lookouts report fair weather', ev.warnings.join(' · ')));
     else if (ev && ev.verdict === 'FAIL') {
       out.push(vState('storm', 'A sensor did not report', ev.reasons.join(' · ')));
