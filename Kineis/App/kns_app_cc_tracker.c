@@ -59,6 +59,8 @@
 #include "mcu_at_console.h"
 #include "mcu_aes.h"
 #include "mcu_misc.h"
+#include "mcu_flash.h"
+#include "mcu_nvm.h"
 
 #include "cc_conf.h"
 #include "cc_console.h"
@@ -1650,6 +1652,22 @@ bool KNS_APP_cc_tracker_isBusy(void)
 	return cc_state != CC_ST_CYCLE_WAIT && cc_state != CC_ST_WAIT_TX_DONE;
 }
 
+/** Store Naiad's radio configuration (CC_RCONF_BYTES) when the flash holds
+ *  another one; the MAC, started after this, then always uses it. */
+static void rconf_enforce(void)
+{
+	static const uint8_t naiad[FLASH_RADIOCONF_BYTE_SIZE] = CC_RCONF_BYTES;
+	uint8_t cur[FLASH_RADIOCONF_BYTE_SIZE];
+
+	if (MCU_FLASH_read(FLASH_USER_START_ADDR + FLASH_RADIOCONF_OFFSET, cur, sizeof(cur)) == KNS_STATUS_OK &&
+	    memcmp(cur, naiad, sizeof(cur)) == 0)
+		return;
+	if (MCU_NVM_setRadioConfZone((void *)naiad, sizeof(naiad)) == KNS_STATUS_OK)
+		MGR_LOG_INFO("[CC] radio configuration set to Naiad's (ESS4 401.62-401.68 MHz, 27 dBm, LDA2)\r\n");
+	else
+		MGR_LOG_ERR("[CC] could not store Naiad's radio configuration\r\n");
+}
+
 void KNS_APP_cc_tracker_init(void)
 {
 	/* IWDG early — before any slow init. STOP2 sleeps far longer than the
@@ -1696,6 +1714,7 @@ void KNS_APP_cc_tracker_init(void)
 			MGR_LOG_ERR("[CC] NOT PROVISIONED (no ID/ADDR/SECKEY) - radio stays off until "
 				"credentials are written over the console\r\n");
 	}
+	rconf_enforce();
 
 	CC_HW_init();
 	MGR_BAT_init();

@@ -182,6 +182,15 @@
 #define CC_COMM_GPS_WINDOW_MS    120000UL  /**< fixed window per fast attempt */
 #define CC_COMM_DONE_MAGIC       0xC0331551UL /**< TAMP BKP12R value = commissioned */
 
+/* ---- Radio configuration ------------------------------------------------------
+ * Naiad's RCONF is a product setting, not part of a credential set: ESS4
+ * 401.62-401.68 MHz, 27 dBm, LDA2 (the 24-byte payload is one LDA2 frame).
+ * The same key is the mcu_nvm.c default. Every boot writes it to flash when the
+ * stored one differs (so once per unit), so a key written over the console only
+ * lasts until the next boot. */
+#define CC_RCONF_BYTES { 0x3d, 0x67, 0x8a, 0xf1, 0x6b, 0x5a, 0x57, 0x20, \
+                        0x78, 0xf3, 0xdb, 0xc9, 0x5a, 0x11, 0x04, 0xe7 }
+
 /* ---- Credentials --------------------------------------------------------------
  * MGR_CRED keeps a CRC-protected mirror of ID/ADDR/SECKEY (page 0x08032800)
  * and restores page 0 from it at boot. With blank credentials and no mirror
