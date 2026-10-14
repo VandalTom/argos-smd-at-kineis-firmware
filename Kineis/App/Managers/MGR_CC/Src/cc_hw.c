@@ -123,6 +123,7 @@ void CC_HW_uartClose(void)
 
 	HAL_NVIC_DisableIRQ(USART1_IRQn);
 	HAL_UART_DeInit(&cc_huart1);
+	__HAL_RCC_USART1_CLK_SLEEP_DISABLE();
 	__HAL_RCC_USART1_CLK_DISABLE();
 
 	/* Park the session's pins analog (never back-feed an unpowered device) */
@@ -175,6 +176,11 @@ bool CC_HW_uartOpenBaud(cc_uart_session_t s, uint32_t baud)
 	}
 
 	__HAL_RCC_USART1_CLK_ENABLE();
+	/* LPM_Init clears every SLEEP-mode clock enable but LPUART1's, so without
+	 * this USART1 stops at each WFI between loop passes and the byte in flight
+	 * comes out as a framing error: a 9600 NMEA stream then yields a few
+	 * broken bytes a second. Cleared again in CC_HW_uartClose. */
+	__HAL_RCC_USART1_CLK_SLEEP_ENABLE();
 
 	memset(&cc_huart1, 0, sizeof(cc_huart1));
 	cc_huart1.Instance = USART1;
@@ -195,6 +201,7 @@ bool CC_HW_uartOpenBaud(cc_uart_session_t s, uint32_t baud)
 #endif
 	if (HAL_UART_Init(&cc_huart1) != HAL_OK) {
 		MGR_LOG_WARN("[CCHW] USART1 init failed (session %d)\r\n", (int)s);
+		__HAL_RCC_USART1_CLK_SLEEP_DISABLE();
 		__HAL_RCC_USART1_CLK_DISABLE();
 		return false;
 	}
