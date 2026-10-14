@@ -194,7 +194,8 @@ console can drive the radio behind the tracker's back:
 
 **Boot self-test** — runs once per boot right after the MAC is ready, and on
 demand. Line-test fast: GPS passes on a checksum-valid NMEA sentence within
-5 s (no fix needed), WS85 on one CRC-valid broadcast (≤ 35 s), ENV on a
+5 s (no fix needed), WS85 on one CRC-valid broadcast (≤ 35 s, longer while
+it finds the sensor's baud), ENV on a
 plausible BME280 reading, ADC on the NiMH voltage being in range, TX on the
 MAC's TX_DONE for one real frame (no satellite pass needed). Report:
 `+ST=<ITEM>,<PASS|FAIL|SKIP>,<detail>` per item, then
@@ -223,6 +224,24 @@ Before v1.0.3, USART1 lost its clock each time the CPU idled between loop
 passes, so GPS (and WS85) data arrived as a few broken bytes a second
 (`fe` high, no NMEA) whatever the receiver did. Update such units before
 reading anything into their GPS results.
+
+The WS85 item passes on one CRC-valid broadcast:
+`+ST=WS85,PASS,wind=<m/s>,dir=<deg>,frames=<n>[,rec=<n>][,baud=<b>]`, or
+`+ST=WS85,FAIL,silent` / `bytes=<n>,crc_err=<n>,fe=<n>,baud=none,head=<hex>`.
+- It listens at the session baud (115200 until it learns another) for up to
+  35 s. A broadcast that does not decode moves the wait for the next one to
+  9600, 19200, then 4800 (12 s each): a factory-reset or freshly flashed WS85
+  talks at 9600. The baud that decodes (`baud=<b>`) is used for the cycle's
+  WS85 sessions until the next boot self-test.
+- `rec` counts broadcasts rebuilt after their first bytes were lost. On the
+  carrier the WS85 data line (P33) idles low between frames (the MCU's
+  ~40 kΩ pull-up loses against the sensor side), so the UART misses each
+  frame's first start bit and garbles its header (`85 03 1C 00` arrives as
+  e.g. `E1 E0 0C`). Every broadcast starts with those four bytes, so the
+  parser puts them back and accepts the frame only when the CRC, the address
+  register and the baud code agree. A 10 kΩ pull-up from P33 to 3.3 V on the
+  carrier removes the cause; v1.0.3 and older read no WS85 data there.
+- `head` is the first bytes heard, for a sensor that sends something else.
 
 Two bench builds (never released) take the GPS path apart; neither starts
 the radio, and both keep the console, `AT+BOOT` and `AT+RESET`:
