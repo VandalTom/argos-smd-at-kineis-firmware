@@ -283,9 +283,26 @@ written and verified) → first signal (TX test) → deployment orders (arm the
 burst or not) → home port (verdict, production-log line, report). Each sea
 shows one plain-language status with what to do next, and how to fix it
 when something fails; seas unlock in order and the chart tracks progress.
+Before the first sea, an optional harbour step, *Prepare your provisions*,
+updates the WS85 wind sensor's own firmware (see below); skipping it never
+blocks the voyage.
 The traditional shanty "Drunken Sailor" plays once when a voyage starts,
 synthesised in the page (Sound on/off; "Music…" switches to a short jingle or
 an audio file of your own, kept in that browser only).
+
+*WS85 firmware*: the tool carries Ecowitt's WS85 V1.1.8
+(`Tools/ws85/WS85_V1.1.8_APP.hex`, unchanged from Ecowitt's package; the
+page embeds its data and the self-test checks both match) and installs it in
+one click over WebHID (Chrome or Edge). On the sensor: take off the white
+silicone sleeve, connect its USB port with a data cable, press RESET (the LED
+flashes quickly: update mode, a HID device 1209:0021). A sensor already on
+that version or newer is left alone unless forced; "Check its version only"
+reads the firmware and bootloader versions without writing; another
+`WS85_Vx.y.z_APP.hex` can be picked instead. An update stopped half way is
+safe to repeat. The update protocol is reimplemented from Breezedude's
+[WS85_WebFlasher](https://github.com/Breezedude/WS85_WebFlasher) (MIT),
+itself reverse-engineered from EcowittISPTool; a simulated WS85 is available
+for practice and the tests.
 
 *Debug probe (SWD)*: for modules the serial update cannot reach (factory
 firmware without the update bootloader, or a silent module), the Flash panel

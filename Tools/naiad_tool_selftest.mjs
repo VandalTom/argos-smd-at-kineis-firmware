@@ -1203,6 +1203,14 @@ await test('WS85: update a simulated sensor V1.1.6 -> V1.1.8 in the captured ord
   eq(sim.firmware, 118, 'sensor reports V1.1.8');
 });
 
+await test('WS85: the commissioning report records the sensor update (and it does not change the verdict)', () => {
+  const ws85 = { ok: true, upToDate: false, from: 'V1.1.6', to: 'V1.1.8', bootloader: 'V1.0.1', file: 'WS85_V1.1.8_APP.hex', size: 68320, durationMs: 9000, sim: false, at: '2026-10-14T08:00:00Z' };
+  const r = P.buildReport({ unit: {}, ws85 });
+  eq(JSON.stringify(r.ws85), JSON.stringify({ ok: true, upToDate: false, from: 'V1.1.6', to: 'V1.1.8', bootloader: 'V1.0.1', file: 'WS85_V1.1.8_APP.hex', simulated: false, at: '2026-10-14T08:00:00Z' }), 'ws85 section');
+  eq(P.buildReport({ unit: {} }).ws85, null, 'no update this session');
+  eq(P.buildReport({ unit: {}, ws85 }).verdict, P.buildReport({ unit: {} }).verdict, 'optional: same verdict');
+});
+
 await test('WS85: up-to-date sensors are left alone; refusals, silence and cancel are reported', async () => {
   const img = P.ws85Builtin();
   const same = S85({ firmware: 118 });

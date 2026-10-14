@@ -176,7 +176,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 .chipbtn[aria-pressed=false] { opacity: .65; text-decoration: line-through; }
 .vmusic { position: relative; margin: -2px 0 10px; padding: 8px 10px; border-radius: 8px; background: rgba(0,0,0,.22); font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
 .vmusic .row { gap: 6px 12px; }
-.route { position: relative; display: grid; grid-template-columns: repeat(7, minmax(92px, 1fr)); min-width: 660px; padding-top: 26px; }
+.route { position: relative; display: grid; grid-template-columns: repeat(var(--seas, 8), minmax(86px, 1fr)); min-width: 700px; padding-top: 26px; }
 .route::before { content: ""; position: absolute; left: 7%; right: 7%; top: 56px; border-top: 2px dashed rgba(255,255,255,.55); }
 .sea { position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0 2px; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; text-align: center; }
 .sea:disabled { cursor: default; opacity: .7; }
@@ -185,10 +185,11 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 .sea.done .isle { background: #2f9e5b; color: #fff; }
 .sea.warn .isle { background: #e0a526; color: #3a2800; }
 .sea.storm .isle { background: #c8323b; color: #fff; }
+.sea.optional .isle { border-style: dashed; font-size: 19px; }
 .sea.current .isle { transform: scale(1.18); border-color: #ffe08a; }
 .sea .name { font-size: 11px; opacity: .85; text-transform: uppercase; letter-spacing: .6px; }
 .sea .task { font-size: 12.5px; font-weight: 650; line-height: 1.2; }
-.ship { position: absolute; top: 0; left: 0; width: calc(100% / 7); display: flex; justify-content: center; pointer-events: none; transition: left .7s ease-in-out; }
+.ship { position: absolute; top: 0; left: 0; width: calc(100% / var(--seas, 8)); display: flex; justify-content: center; pointer-events: none; transition: left .7s ease-in-out; }
 .ship svg { width: 32px; height: 28px; filter: drop-shadow(0 2px 2px rgba(0,0,0,.35)); animation: bob 2.6s ease-in-out infinite; }
 @keyframes bob { 50% { transform: translateY(-3px) rotate(-3deg); } }
 .vcard { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
@@ -793,7 +794,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.4.7';
+const TOOL_VERSION = '1.5.0';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -2083,6 +2084,7 @@ function buildReport(s) {
       ok: !!flash.ok, file: flash.file, size: flash.size, crc: flash.crc, verifyCrc: flash.verifyCrc, oldFw: flash.oldFw, newFw: flash.newFw,
       expectFw: flash.expectFw, fwCheck: flash.fwCheck, bootloader: flash.bootloader ? flash.bootloader.version : null, error: flash.error || null, at: flash.startedAt,
     } : null,
+    ws85: s.ws85 ? { ok: !!s.ws85.ok, upToDate: !!s.ws85.upToDate, from: s.ws85.from || null, to: s.ws85.to || null, bootloader: s.ws85.bootloader || null, file: s.ws85.file || null, simulated: !!s.ws85.sim, at: s.ws85.at || null } : null,
     credentials: creds ? {
       ok: !!creds.ok, at: creds.at, error: creds.error || null, warnings: creds.warnings || [],
       checks: (creds.checks || []).map(c => ({ field: c.field, expected: c.expected, actual: c.actual, ok: c.ok, note: c.note })),
@@ -4379,7 +4381,7 @@ const ui = {
   link: null, transport: null, sim: null, port: null, mode: null, op: null,
   unit: {}, image: null, flash: null, selftest: null, creds: null, commission: null, commUpdated: null,
   unsupported: new Set(), lastPoll: 0, history: [], histPos: -1, lastFailedFlash: false,
-  mon: new UnitMonitor(), wizard: null,
+  mon: new UnitMonitor(), wizard: null, ws85: null,
 };
 
 /* ---------- small helpers ---------- */
@@ -6227,7 +6229,7 @@ async function pollTick() {
 function currentReport() {
   return buildReport({
     unit: ui.unit, selftest: ui.selftest, required: requiredItems(), commission: ui.commission, flash: ui.flash, creds: ui.creds,
-    rescue: !!ui.mon.rescue, prov: ui.mon.prov, wizard: ui.wizard,
+    rescue: !!ui.mon.rescue, prov: ui.mon.prov, wizard: ui.wizard, ws85: ui.ws85,
     operator: $('#repOperator').value.trim(), notes: $('#repNotes').value.trim(),
     transport: ui.transport ? (ui.transport.kind === 'sim' ? 'simulator' : 'serial') : null, baud: ui.link ? ui.link.baud : null,
   });
@@ -6475,6 +6477,31 @@ class WebHidDapIo {
     const reply = new Promise(resolve => { this.waiter = resolve; });
     await this.device.sendReport(this.reportId, buf);
     return withTimeout(reply, 'HID');
+  }
+  async close() { try { this.device.removeEventListener('inputreport', this.onReport); await this.device.close(); } catch (e) { /* unplugged */ } }
+}
+
+/** WS85 in update mode over WebHID (1209:0021, report ID 0, 64-byte reports). A sensor this page was
+ *  already allowed to use is opened without asking again. */
+class WebHidWs85Io {
+  constructor(device) { this.device = device; this.waiter = null; this.label = device.productName || 'WS85 (update mode)'; }
+  static async request() {
+    const mine = d => d.vendorId === WS85.VID && d.productId === WS85.PID;
+    let dev = (await navigator.hid.getDevices()).find(mine);
+    if (!dev) [dev] = await navigator.hid.requestDevice({ filters: [{ vendorId: WS85.VID, productId: WS85.PID }] });
+    if (!dev) throw Object.assign(new Ws85Error('No WS85 selected'), { name: 'NotFoundError' });
+    const io = new WebHidWs85Io(dev);
+    await io.open();
+    return io;
+  }
+  async open() {
+    if (!this.device.opened) await this.device.open();
+    this.onReport = e => { if (this.waiter) { const w = this.waiter; this.waiter = null; w(new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength)); } };
+    this.device.addEventListener('inputreport', this.onReport);
+  }
+  xfer(frame) {
+    const reply = new Promise(resolve => { this.waiter = resolve; });     // listening before sending: no reply is missed
+    return this.device.sendReport(0, frame).then(() => reply);
   }
   async close() { try { this.device.removeEventListener('inputreport', this.onReport); await this.device.close(); } catch (e) { /* unplugged */ } }
 }
@@ -6751,6 +6778,7 @@ function initSwd() {
  * skipped on purpose. */
 
 const VSTEPS = [
+  { key: 'provisions', sea: 'Harbour', task: 'Prepare your provisions', optional: true },
   { key: 'connect', sea: 'North Atlantic', task: 'Hail the module' },
   { key: 'firmware', sea: 'South Atlantic', task: 'Fresh firmware' },
   { key: 'sensors', sea: 'Indian Ocean', task: 'Sensor check' },
@@ -6770,7 +6798,8 @@ const SENSOR_INFO = {
 const K_VOYAGES = 'naiadTool.voyages.v1';
 const SHIP_SVG = '<svg viewBox="0 0 40 34" aria-hidden="true"><path d="M20 3 20 24 8 24Z" fill="#fff"/><path d="M22 7 22 24 33 24Z" fill="#ffe08a"/><path d="M4 26H36L31 32H9Z" fill="#8b4a22"/><path d="M20 2V26" stroke="#5b3a1a" stroke-width="1.5"/></svg>';
 
-const voy = { step: 0, busy: false, prog: null, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, src: null, manual: false, raf: 0, hailed: false, sang: false, swdOpen: false, swdKind: 'stlink', swdDone: null };
+const voy = { step: 0, busy: false, prog: null, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, src: null, manual: false, raf: 0, hailed: false, sang: false, swdOpen: false, swdKind: 'stlink', swdDone: null,
+  ws85Src: 'usb', ws85File: null, ws85Check: null, ws85Sim: null };
 
 /** Small DOM builder: el('div', { class, text, onclick, ...attrs }, ...children) */
 function el(tag, props = {}, ...kids) {
@@ -6831,6 +6860,10 @@ function vSensorEval() {
 function vStatus(key) {
   const conn = vConn();
   switch (key) {
+    case 'provisions':
+      if (voy.err.provisions && !voy.skip.provisions) return 'storm';
+      if (ui.ws85 && ui.ws85.ok) return 'done';
+      return voy.err.provisions ? 'warn' : 'optional';             // skipped after a failed update: choppy
     case 'connect':
       if (!conn) return voy.err.connect ? 'storm' : 'todo';
       if (ui.mode === 'app') return ui.mon.rescue ? 'warn' : 'done';
@@ -6866,7 +6899,10 @@ function vStatus(key) {
   }
   return 'todo';
 }
-const vPassable = st => st === 'done' || st === 'warn';
+const vPassable = st => st === 'done' || st === 'warn' || st === 'optional';
+const vRequiredSeas = () => VSTEPS.filter(s => !s.optional).length;
+/** 1-based number of step i among the required seas (optional ones are not counted). */
+const vSeaNo = i => VSTEPS.slice(0, i + 1).filter(s => !s.optional).length;
 function vReachable() {
   let i = 0;
   while (i < VSTEPS.length - 1 && vPassable(vStatus(VSTEPS[i].key))) i++;
@@ -6882,15 +6918,16 @@ function vRenderChart() {
   const route = $('#vRoute');
   route.innerHTML = '';
   const reach = vReachable();
+  route.style.setProperty('--seas', VSTEPS.length);
   let done = 0;
   VSTEPS.forEach((s, i) => {
     const st = vStatus(s.key);
-    if (vPassable(st)) done++;
-    const mark = { done: '✓', warn: '✓', storm: '!' }[st] || String(i + 1);
-    const label = { done: 'done', warn: 'done with a warning', storm: 'needs attention', todo: i <= reach ? 'to do' : 'locked' }[st];
+    if (!s.optional && (st === 'done' || st === 'warn')) done++;
+    const mark = { done: '✓', warn: '✓', storm: '!' }[st] || (s.optional ? '⚓' : String(vSeaNo(i)));
+    const label = { done: 'done', warn: 'done with a warning', storm: 'needs attention', optional: 'optional', todo: i <= reach ? 'to do' : 'locked' }[st];
     route.append(el('button', {
       type: 'button', class: `sea ${st}${i === voy.step ? ' current' : ''}`, disabled: i > reach || voy.busy,
-      'aria-current': i === voy.step ? 'step' : null, 'aria-label': `Sea ${i + 1}, ${s.sea}: ${s.task}, ${label}`,
+      'aria-current': i === voy.step ? 'step' : null, 'aria-label': `${s.optional ? 'Before sailing' : `Sea ${vSeaNo(i)}`}, ${s.sea}: ${s.task}, ${label}`,
       onclick: () => { voy.step = i; vRender(); },
     }, el('span', { class: 'isle', 'aria-hidden': 'true', text: mark }), el('span', { class: 'name', text: s.sea }), el('span', { class: 'task', text: s.task })));
   });
@@ -6898,7 +6935,7 @@ function vRenderChart() {
   ship.innerHTML = SHIP_SVG;
   route.append(ship);
   const voyages = store.get(K_VOYAGES, 0);
-  $('#vTally').textContent = `${done} of 7 seas crossed${voyages ? ` · ${voyages} voyage${voyages === 1 ? '' : 's'} completed on this computer` : ''}`;
+  $('#vTally').textContent = `${done} of ${vRequiredSeas()} seas crossed${voyages ? ` · ${voyages} voyage${voyages === 1 ? '' : 's'} completed on this computer` : ''}`;
 }
 function vProgress() {
   const p = voy.prog || { text: 'Working…' };
@@ -6946,7 +6983,7 @@ function vRender() {
   const focusId = card.contains(document.activeElement) ? document.activeElement.id : null;
   card.innerHTML = '';
   const s = VSTEPS[voy.step];
-  card.append(el('div', { class: 'vkicker', text: `Sea ${voy.step + 1} of 7 · ${s.sea}` }), el('h3', { text: s.task }));
+  card.append(el('div', { class: 'vkicker', text: s.optional ? `Before sailing · ${s.sea} · optional` : `Sea ${vSeaNo(voy.step)} of ${vRequiredSeas()} · ${s.sea}` }), el('h3', { text: s.task }));
   card.append(...VVIEWS[s.key]().filter(Boolean));
   card.append(vNav());
   const log = vLog(); if (log) card.append(log);
@@ -6994,6 +7031,45 @@ async function vSelftest(items, label) {
 
 /* ---- the seas ---- */
 const VVIEWS = {
+  provisions() {
+    const out = [], img = voy.ws85File || vWs85Builtin(), hid = 'hid' in navigator, practice = voy.ws85Src === 'sim' || !hid;
+    out.push(vLead(`Optional, before you hail the module: bring the WS85 wind sensor’s own firmware up to date. This tool carries Ecowitt’s WS85 ${img.version || 'firmware'} and installs it over the sensor’s USB port in under a minute. Skip ahead if the sensor is already up to date or not part of this voyage.`));
+    if (voy.busy) { out.push(vProgress()); return out; }
+    const done = ui.ws85 && ui.ws85.ok ? ui.ws85 : null, err = voy.err.provisions;
+    if (done) {
+      out.push(done.upToDate
+        ? vState('ok', `The WS85 is up to date (${done.from || done.to})`, done.checkedOnly ? 'Read without changing anything.' : 'Nothing needed writing.')
+        : vState('ok', `WS85 updated${done.from ? ` from ${done.from}` : ''} to ${done.to || 'the new firmware'}`, `${Math.round(done.size / 1024)} KB written in ${fmtSecs(done.durationMs)}${done.sim ? ' (practice run)' : ''}.`));
+      out.push(vFixes(['Unplug the USB cable: the WS85 leaves update mode and starts its firmware.', 'Refit the white silicone sleeve before the sensor goes outside.']));
+    } else if (voy.ws85Check) {
+      const c = voy.ws85Check;
+      out.push(vState('info', `The WS85 runs ${c.firmwareText || 'an unknown version'}${c.bootloaderText ? ` (bootloader ${c.bootloaderText})` : ''}`,
+        img.versionNum != null && c.firmware != null && c.firmware < img.versionNum ? `${img.version} is newer: update it.` : 'Press RESET or unplug the USB cable to leave update mode.'));
+    }
+    if (err) { out.push(vState(err.kind || 'storm', err.title, err.text)); if (err.fixes) out.push(vFixes(err.fixes)); }
+    if (!done) out.push(vFixes([
+      'Take the white silicone sleeve off the WS85 and connect its USB port to this computer with a USB data cable (a charge-only cable connects nothing).',
+      'Press the WS85’s RESET button: its LED flashes quickly while it waits for new firmware (update mode).',
+      `Click Update and choose the WS85 in the browser’s list (it only appears in update mode). A sensor already on ${img.version || 'this version'} or newer is left as it is.`,
+    ]));
+    if (hid) out.push(el('div', { class: 'vchoices', role: 'group', 'aria-label': 'Which WS85' },
+      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(!practice), onclick: () => { voy.ws85Src = 'usb'; vRender(); } },
+        el('b', { text: 'WS85 on USB' }), el('span', { text: 'The sensor itself, in update mode.' })),
+      el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(practice), onclick: () => { voy.ws85Src = 'sim'; vRender(); } },
+        el('b', { text: 'Practice (simulated WS85)' }), el('span', { text: 'Rehearse the update; no sensor needed.' }))));
+    else out.push(vState('info', 'This browser cannot reach the WS85', 'The update needs WebHID: use Chrome or Edge on a computer. You can still practise here.'));
+    out.push(el('div', { class: 'vactions' },
+      vBtn(`Update the ${practice ? 'simulated ' : ''}WS85 to ${img.version || img.name}`, () => vWs85Run('flash'), { primary: !done }),
+      vBtn('Check its version only', () => vWs85Run('check')),
+      done && done.upToDate ? vLink('Write it anyway', () => vWs85Run('flash', true)) : null,
+      err && !voy.skip.provisions ? vLink('Skip the WS85 update for this voyage', () => { voy.skip.provisions = true; vRender(); }) : null));
+    out.push(el('details', { class: 'help' }, el('summary', { text: voy.ws85File ? `Firmware file: ${voy.ws85File.name}` : 'Use another WS85 firmware file' }),
+      el('p', { class: 'vtext', text: `Ecowitt publishes WS85 firmware as WS85_Vx.y.z_APP.hex on the WS85 page of ecowitt.com. Pick a newer one here instead of the preloaded ${vWs85Builtin().version}. Update protocol after Breezedude’s WS85_WebFlasher (MIT licence).` }),
+      el('input', { type: 'file', accept: '.hex', id: 'vWs85File', onchange: e => void vWs85Pick(e.target.files[0]) }),
+      voy.ws85File ? vLink(`Back to the preloaded ${vWs85Builtin().version}`, () => { voy.ws85File = null; vRender(); }) : null));
+    return out;
+  },
+
   connect() {
     const conn = vConn(), out = [];
     out.push(vLead('Connect the USB-serial adapter to this computer and to the module, and power the module. Then hail it: the tool finds the module and reads what it is running. No module at hand? Practise the whole voyage on a simulated one.'));
@@ -7374,11 +7450,80 @@ async function vNextUnit() {
   const sim = ui.transport && ui.transport.kind === 'sim';
   await disconnect(false);
   if (sim) ensureSim(true);
-  Object.assign(ui, { unit: {}, selftest: null, flash: null, creds: null, commission: null, wizard: null });
-  Object.assign(voy, { step: 0, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, manual: false, sang: false, swdOpen: false, swdDone: null, swdCheck: null });
+  Object.assign(ui, { unit: {}, selftest: null, flash: null, creds: null, commission: null, wizard: null, ws85: null });
+  Object.assign(voy, { step: 0, err: {}, skip: {}, orders: null, ordersPick: 'ARM', logged: false, manual: false, sang: false, swdOpen: false, swdDone: null, swdCheck: null, ws85Check: null, ws85Sim: null });
   renderUnit(); renderSelftest(); renderCommission(); renderReport();
   note(sim ? 'New simulated module ready: hail it.' : 'Connect the next module, then hail it.');
   vRender();
+}
+
+/* ---- WS85 firmware from the Voyage view ---- */
+let ws85BuiltinCache = null;
+function vWs85Builtin() { return ws85BuiltinCache || (ws85BuiltinCache = ws85Builtin()); }
+async function vWs85Pick(file) {
+  if (!file) return;
+  try {
+    voy.ws85File = ws85Image(await file.text(), file.name);
+    voy.err.provisions = null;
+    note(`WS85 firmware file: ${file.name} (${voy.ws85File.size} bytes${voy.ws85File.version ? `, ${voy.ws85File.version}` : ''})`);
+  } catch (e) {
+    voy.ws85File = null;
+    voy.err.provisions = { title: 'That file is not WS85 firmware', text: e.message, fixes: ['Pick the WS85_Vx.y.z_APP.hex file from Ecowitt’s WS85 firmware package.'] };
+  }
+  vRender();
+}
+/** What went wrong, in words a technician can act on. */
+function ws85Problem(e) {
+  const F = {
+    reset: 'Press the WS85’s RESET button (its LED flashes quickly), then try again.',
+    cable: 'Use a USB data cable: a charge-only cable connects nothing.',
+    isp: 'Close EcowittISPTool if it is open: only one program can use the sensor at a time.',
+    again: 'Run the update again: a half-finished update is safe to repeat.',
+  };
+  if (e instanceof CancelledError) return { kind: 'warn', title: 'WS85 update stopped', text: 'The sensor stays in update mode until it has complete firmware.', fixes: [F.again] };
+  if (e && e.name === 'NotFoundError') return { title: 'No WS85 was chosen', text: 'The browser lists the WS85 only while it is in update mode.', fixes: [F.reset, F.cable, F.isp] };
+  if (e && (e.name === 'SecurityError' || e.name === 'NotAllowedError')) return { title: 'The browser blocked the WS85', text: e.message, fixes: ['Allow this page to use HID devices, or open the tool in Chrome or Edge.'] };
+  if (e && e.code === 'timeout') return { title: 'The WS85 stopped answering', text: e.message, fixes: ['Keep the USB cable plugged in until the update finishes.', F.reset, F.again] };
+  if (e && e.code === 'refused') return { title: 'The WS85 refused the firmware', text: e.message, fixes: ['Check the file is WS85 firmware (WS85_Vx.y.z_APP.hex), not for a WS80 or WS90.', F.reset, F.again] };
+  return { title: 'The WS85 could not be updated', text: (e && e.message) || String(e), fixes: [F.isp, F.reset, F.again] };
+}
+async function vWs85Run(action, force = false) {
+  const practice = voy.ws85Src === 'sim' || !('hid' in navigator), check = action === 'check';
+  const img = voy.ws85File || vWs85Builtin();
+  await vDo(check ? 'Reading the WS85' : 'Updating the WS85', async () => {
+    voy.err.provisions = null; voy.skip.provisions = false;
+    vSetProg(practice ? 'Waking the simulated WS85…' : 'Choose the WS85 in the browser’s list…');
+    let io;
+    try { io = practice ? (voy.ws85Sim = voy.ws85Sim || new SimWs85()) : await WebHidWs85Io.request(); }
+    catch (e) { voy.err.provisions = ws85Problem(e); return; }
+    const ac = new AbortController();
+    ui.op = { name: check ? 'Reading the WS85' : 'WS85 update', ac, cancellable: !check, started: Date.now() };
+    renderOp(); updateControls(); vRender();     // the card's progress gets its Cancel button
+    const at = new Date().toISOString();
+    try {
+      if (check) {
+        vSetProg('Reading the WS85 firmware version…');
+        const h = await ws85Hello(io, { signal: ac.signal });
+        voy.ws85Check = h;
+        note(`WS85: firmware ${h.firmwareText || 'unknown'}, bootloader ${h.bootloaderText || 'unknown'}${practice ? ' (practice)' : ''}`);
+        if (img.versionNum != null && h.firmware != null && h.firmware >= img.versionNum)
+          ui.ws85 = { ok: true, upToDate: true, checkedOnly: true, from: h.firmwareText, to: h.firmwareText, bootloader: h.bootloaderText, file: null, size: 0, durationMs: 0, sim: practice, at };
+      } else {
+        const r = await ws85Flash(io, img, { signal: ac.signal, force,
+          onProgress: (d, t) => vSetProg(`Writing ${img.version || 'the firmware'} to the WS85: ${Math.floor((d * 100) / t)} % · ⚓ loading provisions`, d, t) });
+        ui.ws85 = { ...r, sim: practice, at };
+        voy.ws85Check = null;
+        note(r.upToDate ? `WS85 already on ${r.from}: nothing written` : `WS85 updated ${r.from || '?'} → ${r.to || img.name} (${r.size} bytes in ${fmtSecs(r.durationMs)})${practice ? ' (practice)' : ''}`);
+      }
+      renderReport();
+    } catch (e) {
+      voy.err.provisions = ws85Problem(e);
+      note(`WS85: ${e.message}`, e instanceof CancelledError ? 'warn' : 'error');
+    } finally {
+      ui.op = null; renderOp(); updateControls();
+      if (!practice) await io.close();
+    }
+  });
 }
 
 /* ---- SWD from the Voyage view ---- */
