@@ -256,6 +256,21 @@ await test('GPS self-test diagnosis: what the test saw, then assembly checks onl
   eq(dv('+ST=GPS,PASS,bytes=700,nmea=1,cs_err=0,fe=0,line=fl/act', 'Naiad v1.0.2 (x)'), null, 'a pass is a pass');
 });
 
+await test('WS85 self-test diagnosis: old firmware, unreadable data, another speed', () => {
+  const d = (l, fw) => P.ws85Diagnosis(P.parseStLine(l), fw);
+  eq(d('+ST=WS85,PASS,wind=0.0,dir=311,frames=1,rec=1', 'Naiad v1.0.4 (x)'), null, 'a recovered reading is a plain pass');
+  eq(d('+ST=WS85,PASS,wind=2.1,dir=90,frames=1,baud=9600', 'Naiad v1.0.4 (x)').level, 'warn', 'another speed: a note');
+  eq(d('+ST=WS85,FAIL,silent', 'Naiad v1.0.3 (x)'), null, 'silent: the generic advice');
+  const old = d('+ST=WS85,FAIL,bytes=133,crc_err=0', 'Naiad v1.0.3 (ff789a5)');
+  eq(old.title, 'Update the unit before judging its WS85', 'v1.0.3 failure');
+  assert(/Naiad v1\.0\.3/.test(old.text) && /latest release/.test(old.fixes[0]), 'names the version, says update');
+  const bad = d('+ST=WS85,FAIL,bytes=35,crc_err=0,fe=8,baud=none,head=E1600C85', 'Naiad v1.0.4 (x)');
+  eq(bad.title, 'The WS85 sends data the unit cannot read', 'fixed firmware: assembly checks');
+  assert(/E1 60 0C 85/.test(bad.text) && /pad P33/.test(bad.fixes.join(' ')), 'first bytes and the data wire');
+  eq(P.sensorDiagnosis('GPS', P.parseStLine('+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=fl/fl'), null).title, 'No connection to the GPS data line', 'GPS still routed');
+  eq(P.sensorDiagnosis('ENV', P.parseStLine('+ST=ENV,FAIL,x'), null), null, 'other items: none');
+});
+
 await test('Credential validation and CLS paste parsing', () => {
   const key = '00112233445566778899AABBCCDDEEFF', rc = 'A1B2C3D4E5F60718293A4B5C6D7E8F90';
   const ok = P.validateCredentials({ id: ' 1234567 ', addr: '0a1b2c3d', seckey: key.toLowerCase(), rconf: '' });

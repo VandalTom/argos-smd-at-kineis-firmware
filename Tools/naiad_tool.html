@@ -794,7 +794,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.5.0';
+const TOOL_VERSION = '1.5.1';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -1345,6 +1345,36 @@ function versionBefore(a, b) {
   const i = a.findIndex((x, k) => x !== b[k]);
   return i >= 0 && a[i] < b[i];
 }
+const WS85_CHECK = {
+  seated: 'Check the WS85 cable is fully seated at both ends and undamaged.',
+  data: 'Check the WS85 data wire and its solder joint at pad P33.',
+  firmware: 'Check the WS85 runs firmware V1.1.6 or newer with its UART output enabled (Voyage, Harbour: Check its version only).',
+  spare: 'Swap in a known-good WS85 and test again.',
+};
+/** Before this Naiad version the WS85 item failed when the sensor's data line idled low between frames
+ *  (each frame lost its first bytes) or when the sensor talked at 9600 baud (factory setting, and after
+ *  a firmware update): such results say nothing about the sensor. */
+const WS85_RX_FIXED = [1, 0, 4];
+function ws85Diagnosis(r, fw) {
+  if (!r || (r.item && r.item !== 'WS85') || !r.detail) return null;
+  const kv = {};
+  for (const part of r.detail.split(',')) { const i = part.indexOf('='); if (i > 0) kv[part.slice(0, i)] = part.slice(i + 1); }
+  if (r.verdict === 'PASS') return kv.baud ? { level: 'warn', title: 'The WS85 is set to a different speed',
+    text: `It talks at ${kv.baud} baud instead of 115200, as a freshly updated or reset WS85 does. The unit adapts every time it starts, so its readings are fine.`, fixes: [] } : null;
+  if (r.verdict !== 'FAIL') return null;
+  const bytes = Number(kv.bytes) || 0, nv = naiadVersion(fw);
+  if (bytes && nv && versionBefore(nv.v, WS85_RX_FIXED)) return { level: 'fail', title: 'Update the unit before judging its WS85',
+    text: `The WS85 is sending (${bytes} bytes), but ${nv.text} cannot read every WS85, so this result does not show whether the sensor is fitted correctly.`,
+    fixes: ['Update the unit to the latest release, then run the self-test again.'] };
+  if (bytes) return { level: 'fail', title: 'The WS85 sends data the unit cannot read',
+    text: `${bytes} bytes arrived, but no complete reading${kv.head ? ` (it started ${kv.head.match(/../g).join(' ')})` : ''}.`,
+    fixes: [WS85_CHECK.seated, WS85_CHECK.data, WS85_CHECK.firmware, WS85_CHECK.spare] };
+  return null;                                       // silent: the generic WS85 advice applies
+}
+/** Plain-words advice for a sensor item, or null. */
+function sensorDiagnosis(item, r, fw) {
+  return item === 'GPS' ? gpsDiagnosis(r, fw) : item === 'WS85' ? ws85Diagnosis(r, fw) : null;
+}
 function gpsDiagnosis(r, fw) {
   if (!r || (r.item && r.item !== 'GPS') || !r.detail) return null;
   const kv = {};
@@ -1411,7 +1441,7 @@ function evaluateSelftest(items, required) {
 
 /** Explicit run: AT+SELFTEST=[items]. Collects +ST= lines until +SELFTEST=PASS|FAIL. */
 async function runSelftest(link, items, opts = {}) {
-  const { signal, timeout = 150000, pendingTimeout = 240000 } = opts;
+  const { signal, timeout = 210000, pendingTimeout = 240000 } = opts;
   const onUpdate = opts.onUpdate || (() => {});
   const sel = ST_ITEMS.filter(i => items.includes(i));
   const bad = items.filter(i => !ST_ITEMS.includes(i));
@@ -4284,7 +4314,7 @@ const NaiadProtocol = {
   redactLine, LineSplitter, Mutex, Link, flushLine, WAKE_IDLE_MS,
   atCmd, atError, normalizeIdReadback, querySecKeyCrc, detectUnit, waitForApp, readUnitInfo, resetApp,
   parseKv, parseState, awakeDuty, deviceClock, parseRescueLine, UnitMonitor, parseCommission, getState, commissionCmd,
-  parseStLine, parseSelftestStatus, newRun, txDeferral, isTxDeferred, gpsDiagnosis, evaluateSelftest, runSelftest, querySelftest, pollBootSelftest,
+  parseStLine, parseSelftestStatus, newRun, txDeferral, isTxDeferred, gpsDiagnosis, ws85Diagnosis, sensorDiagnosis, evaluateSelftest, runSelftest, querySelftest, pollBootSelftest,
   WIZARD_STEPS, commissionUnit, lastOrBootSelftest,
   validateCredentials, parseCredentialText, seckeyCrc, readCredentials, compareCredentials, provisionCredentials, eraseCredentials,
   analyzeImage, writeOrder, sendOrderCrc, buildWriteLine, parseDfuInfo, dfuCmd, blPing, requestBoot, flashFirmware, bootloaderCheck, exitBootloader,
@@ -4906,8 +4936,8 @@ function renderSelftest() {
     if (def) { vc.append(badge('NOT TESTED', 'idle')); dc.textContent = `${r.verdict} ${r.detail}: ${def.reason}, ${def.hint}`; }
     else if (r) {
       vc.append(badge(r.verdict)); dc.textContent = r.detail || '';
-      const gd = it === 'GPS' ? gpsDiagnosis(r, ui.unit.fw) : null;
-      if (gd) dc.append(el('div', { class: 'st-diag' }, el('b', { text: gd.title }), `: ${gd.text} ${gd.fixes.join(' ')}`));
+      const gd = sensorDiagnosis(it, r, ui.unit.fw);
+      if (gd) dc.append(el('div', { class: 'st-diag' }, el('b', { text: gd.title }), `: ${gd.text}${gd.fixes.length ? ` ${gd.fixes.join(' ')}` : ''}`));
     }
     else if (live && run.requested.includes(it)) { vc.append(badge('WAIT', 'run')); dc.textContent = ''; }
     else { vc.textContent = '—'; dc.textContent = ''; }
@@ -7040,7 +7070,8 @@ const VVIEWS = {
       out.push(done.upToDate
         ? vState('ok', `The WS85 is up to date (${done.from || done.to})`, done.checkedOnly ? 'Read without changing anything.' : 'Nothing needed writing.')
         : vState('ok', `WS85 updated${done.from ? ` from ${done.from}` : ''} to ${done.to || 'the new firmware'}`, `${Math.round(done.size / 1024)} KB written in ${fmtSecs(done.durationMs)}${done.sim ? ' (practice run)' : ''}.`));
-      out.push(vFixes(['Unplug the USB cable: the WS85 leaves update mode and starts its firmware.', 'Refit the white silicone sleeve before the sensor goes outside.']));
+      out.push(vFixes(['Unplug the USB cable: the WS85 leaves update mode and starts its firmware.', 'Refit the white silicone sleeve before the sensor goes outside.',
+        ...(done.upToDate ? [] : ['A freshly updated WS85 may talk at 9600 baud: the module (Naiad v1.0.4 or later) finds its speed when it starts.'])]));
     } else if (voy.ws85Check) {
       const c = voy.ws85Check;
       out.push(vState('info', `The WS85 runs ${c.firmwareText || 'an unknown version'}${c.bootloaderText ? ` (bootloader ${c.bootloaderText})` : ''}`,
@@ -7167,14 +7198,18 @@ const VVIEWS = {
     })));
     if (voy.busy) { out.push(vProgress()); return out; }
     const ev = vSensorEval();
-    const gd = gpsDiagnosis(run && run.items && run.items.GPS, ui.unit.fw);
+    const diag = Object.fromEntries(['GPS', 'WS85'].map(i => [i, sensorDiagnosis(i, run && run.items && run.items[i], ui.unit.fw)]));
     if (ev && ev.verdict === 'PASS') out.push(vState(ev.warnings.length ? 'warn' : 'ok', ev.warnings.length ? 'Required sensors fine, an optional one is not' : 'All lookouts report fair weather', ev.warnings.join(' · ')));
     else if (ev && ev.verdict === 'FAIL') {
       out.push(vState('storm', 'A sensor did not report', ev.reasons.join(' · ')));
-      const fixes = SENSOR_ITEMS.filter(i => run.items[i] && run.items[i].verdict === 'FAIL').flatMap(i => i === 'GPS' && gd ? [] : [`${SENSOR_INFO[i].name}: ${SENSOR_INFO[i].fix}`]);
+      const fixes = SENSOR_ITEMS.filter(i => run.items[i] && run.items[i].verdict === 'FAIL').flatMap(i => diag[i] ? [] : [`${SENSOR_INFO[i].name}: ${SENSOR_INFO[i].fix}`]);
       if (fixes.length) out.push(vFixes(fixes));
     }
-    if (gd) { out.push(vState(gd.level === 'warn' ? 'warn' : 'storm', `GPS: ${gd.title}`, gd.text)); out.push(vFixes(gd.fixes)); }
+    for (const [i, gd] of Object.entries(diag)) {
+      if (!gd) continue;
+      out.push(vState(gd.level === 'warn' ? 'warn' : 'storm', `${i}: ${gd.title}`, gd.text));
+      if (gd.fixes.length) out.push(vFixes(gd.fixes));
+    }
     out.push(el('div', { class: 'vactions' },
       vBtn(ev ? 'Check again' : 'Check the sensors', () => vDo('Checking the sensors', async () => { voy.skip.sensors = false; await vSelftest(SENSOR_ITEMS, 'Checking the sensors (up to a minute)…'); }), { primary: !ev || ev.verdict !== 'PASS', disabled: !vConn() || ui.mode !== 'app' }),
       ev && ev.verdict === 'FAIL' ? vLink('Continue anyway (recorded in the report)', () => { voy.skip.sensors = true; vRender(); }) : null));
