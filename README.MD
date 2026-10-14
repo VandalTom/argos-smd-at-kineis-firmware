@@ -310,10 +310,19 @@ the file also works opened locally, without the release list and the team vault)
 Chrome or Edge (Web Serial), no install: connect, unit info (FW, ID, state,
 battery tier, device UTC), flash with progress and the vector-table-last
 order, self-test, credential entry (key masked, checked by CRC),
-commissioning controls, console, JSON/CSV reports, and a guided "Commission
+commissioning controls, console, reports, and a guided "Commission
 unit" wizard. A built-in simulator runs everything without hardware;
 `node Tools/naiad_tool_selftest.mjs` tests the protocol layer against it.
 Windows blocks PL2303 clones: use a CP2102/CH340/FTDI adapter.
+
+*Reports*: one PDF per unit for people to read and file (A4: serial number,
+Argos ID, firmware, a PASS/FAIL/INCOMPLETE banner with the reasons, the
+credentials written and read back, each self-test result in words with the
+unit's raw line under it and what to check when one fails, firmware updates,
+deployment orders, operator and a sign-off line; the key only as its CRC-32;
+reports from the simulator are marked as such), the same data as JSON, and
+one production-CSV line per unit. The guided run downloads the PDF by
+default; in the Voyage view, writing a unit in the logbook saves it.
 
 *Voyage view* (default for new users; "Pro" in the header switches to the
 full panel view, and the choice is remembered): a step-by-step route through

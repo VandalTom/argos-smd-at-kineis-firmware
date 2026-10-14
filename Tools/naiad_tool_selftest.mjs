@@ -13,7 +13,7 @@
  * Exit code 0 = all tests passed.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { deflateRawSync } from 'node:zlib';
@@ -51,6 +51,32 @@ async function test(name, fn) {
 }
 
 const ascii = s => P.asciiBytes(s);
+/** Checks a PDF's structure (header, every xref offset, stream lengths, page count, ASCII body). */
+function pdfCheck(bytes) {
+  const s = Buffer.from(bytes).toString('latin1');
+  assert(s.startsWith('%PDF-1.4\n') && s.endsWith('%%EOF\n'), 'PDF header and end');
+  const sx = Number(/startxref\n(\d+)\n%%EOF\n$/.exec(s)[1]);
+  const m = /^xref\n0 (\d+)\n/.exec(s.slice(sx));
+  assert(m, 'startxref points at the xref table');
+  const entries = s.slice(sx + m[0].length).split('\n');
+  for (let i = 1; i < Number(m[1]); i++) assert(s.startsWith(`${i} 0 obj\n`, Number(entries[i].slice(0, 10))), `object ${i} at its xref offset`);
+  for (const mm of s.matchAll(/<< \/Length (\d+) >>\nstream\n/g)) {
+    const end = mm.index + mm[0].length + Number(mm[1]);
+    eq(s.slice(end, end + 10), '\nendstream', 'stream length');
+  }
+  const pages = (s.match(/\/Type \/Page /g) || []).length;
+  eq(Number(/\/Count (\d+)/.exec(s)[1]), pages, 'page count');
+  assert(/^[\x00-\x7f]*$/.test(s.slice(15)), 'ASCII after the binary marker');
+  return { s, pages };
+}
+/** The text shown on the pages (Tj strings, unescaped, latin1). */
+function pdfTexts(s) {
+  return [...s.matchAll(/\(((?:\\.|[^\\)])*)\) Tj/g)].map(m => m[1].replace(/\\([0-7]{3}|.)/g, (_, e) => (e.length === 3 ? String.fromCharCode(parseInt(e, 8)) : e)));
+}
+function pdfSave(name, bytes) {
+  const dir = process.env.NAIAD_PDF_OUT;
+  if (dir) { mkdirSync(dir, { recursive: true }); writeFileSync(path.join(dir, name), bytes); }
+}
 function randomHex(r, n) { let s = ''; for (let i = 0; i < n; i++) s += '0123456789ABCDEF'[Math.floor(r() * 16)]; return s; }
 function fakeImage(size, seed, fw) {
   const r = P.mulberry32(seed);
@@ -323,6 +349,33 @@ await test('Report and CSV: no key material, escaping, column count', () => {
 });
 
 /* ---------- simulator-driven flows ---------- */
+
+await test('PDF report: a failed unit, its advice, long notes over two pages, the simulator mark', () => {
+  eq(P.PDF_WIDTHS.F1.length, 95, 'Helvetica widths 32..126'); eq(P.PDF_WIDTHS.F2.length, 95, 'Helvetica-Bold widths 32..126');
+  eq(P.pdfStr('a(b)\\c 25 °C · Kinéis → ✓'), '(a\\(b\\)\\\\c 25 \\260C \\267 Kin\\351is -> OK)', 'escapes and WinAnsi');
+  eq(P.pdfStr('日本'), '(??)', 'characters WinAnsi lacks');
+  for (const l of P.pdfWrap('word '.repeat(200) + 'x'.repeat(300), 'F1', 10, 200)) assert(P.pdfTextWidth(l, 'F1', 10) <= 200, 'wrapped to the width');
+  eq(P.rconfText('401620000,401680000,27,LDA2'), '401.62–401.68 MHz, 27 dBm, LDA2', 'RCONF in words');
+  const run = P.newRun('boot');
+  for (const l of ['+ST=GPS,FAIL,bytes=0,nmea=0,cs_err=0,fe=0,line=hi/hi', '+ST=WS85,PASS,wind=3.4,dir=270,frames=2', '+ST=ENV,PASS,t=21.5,p=1013.2,rh=40',
+    '+ST=ADC,PASS,nimh=2650,scap=4890', '+ST=TX,PASS,ms=850']) { const st = P.parseStLine(l); run.items[st.item] = st; run.lines.push(l); }
+  run.status = 'FAIL'; run.summary = '+SELFTEST=FAIL';
+  const rep = P.buildReport({ unit: { fw: 'Naiad v1.0.5 (aa41699)', id: '294938', addr: '0A1B2C3D', sn: 'SMD60C00360040', seckeyCrc: '1234ABCD', rconf: P.NAIAD_RCONF_DECODED },
+    selftest: run, required: P.ST_ITEMS, transport: 'simulator', operator: 'Tom', notes: 'bench (unit) test \\ ok ' + 'more notes '.repeat(600), timestamp: '2026-10-14T10:40:00.000Z' });
+  eq(rep.verdict, 'FAIL', 'unit verdict');
+  const bytes = P.buildReportPdf(rep), { s, pages } = pdfCheck(bytes), txt = pdfTexts(s).join(' ');
+  pdfSave('naiad_report_fail_sim.pdf', bytes);
+  assert(pages >= 2 && txt.includes(`Page 2 of ${pages}`), `long notes continue on page 2 (${pages} pages)`);
+  for (const want of ['FAIL', 'GPS receiver failed (No data from the GPS).', 'No data from the GPS.', 'What to check', 'GPS: Check the GPS cable is fully seated', 'SIMULATED UNIT',
+    'Wind 3.4 m/s from 270\u00b0.', '21.5 \u00b0C, 1013.2 hPa, 40 % humidity', 'NiMH pack 2.65 V, supercap 4.89 V', "MHz, 27 dBm, LDA2 (Naiad's)",
+    'CRC-32 1234ABCD', 'bench (unit) test \\ ok', '2026-10-14 10:40 UTC'])
+    assert(txt.includes(want), `PDF shows "${want}"`);
+  assert(s.includes('/Title (Naiad commissioning report - Argos ID 294938)') && s.includes('/CreationDate (D:20261014104000Z)'), 'document info');
+  pdfSave('naiad_report_fail_sim.pdf', bytes);
+  // A blank unit: the test identity is not an Argos ID
+  const blank = pdfTexts(pdfCheck(P.buildReportPdf(P.buildReport({ unit: { id: '123456', addr: '11223344' } }))).s).join(' ');
+  assert(blank.includes('Kin\u00e9is test identity: no credentials') &&blank.includes('INCOMPLETE') && blank.includes('No finished self-test.'), 'blank unit');
+});
 
 await test('Detect: unit still in its 2 s boot silence when Connect starts', async () => {
   for (const scale of [0.05, 0.01]) {
@@ -721,6 +774,12 @@ await test('Guided commissioning of a factory unit: flash -> sensors -> provisio
     eq(rep.verdict, 'PASS', 'report verdict'); eq(rep.unit.provisioned, true, 'report: provisioned');
     assert(!JSON.stringify(rep).toUpperCase().includes(creds.seckey), 'no key in the report');
     assert(!r.log.join('\n').toUpperCase().includes(creds.seckey), 'no key in the console transcript');
+    const pdfBytes = P.buildReportPdf(rep), pdf = pdfCheck(pdfBytes), txt = pdfTexts(pdf.s).join(' ');
+    assert(txt.includes('PASS') && txt.includes('Every required check passed.') && txt.includes(res.creds.post.id), 'PDF: verdict and Argos ID');
+    assert(txt.includes('Updated from') && txt.includes('CC_TRACKER v1.4.0-prod') && txt.includes('MISMATCH') === false, 'PDF: firmware update, credentials verified');
+    assert(!pdf.s.toUpperCase().includes(creds.seckey), 'no key in the PDF');
+    pdfSave('naiad_report_pass.pdf', pdfBytes);
+    eq(pdf.pages, 1, 'a passing unit fits on one page');
     // A second pass on the finished unit skips everything that is already done.
     steps.length = 0;
     const again = await P.commissionUnit(r.link, { mode: 'app', image: img, expectFw: 'v1.4.0', required }, { onStep });

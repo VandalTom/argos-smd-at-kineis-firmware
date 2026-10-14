@@ -401,6 +401,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
       <label class="chk"><input type="checkbox" id="wizFlash" checked> Flash the loaded image if needed</label>
       <label class="chk"><input type="checkbox" id="wizCreds" checked> Write the entered credentials</label>
       <label class="chk"><input type="checkbox" id="wizCsv" checked> Add a passing report to the production CSV</label>
+      <label class="chk"><input type="checkbox" id="wizPdf" checked> Download the PDF report</label>
       <label class="chk"><input type="checkbox" id="wizJson"> Download the JSON report</label>
     </div>
     <div class="row">
@@ -738,6 +739,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
     <dl class="kv" id="repView"></dl>
     <pre class="lines" id="repLines" hidden></pre>
     <div class="row">
+      <button id="btnRepPdf" class="btn">Download PDF</button>
       <button id="btnRepJson" class="btn">Download JSON</button>
       <button id="btnRepAdd" class="btn primary">Add to production CSV</button>
       <button id="btnRepCsv" class="btn">Download production CSV (<span id="repCount">0</span>)</button>
@@ -791,7 +793,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.5.2';
+const TOOL_VERSION = '1.5.3';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -2154,6 +2156,384 @@ function csvRecord(row) { return Object.fromEntries(CSV_COLUMNS.map((c, i) => [c
 function buildCsv(rows) {
   const cells = r => (Array.isArray(r) ? r : CSV_COLUMNS.map(c => (r[c] == null ? '' : r[c])));
   return [CSV_COLUMNS.join(','), ...rows.map(r => cells(r).map(csvEscape).join(','))].join('\r\n') + '\r\n';
+}
+
+/* ---------- PDF report: the unit's record on one A4 page, for people ----------
+ * A small PDF 1.4 writer: the standard Helvetica/Helvetica-Bold/Courier fonts (no embedding), WinAnsi
+ * text, filled rectangles and lines, one uncompressed content stream per page. Text bytes >= 0x80 are
+ * written as octal escapes, so the file is ASCII apart from the binary marker comment and string
+ * offsets are byte offsets. Long content continues on further pages. */
+
+/* With no credentials stored, the Kineis library answers AT+ID/AT+ADDR with its
+ * built-in test identity: every blank unit reports the same pair. */
+const TEST_ID = '123456', TEST_ADDR = '11223344';
+function isTestIdentity(u) { return !!u && u.id === TEST_ID && String(u.addr || '').toUpperCase() === TEST_ADDR; }
+function realId(u) { return u && typeof u.id === 'string' && u.id !== '4294967295' && !isTestIdentity(u) ? u.id : null; }
+
+const PDF_W = 595.28, PDF_H = 841.89, PDF_M = 46;
+/** AFM advance widths (1/1000 em) of the printable ASCII range 32..126. Courier is 600 throughout. */
+const PDF_WIDTHS = {
+  F1: [278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556,
+    278, 278, 584, 584, 584, 556, 1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667,
+    611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833,
+    556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584],
+  F2: [278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556,
+    333, 333, 584, 584, 584, 611, 975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667,
+    611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556, 333, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889,
+    611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584],
+};
+/** Characters outside ASCII that WinAnsi has: [code, Helvetica width, Helvetica-Bold width]. */
+const PDF_WINANSI = { '•': [0x95, 350, 350], '–': [0x96, 556, 556], '—': [0x97, 1000, 1000], '…': [0x85, 1000, 1000], '°': [0xB0, 400, 400],
+  '·': [0xB7, 278, 278], 'é': [0xE9, 556, 556], '‘': [0x91, 222, 278], '’': [0x92, 222, 278], '“': [0x93, 333, 500], '”': [0x94, 333, 500],
+  '×': [0xD7, 584, 584], 'µ': [0xB5, 556, 611], '±': [0xB1, 584, 584] };
+const PDF_EXTRA_W = Object.fromEntries(Object.values(PDF_WINANSI).map(([c, w1, w2]) => [c, [w1, w2]]));
+const PDF_SUBST = { '→': '->', '←': '<-', '≤': '<=', '≥': '>=', '✓': 'OK', '✗': 'X', '\t': ' ', '\r': ' ', '\n': ' ' };
+const pdfNum = v => String(Math.round(v * 100) / 100);
+
+/** WinAnsi codes for a string: ASCII as is, a few symbols spelled out, anything else '?'. */
+function pdfCodes(s) {
+  const out = [];
+  for (const ch of String(s == null ? '' : s)) {
+    const sub = PDF_SUBST[ch];
+    if (sub) { for (const c of sub) out.push(c.charCodeAt(0)); continue; }
+    const c = ch.codePointAt(0);
+    out.push(c >= 32 && c <= 126 ? c : PDF_WINANSI[ch] ? PDF_WINANSI[ch][0] : c >= 0xA0 && c <= 0xFF ? c : 63);
+  }
+  return out;
+}
+function pdfTextWidth(s, font, size) {
+  const codes = pdfCodes(s);
+  if (font === 'F3') return codes.length * 600 * size / 1000;
+  const tbl = PDF_WIDTHS[font] || PDF_WIDTHS.F1;
+  let w = 0;
+  for (const c of codes) w += c >= 32 && c <= 126 ? tbl[c - 32] : PDF_EXTRA_W[c] ? PDF_EXTRA_W[c][font === 'F2' ? 1 : 0] : 556;
+  return w * size / 1000;
+}
+/** A PDF literal string: ( ) \ escaped, bytes >= 0x80 as octal. */
+function pdfStr(s) {
+  let o = '(';
+  for (const c of pdfCodes(s)) o += c === 0x28 || c === 0x29 || c === 0x5C ? '\\' + String.fromCharCode(c) : c < 0x80 ? String.fromCharCode(c) : '\\' + c.toString(8).padStart(3, '0');
+  return o + ')';
+}
+/** Lines of at most maxW points, broken at spaces (a word wider than a line is cut). '\n' starts a new line. */
+function pdfWrap(text, font, size, maxW) {
+  const lines = [];
+  for (const para of String(text == null ? '' : text).split('\n')) {
+    let cur = '';
+    for (const word of para.split(' ')) {
+      const next = cur ? cur + ' ' + word : word;
+      if (pdfTextWidth(next, font, size) <= maxW) { cur = next; continue; }
+      if (cur) lines.push(cur);
+      cur = word;
+      while (cur.length > 1 && pdfTextWidth(cur, font, size) > maxW) {
+        let n = cur.length - 1;
+        while (n > 1 && pdfTextWidth(cur.slice(0, n), font, size) > maxW) n--;
+        lines.push(cur.slice(0, n)); cur = cur.slice(n);
+      }
+    }
+    lines.push(cur);
+  }
+  return lines;
+}
+
+/** Pages of drawing operators -> PDF bytes. */
+class PdfDoc {
+  constructor() { this.pages = []; }
+  addPage() { const ops = []; this.pages.push(ops); return ops; }
+  build(info = {}) {
+    const objs = [];
+    const add = body => { objs.push(body); return objs.length; };
+    const catalog = add(null), pages = add(null);
+    const fonts = { F1: 'Helvetica', F2: 'Helvetica-Bold', F3: 'Courier' };
+    const fontRes = Object.entries(fonts).map(([k, name]) => `/${k} ${add(`<< /Type /Font /Subtype /Type1 /BaseFont /${name} /Encoding /WinAnsiEncoding >>`)} 0 R`).join(' ');
+    const kids = this.pages.map(ops => {
+      const content = ops.join('\n');
+      const cid = add(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+      return add(`<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 ${PDF_W} ${PDF_H}] /Resources << /Font << ${fontRes} >> >> /Contents ${cid} 0 R >>`);
+    });
+    objs[catalog - 1] = `<< /Type /Catalog /Pages ${pages} 0 R >>`;
+    objs[pages - 1] = `<< /Type /Pages /Kids [${kids.map(k => `${k} 0 R`).join(' ')}] /Count ${kids.length} >>`;
+    const infoId = add(`<< ${Object.entries(info).filter(([, v]) => v != null && v !== '').map(([k, v]) => `/${k} ${pdfStr(v)}`).join(' ')} >>`);
+    let out = '%PDF-1.4\n%\xE2\xE3\xCF\xD3\n';
+    const offs = objs.map((body, i) => { const at = out.length; out += `${i + 1} 0 obj\n${body}\nendobj\n`; return at; });
+    const xref = out.length;
+    out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` + offs.map(o => `${String(o).padStart(10, '0')} 00000 n \n`).join('');
+    out += `trailer\n<< /Size ${objs.length + 1} /Root ${catalog} 0 R /Info ${infoId} 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    const bytes = new Uint8Array(out.length);
+    for (let i = 0; i < out.length; i++) bytes[i] = out.charCodeAt(i);
+    return bytes;
+  }
+}
+/** A top-down cursor over a PdfDoc: y falls as content is placed, a new page starts when it runs out. */
+class PdfFlow {
+  constructor(doc) { this.doc = doc; this.newPage(); }
+  newPage() { this.ops = this.doc.addPage(); this.y = PDF_H - PDF_M; }
+  /** Room for h points above the footer? Otherwise start a page (returns true). */
+  ensure(h) { if (this.y - h < PDF_M + 26) { this.newPage(); return true; } return false; }
+  rgb(c, stroke) { this.ops.push(`${c.map(pdfNum).join(' ')} ${stroke ? 'RG' : 'rg'}`); }
+  rect(x, y, w, h, c) { this.rgb(c); this.ops.push(`${pdfNum(x)} ${pdfNum(y)} ${pdfNum(w)} ${pdfNum(h)} re f`); }
+  line(x1, y1, x2, y2, c, w = 0.6) { this.rgb(c, true); this.ops.push(`${pdfNum(w)} w ${pdfNum(x1)} ${pdfNum(y1)} m ${pdfNum(x2)} ${pdfNum(y2)} l S`); }
+  text(x, y, s, { font = 'F1', size = 10, color = PDF_COL.ink, align = 'left' } = {}) {
+    const w = pdfTextWidth(s, font, size);
+    this.rgb(color);
+    this.ops.push(`BT /${font} ${pdfNum(size)} Tf ${pdfNum(align === 'right' ? x - w : align === 'center' ? x - w / 2 : x)} ${pdfNum(y)} Td ${pdfStr(s)} Tj ET`);
+    return w;
+  }
+}
+const PDF_COL = { ink: [0.11, 0.13, 0.17], grey: [0.42, 0.45, 0.5], rule: [0.84, 0.86, 0.89], band: [0.94, 0.95, 0.97], navy: [0.06, 0.2, 0.36],
+  white: [1, 1, 1], PASS: [0.11, 0.52, 0.27], FAIL: [0.76, 0.15, 0.15], INCOMPLETE: [0.8, 0.5, 0.02], OTHER: [0.45, 0.48, 0.53] };
+const pdfVerdictColor = v => PDF_COL[v] || (v === 'SKIP' || v === 'PENDING_TX' || v === 'NOTRUN' ? PDF_COL.INCOMPLETE : PDF_COL.OTHER);
+
+const ST_NAMES = { GPS: 'GPS receiver', WS85: 'WS85 wind and rain sensor', ENV: 'Air sensor', ADC: 'Battery and supercap',
+  TX: 'Satellite transmitter' };
+const TIER_TEXT = { HIGH: 'full schedule', MID: 'reduced schedule', LOW: 'low-battery schedule', CRIT: 'critical: one frame every 2 h, no GPS' };
+/** "401620000,401680000,27,LDA2" -> "401.62–401.68 MHz, 27 dBm, LDA2"; anything else as given. */
+function rconfText(v) {
+  const m = /^(\d{9}),(\d{9}),(\d+),(\w+)$/.exec(String(v == null ? '' : v));
+  return m ? `${+m[1] / 1e6}–${+m[2] / 1e6} MHz, ${m[3]} dBm, ${m[4]}` : (v == null ? '' : String(v));
+}
+function pdfWhen(ts) { const d = new Date(ts); return ts && !isNaN(d) ? d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : ''; }
+/** A self-test result in words for the report (the raw detail is printed under it). */
+function stReading(item, r, fw) {
+  if (!r) return 'Not tested.';
+  const kv = {};
+  for (const part of (r.detail || '').split(',')) { const i = part.indexOf('='); if (i > 0) kv[part.slice(0, i)] = part.slice(i + 1); }
+  const def = item === 'TX' ? txDeferral({ item, verdict: r.verdict, detail: r.detail }) : null;
+  if (def) return `Not tested yet: ${def.reason} (${def.hint}).`;
+  const fix = (v, d, k = 1) => (v == null || v === '' || isNaN(+v) ? null : (+v / k).toFixed(d));
+  let s = '';
+  if (r.verdict === 'PASS') {
+    if (item === 'GPS') s = 'The receiver sends valid position messages (no fix needed for this test).';
+    else if (item === 'WS85') s = kv.wind != null ? `Wind ${fix(kv.wind, 1)} m/s from ${kv.dir}°.` : 'Readings received.';
+    else if (item === 'ENV') s = [kv.t != null && `${fix(kv.t, 1)} °C`, kv.p != null && `${fix(kv.p, 1)} hPa`, kv.rh != null && `${kv.rh} % humidity`].filter(Boolean).join(', ') + '.';
+    else if (item === 'ADC') s = [kv.nimh != null && `NiMH pack ${fix(kv.nimh, 2, 1000)} V`, kv.scap != null && `supercap ${fix(kv.scap, 2, 1000)} V`].filter(Boolean).join(', ') + '.';
+    else if (item === 'TX') s = `One frame sent to the satellites${kv.ms ? ` (${fix(kv.ms, 1, 1000)} s)` : ''}.`;
+  } else if (r.verdict === 'FAIL' && r.detail === 'silent') s = 'No data from the sensor.';
+  else s = { FAIL: 'Failed.', SKIP: 'Skipped.', NOTRUN: 'Not run.' }[r.verdict] || '';
+  const diag = sensorDiagnosis(item, { item, verdict: r.verdict, detail: r.detail }, fw);
+  if (diag) s = (r.verdict === 'PASS' ? s + ' ' : '') + `${diag.title}. ${diag.text}`;
+  return s.trim() || r.detail || '';
+}
+/** Why the unit verdict is not PASS, in the order a person fixes them. */
+function verdictReasons(rep) {
+  const out = [];
+  if (rep.unit && rep.unit.rescue) out.push('The unit is in rescue mode.');
+  if (rep.flash && !rep.flash.ok) out.push(`Firmware update failed${rep.flash.error ? `: ${rep.flash.error}` : ' (firmware check)'}.`);
+  if (rep.credentials && !rep.credentials.ok) out.push(`Credentials not verified${rep.credentials.error ? `: ${rep.credentials.error}` : ' (readback mismatch)'}.`);
+  if (rep.run && !rep.run.ok) out.push(`The guided run stopped at "${rep.run.step}": ${rep.run.error}.`);
+  const st = rep.selftest;
+  if (!st) out.push('No finished self-test.');
+  else for (const i of st.required) {
+    const r = st.items[i], name = ST_NAMES[i] || i;
+    const def = i === 'TX' && r ? txDeferral({ item: i, verdict: r.verdict, detail: r.detail }) : null;
+    const diag = r && sensorDiagnosis(i, { item: i, verdict: r.verdict, detail: r.detail }, rep.unit && rep.unit.fw);
+    if (!r) out.push(`${name}: not tested.`);
+    else if (r.verdict === 'PASS') continue;
+    else if (def) out.push(`${name}: not tested yet (${def.reason}).`);
+    else if (r.verdict === 'SKIP') out.push(`${name}: skipped.`);
+    else out.push(`${name} failed${diag ? ` (${diag.title})` : ''}.`);
+  }
+  if (rep.unit && rep.unit.provisioned === false) out.push('Not provisioned: the radio stays off.');
+  return out;
+}
+
+/** The commissioning report (buildReport) as a readable PDF: Uint8Array. */
+function buildReportPdf(rep) {
+  const doc = new PdfDoc(), f = new PdfFlow(doc);
+  const L = PDF_M, R = PDF_W - PDF_M, W = R - L, C = PDF_COL;
+  const u = rep.unit || {}, id = realId(u), fw = u.fw;
+  const verdict = rep.verdict || 'INCOMPLETE';
+  const when = pdfWhen(rep.timestamp);
+  const dash = v => (v == null || v === '' ? '—' : String(v));
+
+  // Title
+  f.text(L, f.y - 17, 'Naiad commissioning report', { font: 'F2', size: 19, color: C.navy });
+  f.text(R, f.y - 9, when, { size: 9, color: C.grey, align: 'right' });
+  f.text(R, f.y - 20, rep.tool || '', { size: 8, color: C.grey, align: 'right' });
+  f.y -= 30;
+  f.line(L, f.y, R, f.y, C.navy, 1.2);
+  f.y -= 10;
+
+  // Who: serial number, Argos ID, firmware
+  const who = [['Serial number', u.sn], ['Argos ID', id || 'none', !id && isTestIdentity(u) ? 'Kinéis test identity: no credentials' : null], ['Firmware', fw]];
+  const cw = [W * 0.3, W * 0.28, W * 0.42];
+  let x = L;
+  who.forEach(([k, v, note], i) => {
+    f.text(x, f.y - 9, k, { size: 8, color: C.grey });
+    let size = 13;                                     // one line: long values get a smaller font
+    while (size > 8 && pdfTextWidth(dash(v), 'F2', size) > cw[i] - 10) size -= 0.5;
+    f.text(x, f.y - 25, dash(v), { font: 'F2', size });
+    if (note) f.text(x, f.y - 35, note, { size: 7.5, color: C.grey });
+    x += cw[i];
+  });
+  f.y -= 42;
+
+  // Verdict banner
+  const reasons = verdict === 'PASS' ? [] : verdictReasons(rep);
+  const comm = rep.commissioning;
+  const msg = verdict === 'PASS'
+    ? `Every required check passed.${comm && comm.state === 'WAIT_FIX' ? ' Armed for deployment.' : ''}`
+    : reasons.join(' ') || 'Not every required check passed.';
+  const vw = Math.max(pdfTextWidth(verdict, 'F2', 20), 70) + 26;
+  const msgLines = pdfWrap(msg, 'F1', 10, W - vw - 14);
+  const bh = Math.max(42, msgLines.length * 12.5 + 18);
+  f.rect(L, f.y - bh, W, bh, pdfVerdictColor(verdict));
+  f.text(L + 13, f.y - bh / 2 - 7, verdict, { font: 'F2', size: 20, color: C.white });
+  msgLines.forEach((s, i) => f.text(L + vw, f.y - (bh - msgLines.length * 12.5) / 2 - 9.5 - i * 12.5, s, { color: C.white }));
+  f.y -= bh;
+  if (rep.link && rep.link.transport === 'simulator') {
+    f.y -= 6;
+    f.rect(L, f.y - 18, W, 18, C.band);
+    f.text(L + 8, f.y - 12.5, 'SIMULATED UNIT: made with the tool\'s built-in simulator. Not a production record.', { font: 'F2', size: 9, color: C.FAIL });
+    f.y -= 18;
+  }
+
+  const section = (title, aside) => {
+    f.ensure(44);
+    f.y -= 17;
+    f.text(L, f.y, title.toUpperCase(), { font: 'F2', size: 9, color: C.navy });
+    if (aside) f.text(R, f.y, aside, { size: 7.5, color: C.grey, align: 'right' });
+    f.y -= 5;
+    f.line(L, f.y, R, f.y, C.rule);
+    f.y -= 1;
+  };
+  const KW = 132;
+  /** A labelled value (and a small note under it), continued on the next page when long. */
+  const kv = (k, v, note) => {
+    const lines = pdfWrap(dash(v), 'F1', 10, W - KW), nl = note ? pdfWrap(note, 'F1', 7.5, W - KW) : [];
+    f.ensure(Math.min(lines.length * 12.5 + nl.length * 9.5 + 5, 60));
+    f.text(L, f.y - 12, k, { size: 9, color: C.grey });
+    for (const s of lines) { f.ensure(12.5); f.text(L + KW, f.y - 12, s); f.y -= 12.5; }
+    for (const s of nl) { f.ensure(9.5); f.text(L + KW, f.y - 9, s, { size: 7.5, color: C.grey }); f.y -= 9.5; }
+    f.y -= 5;
+  };
+  const small = text => {
+    for (const s of pdfWrap(text, 'F1', 7.5, W)) { f.ensure(9.5); f.text(L, f.y - 10, s, { size: 7.5, color: C.grey }); f.y -= 9.5; }
+    f.y -= 3;
+  };
+  /** cols: [{ title, w }]; a cell is text or { text, font, color, sub, pill } (pill = badge colour). */
+  const table = (cols, rows) => {
+    const head = () => {
+      f.rect(L, f.y - 16, W, 16, C.band);
+      let cx = L;
+      for (const c of cols) { f.text(cx + 5, f.y - 11, c.title, { font: 'F2', size: 7.5, color: C.grey }); cx += c.w; }
+      f.y -= 16;
+    };
+    f.ensure(16 + 24);
+    head();
+    for (const row of rows) {
+      const cells = row.map((cell, i) => {
+        const c = cell && typeof cell === 'object' ? cell : { text: cell };
+        const w = cols[i].w - 10;
+        return { ...c, lines: c.pill ? [dash(c.text)] : pdfWrap(dash(c.text), c.font || 'F1', 9.5, w), subs: c.sub ? pdfWrap(c.sub, 'F1', 7.5, w) : [] };
+      });
+      const h = Math.max(...cells.map(c => c.lines.length * 12 + c.subs.length * 9.5)) + 8;
+      if (f.ensure(h)) head();
+      let cx = L;
+      cells.forEach((c, i) => {
+        if (c.pill) {
+          const tw = pdfTextWidth(c.lines[0], 'F2', 8);
+          f.rect(cx + 5, f.y - 15, tw + 10, 12.5, c.pill);
+          f.text(cx + 10, f.y - 11.5, c.lines[0], { font: 'F2', size: 8, color: C.white });
+        } else c.lines.forEach((s, j) => f.text(cx + 5, f.y - 12.5 - j * 12, s, { font: c.font || 'F1', size: 9.5, color: c.color || C.ink }));
+        c.subs.forEach((s, j) => f.text(cx + 5, f.y - 11 - c.lines.length * 12 - j * 9.5, s, { size: 7.5, color: C.grey }));
+        cx += cols[i].w;
+      });
+      f.y -= h;
+      f.line(L, f.y, R, f.y, C.rule, 0.4);
+    }
+  };
+  const bullets = (title, items) => {
+    if (!items.length) return;
+    f.ensure(30);
+    f.y -= 6;
+    f.text(L, f.y - 10, title, { font: 'F2', size: 9 });
+    f.y -= 14;
+    for (const it of items) {
+      const lines = pdfWrap(it, 'F1', 9, W - 14);
+      f.ensure(lines.length * 11.5 + 2);
+      f.text(L + 3, f.y - 9, '•', { size: 9, color: C.grey });
+      lines.forEach((s, i) => f.text(L + 14, f.y - 9 - i * 11.5, s, { size: 9 }));
+      f.y -= lines.length * 11.5 + 2;
+    }
+  };
+
+  // Unit: identity and radio (each value checked against what was written, when it was), power, clock
+  section('Unit');
+  if (rep.credentials) {
+    table([{ title: 'FIELD', w: W * 0.2 }, { title: 'EXPECTED', w: W * 0.31 }, { title: 'READ BACK', w: W * 0.36 }, { title: 'CHECK', w: W * 0.13 }],
+      rep.credentials.checks.map(c => {
+        const rc = c.field === 'RCONF';
+        return [{ text: c.field, font: 'F2' }, rc ? rconfText(c.expected) : c.expected, { text: rc ? rconfText(c.actual) : c.actual, sub: c.note || null },
+          { text: c.ok === true ? 'OK' : c.ok === false ? 'MISMATCH' : '—', pill: c.ok == null ? null : c.ok ? C.PASS : C.FAIL }];
+      }));
+    small('Credentials written in this session and read back after the reset. The secret key is checked by its CRC-32: the key itself is never read out or recorded.');
+    bullets('Warnings', rep.credentials.warnings || []);
+  } else {
+    kv('ADDR', u.addr);
+    kv('Key check', u.seckeyCrc ? `CRC-32 ${u.seckeyCrc}` : null, 'The secret key itself is never read out or recorded.');
+    kv('Radio configuration', u.rconf ? `${rconfText(u.rconf)}${u.rconf === NAIAD_RCONF_DECODED ? " (Naiad's)" : " (not Naiad's)"}` : null);
+    kv('Provisioned', u.provisioned == null ? null : u.provisioned ? 'Yes: the radio is enabled.' : 'No: the radio stays off until credentials are written.');
+  }
+  kv('Battery', u.batMv != null || u.batTier ? `${u.batMv != null ? `${u.batMv} mV` : 'not measured'}${u.batTier ? ` (${u.batTier}: ${TIER_TEXT[u.batTier] || ''})` : ''}` : null);
+  kv('Unit clock', u.deviceUtc ? `${pdfWhen(u.deviceUtc)}${u.clockOffsetS != null ? ` (unit minus PC: ${u.clockOffsetS} s)` : ''}`
+    : u.state && /(^|,)utc=0(,|$)/.test(u.state) ? 'No GPS time yet.' : null);
+
+  // Self-test
+  const st = rep.selftest;
+  section('Self-test', st ? `required: ${st.required.join(', ') || 'none'}${st.at ? ` · ${st.source === 'boot' ? 'boot self-test' : 'self-test'} read ${pdfWhen(st.at)}` : ''}` : null);
+  if (st) {
+    const fixes = [];
+    table([{ title: 'CHECK', w: W * 0.27 }, { title: 'RESULT', w: W * 0.13 }, { title: 'READING', w: W * 0.6 }], ST_ITEMS.filter(i => st.items[i] || st.required.includes(i)).map(i => {
+      const r = st.items[i];
+      const diag = r && sensorDiagnosis(i, { item: i, verdict: r.verdict, detail: r.detail }, fw);
+      if (diag && diag.fixes && diag.fixes.length) fixes.push(...diag.fixes.map(x => `${i}: ${x}`));
+      return [{ text: ST_NAMES[i] || i, font: 'F2', sub: st.required.includes(i) ? null : 'not required' },
+        { text: r ? r.verdict : 'NOT TESTED', pill: pdfVerdictColor(r ? r.verdict : 'NOTRUN') },
+        { text: stReading(i, r, fw), sub: r && r.detail ? r.detail : null }];
+    }));
+    bullets('What to check', [...new Set(fixes)]);
+  } else kv('Result', 'No finished self-test.');
+
+  // Firmware and orders
+  section('Firmware and orders');
+  const fl = rep.flash;
+  kv('Unit firmware', fl ? (fl.ok ? `Updated from ${fl.oldFw || 'unknown'} to ${fl.newFw}.` : `Update failed${fl.error ? `: ${fl.error}` : ' (firmware check)'}.`) : `Not updated in this session (runs ${dash(fw)}).`,
+    fl ? [fl.file, fl.size != null && `${fl.size} bytes`, fl.crc && `CRC-32 ${fl.crc}`, fl.bootloader && `bootloader ${fl.bootloader}`].filter(Boolean).join(', ') : null);
+  if (rep.ws85) {
+    const w = rep.ws85;
+    kv('WS85 firmware', w.ok ? (w.upToDate ? `Already ${dash(w.to)}.` : `Updated from ${w.from || 'unknown'} to ${dash(w.to)}.`) : 'Update failed.', w.simulated ? 'simulated sensor' : w.file || null);
+  }
+  const ORDERS = { WAIT_FIX: 'Armed for deployment: a burst of frames follows the first GPS fix.', DONE: 'No deployment burst pending.' };
+  kv('Deployment orders', comm ? (comm.state === 'BURST' ? `Deployment burst in progress (${comm.sent} of ${comm.target} frames).` : ORDERS[comm.state] || comm.raw) : null, comm ? comm.raw : null);
+
+  // Sign-off
+  section('Sign-off');
+  kv('Operator', rep.operator);
+  if (rep.notes) kv('Notes', rep.notes);
+  f.ensure(36);
+  f.y -= 28;
+  f.text(L, f.y, 'Checked by', { size: 9, color: C.grey });
+  f.line(L + 58, f.y - 2, L + W * 0.55, f.y - 2, C.grey, 0.5);
+  f.text(L + W * 0.6, f.y, 'Date', { size: 9, color: C.grey });
+  f.line(L + W * 0.6 + 28, f.y - 2, R, f.y - 2, C.grey, 0.5);
+  f.y -= 6;
+
+  // Footer on every page
+  const total = doc.pages.length;
+  const foot = `Naiad${id ? ` · Argos ID ${id}` : ''}${u.sn ? ` · ${u.sn}` : ''} · ${verdict}${when ? ` · ${when}` : ''}`;
+  doc.pages.forEach((ops, i) => {
+    f.ops = ops;
+    f.line(L, PDF_M + 6, R, PDF_M + 6, C.rule, 0.5);
+    f.text(L, PDF_M - 6, foot, { size: 7.5, color: C.grey });
+    f.text(R, PDF_M - 6, `Page ${i + 1} of ${total}`, { size: 7.5, color: C.grey, align: 'right' });
+  });
+  const d = new Date(rep.timestamp);
+  return doc.build({
+    Title: `Naiad commissioning report${id ? ` - Argos ID ${id}` : u.sn ? ` - ${u.sn}` : ''}`, Subject: `Unit verdict ${verdict}`,
+    Author: rep.operator || null, Producer: rep.tool || 'naiad_tool',
+    CreationDate: isNaN(d) ? null : 'D:' + d.toISOString().replace(/[-:T]/g, '').slice(0, 14) + 'Z',
+  });
 }
 
 /* ---------- simulator (app console + DFU bootloader, same wire formats as the firmware) ---------- */
@@ -4321,6 +4701,7 @@ const NaiadProtocol = {
   validateCredentials, parseCredentialText, seckeyCrc, readCredentials, compareCredentials, provisionCredentials, eraseCredentials,
   analyzeImage, writeOrder, sendOrderCrc, buildWriteLine, parseDfuInfo, dfuCmd, blPing, requestBoot, flashFirmware, bootloaderCheck, exitBootloader,
   buildReport, reportToCsvRow, csvRecord, csvEscape, buildCsv,
+  buildReportPdf, PdfDoc, PDF_WIDTHS, pdfCodes, pdfStr, pdfTextWidth, pdfWrap, rconfText, stReading, verdictReasons, realId, isTestIdentity,
   NaiadSimulator, SimTransport, makeSimImage, mulberry32,
   VAULT_STATUSES, VAULT_KDF_ITER, parseDelimited, unzipEntries, xlsxRows, credentialRowsToRecords, readCredentialFile,
   vaultNormalize, vaultNewData, vaultFind, vaultMerge, vaultNextFree, vaultMarkInUse, vaultMarkFreed, vaultCounts, vaultCsv,
@@ -6218,7 +6599,8 @@ async function doWizard() {
       const rows = store.get(K_ROWS, []); rows.push(csvRecord(reportToCsvRow(rep)));
       done.push(store.set(K_ROWS, rows) ? 'added to the production CSV' : 'added to the CSV for this page only (storage unavailable)');
     }
-    if ($('#wizJson').checked) { download(reportFileStem(rep) + '.json', JSON.stringify(rep, null, 2) + '\n', 'application/json'); done.push('JSON downloaded'); }
+    if ($('#wizPdf').checked) { downloadReportPdf(rep); done.push('PDF downloaded'); }
+    if ($('#wizJson').checked) { downloadReportJson(rep); done.push('JSON downloaded'); }
     states.report = { status: rep.verdict === 'PASS' ? 'ok' : 'fail', detail: `unit verdict ${rep.verdict}${done.length ? ' · ' + done.join(', ') : ''}` };
     setMsg('#wizMsg', rep.verdict === 'PASS' ? 'Unit commissioned: PASS.' : `Finished, but the unit verdict is ${rep.verdict}.`, rep.verdict === 'PASS' ? 'ok' : 'warn');
   } else {
@@ -6295,12 +6677,9 @@ function renderReport() {
   $('#repSum').innerHTML = ''; $('#repSum').append(badge(r.verdict));
   $('#repCount').textContent = String(store.get(K_ROWS, []).length);
 }
-/* With no credentials stored, the Kineis library answers AT+ID/AT+ADDR with its
- * built-in test identity: every blank unit reports the same pair. */
-const TEST_ID = '123456', TEST_ADDR = '11223344';
-function isTestIdentity(u) { return !!u && u.id === TEST_ID && String(u.addr || '').toUpperCase() === TEST_ADDR; }
-function realId(u) { return u && typeof u.id === 'string' && u.id !== '4294967295' && !isTestIdentity(u) ? u.id : null; }
 function reportFileStem(r) { return `naiad_${realId(r.unit) || r.unit.sn || r.unit.addr || 'unit'}_${stamp()}`; }
+function downloadReportPdf(r) { download(reportFileStem(r) + '.pdf', buildReportPdf(r), 'application/pdf'); }
+function downloadReportJson(r) { download(reportFileStem(r) + '.json', JSON.stringify(r, null, 2) + '\n', 'application/json'); }
 
 /* ---------- rendering: header, unit, controls ---------- */
 
@@ -7313,7 +7692,7 @@ const VVIEWS = {
         el('div', { class: 'big', text: 'Land ho!' }), el('div', { class: 'medal', 'aria-hidden': 'true', text: '⚓' }),
         el('div', { text: `${rep.unit.sn || 'The module'}${realId(rep.unit) ? ` (Argos ID ${realId(rep.unit)})` : ''} is ready for the high seas.` }));
       out.push(box);
-    } else out.push(vLead('Check the logbook entry, then write it down. Every commissioned module gets one line in the production log.'));
+    } else out.push(vLead('Check the logbook entry, then write it down. Every commissioned module gets one line in the production log and its own PDF report.'));
     const sensors = vSensorEval(), tx = vRunItems(['TX']).TX, c = rep.commissioning;
     const orders = c ? ({ WAIT_FIX: 'ready for deployment (burst after the first GPS fix)', BURST: 'deployment burst in progress', DONE: 'no burst pending' }[c.state] || c.raw) : '—';
     out.push(el('ul', { class: 'vlist' },
@@ -7328,7 +7707,8 @@ const VVIEWS = {
         el('input', { type: 'text', id: 'vOperator', value: $('#repOperator').value, autocomplete: 'name', onchange: e => { $('#repOperator').value = e.target.value; $('#repOperator').dispatchEvent(new Event('change')); } }))));
     out.push(el('div', { class: 'vactions' },
       voy.logged ? vBtn('Commission another module', vNextUnit, { primary: true }) : vBtn('Write it in the logbook', vLogIt, { primary: true }),
-      vBtn('Download the report', () => { const r = currentReport(); download(reportFileStem(r) + '.json', JSON.stringify(r, null, 2) + '\n', 'application/json'); }),
+      vBtn('Download the report (PDF)', () => downloadReportPdf(currentReport())),
+      vBtn('Report data (JSON)', () => downloadReportJson(currentReport())),
       rows ? vBtn(`Download the production log (${rows} row${rows === 1 ? '' : 's'})`, () => download(`naiad_production_${stamp()}.csv`, buildCsv(store.get(K_ROWS, [])), 'text/csv')) : null));
     return out;
   },
@@ -7477,9 +7857,10 @@ function vLogIt() {
   const rows = store.get(K_ROWS, []);
   rows.push(csvRecord(reportToCsvRow(r)));
   store.set(K_ROWS, rows);
+  downloadReportPdf(r);
   voy.logged = true;
   if (r.verdict === 'PASS') store.set(K_VOYAGES, store.get(K_VOYAGES, 0) + 1);
-  note(`Logbook: ${r.unit.sn || 'unit'} recorded (${r.verdict})`);
+  note(`Logbook: ${r.unit.sn || 'unit'} recorded (${r.verdict}), PDF report saved`);
   renderReport(); vRender();
 }
 async function vNextUnit() {
@@ -7900,7 +8281,8 @@ function init() {
 
   $('#repOperator').addEventListener('change', () => { store.set(K_UI, Object.assign(store.get(K_UI, {}), { operator: $('#repOperator').value.trim() })); renderReport(); });
   $('#repNotes').addEventListener('change', renderReport);
-  $('#btnRepJson').addEventListener('click', () => { const r = currentReport(); download(reportFileStem(r) + '.json', JSON.stringify(r, null, 2) + '\n', 'application/json'); });
+  $('#btnRepPdf').addEventListener('click', () => downloadReportPdf(currentReport()));
+  $('#btnRepJson').addEventListener('click', () => downloadReportJson(currentReport()));
   $('#btnRepAdd').addEventListener('click', () => {
     const r = currentReport();
     const rows = store.get(K_ROWS, []);
