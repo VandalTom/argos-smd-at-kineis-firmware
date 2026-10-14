@@ -349,7 +349,8 @@ the browser flasher is tested against them (not yet on real hardware).
 GitHub Releases (field and bench builds) and loads one with a click; the
 flash is then verified against the release's firmware ID (`Naiad vX.Y.Z (`).
 Releases with a known problem carry a warning (v1.0.0: do not deploy;
-v1.0.1-v1.0.2: GPS data lost, fixed in v1.0.3).
+v1.0.1-v1.0.2: GPS data lost, fixed in v1.0.3; v1.0.3: no WS85 data on
+the carrier, fixed in v1.0.4).
 
 *Team vault* (Team credentials panel): one shared table of the CLS
 credential sets for the whole team. Sign in with a @siliconvandals.com

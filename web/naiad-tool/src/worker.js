@@ -30,6 +30,7 @@ const RELEASE_NOTES = {
 	'v1.0.0': { warn: 'Do not deploy: units stop transmitting after their first deep sleep (fixed in v1.0.1).', fwId: false },
 	'v1.0.1': { warn: GPS_PORT_WARN },
 	'v1.0.2': { warn: GPS_PORT_WARN },
+	'v1.0.3': { warn: 'Do not deploy: on the carrier the unit reads no WS85 wind or rain data (each WS85 frame loses its first bytes); fixed in v1.0.4.' },
 };
 const STATUSES = ['free', 'in use', 'retired'];
 const EDITABLE = ['addr', 'key_enc', 'rconf', 'status', 'sn', 'fw', 'assigned', 'note'];
