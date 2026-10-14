@@ -36,7 +36,7 @@
 typedef enum {
 	CC_UART_NONE = 0,
 	CC_UART_GPS,   /**< session A: PB6 (swapped to RX), CC_HW_gpsBaud() */
-	CC_UART_WS85,  /**< session B: PA10 RX, 115200 */
+	CC_UART_WS85,  /**< session B: PA10 RX, CC_HW_ws85Baud() */
 #if CC_GPS_LOOPBACK
 	CC_UART_GPS_LOOP, /**< bench: session A plus PB7 (swapped to TX) */
 #endif
@@ -50,7 +50,7 @@ void CC_HW_init(void);
 
 /** Open a sensor UART session at its baud (closes any previous one). */
 bool CC_HW_uartOpen(cc_uart_session_t s);
-/** Same, at an explicit baud (the self-test's GPS baud scan). */
+/** Same, at an explicit baud (the self-test's GPS and WS85 baud scans). */
 bool CC_HW_uartOpenBaud(cc_uart_session_t s, uint32_t baud);
 /** Drain up to @p max ring bytes into @p buf; returns count (non-blocking). */
 uint16_t CC_HW_uartRead(uint8_t *buf, uint16_t max);
@@ -70,6 +70,10 @@ uint32_t CC_HW_gpsOffForMs(void);
 /** The GPS session baud: CC_GPS_BAUD until the self-test finds another. */
 uint32_t CC_HW_gpsBaud(void);
 void CC_HW_gpsSetBaud(uint32_t baud);
+/** The WS85 session baud: CC_WS85_BAUD until the self-test finds another
+ *  (a factory-reset or freshly flashed WS85 talks at 9600). */
+uint32_t CC_HW_ws85Baud(void);
+void CC_HW_ws85SetBaud(uint32_t baud);
 /**
  * Probe the GPS data line (PB6) with the MCU's own pulls, ~16 ms: is it
  * high while pulled down, low while pulled up? (cc_selftest_line_class).

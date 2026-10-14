@@ -26,6 +26,7 @@ static bool s_gps_powered;
 static bool s_i2c_open;
 static uint32_t s_gps_off_tick;            /**< when the receiver was last switched off */
 static uint32_t s_gps_baud = CC_GPS_BAUD;  /**< survives CC_HW_init (re-run after every sleep) */
+static uint32_t s_ws85_baud = CC_WS85_BAUD; /**< likewise: the boot self-test may learn another */
 
 /*******************************************************************************
  * Init: safe pin states
@@ -167,7 +168,7 @@ void CC_HW_uartClose(void)
 
 bool CC_HW_uartOpen(cc_uart_session_t s)
 {
-	return CC_HW_uartOpenBaud(s, s == CC_UART_GPS ? s_gps_baud : CC_WS85_BAUD);
+	return CC_HW_uartOpenBaud(s, s == CC_UART_GPS ? s_gps_baud : s_ws85_baud);
 }
 
 bool CC_HW_uartOpenBaud(cc_uart_session_t s, uint32_t baud)
@@ -317,6 +318,19 @@ void CC_HW_gpsSetBaud(uint32_t baud)
 	if (baud != 0U && baud != s_gps_baud) {
 		MGR_LOG_INFO("[CCHW] GPS baud %lu -> %lu\r\n", (unsigned long)s_gps_baud, (unsigned long)baud);
 		s_gps_baud = baud;
+	}
+}
+
+uint32_t CC_HW_ws85Baud(void)
+{
+	return s_ws85_baud;
+}
+
+void CC_HW_ws85SetBaud(uint32_t baud)
+{
+	if (baud != 0U && baud != s_ws85_baud) {
+		MGR_LOG_INFO("[CCHW] WS85 baud %lu -> %lu\r\n", (unsigned long)s_ws85_baud, (unsigned long)baud);
+		s_ws85_baud = baud;
 	}
 }
 

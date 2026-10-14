@@ -164,6 +164,11 @@
 #define CC_SELFTEST_GPS_OFF_MS   1200UL    /**< listen while off (> one NMEA burst) */
 #define CC_SELFTEST_GPS_SCAN_MS  1500UL    /**< per scanned baud */
 #define CC_SELFTEST_WS85_MS      35000UL   /**< one broadcast (~30 s period) */
+#define CC_SELFTEST_WS85_SCAN_MS 12000UL   /**< per further baud: > one 6-8.5 s broadcast */
+#define CC_WS85_BURST_GAP_MS     50UL      /**< silence that ends a broadcast (a byte is <= 2 ms) */
+#define CC_WS85_BURST_MIN        4U        /**< fewer bytes are a glitch, not a broadcast */
+#define CC_WS85_OPEN_SETTLE_MS   10UL      /**< bytes this soon after opening are the pin
+                                           *   switching over (one 0x00, framing error) */
 #define CC_SELFTEST_TX_MS        60000UL   /**< MAC TX_DONE */
 #define CC_SELFTEST_NIMH_MIN_MV  1800      /**< 2S NiMH: 0.9 V/cell floor */
 #define CC_SELFTEST_NIMH_MAX_MV  3300      /**< 2S NiMH: 1.65 V/cell (charging) ceiling */

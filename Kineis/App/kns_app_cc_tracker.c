@@ -173,6 +173,21 @@ static uint32_t st_gps_cur;         /**< baud being scanned */
 static uint8_t st_gps_scan;         /**< next index into st_gps_bauds */
 static const uint32_t st_gps_bauds[] = { 9600UL, 38400UL, 115200UL, 4800UL, 19200UL, 57600UL };
 #endif
+#if CC_ENABLE_WS85
+/* WS85 item: listen at the session baud; a broadcast that does not decode
+ * moves the wait for the next one to another baud (a factory-reset or freshly
+ * flashed WS85 talks at 9600, the configured link at 115200). */
+static const uint32_t st_ws_bauds[] = { 115200UL, 9600UL, 19200UL, 4800UL };
+static uint32_t st_ws_baud;         /**< baud of the current window (0: none yet) */
+static uint32_t st_ws_first;        /**< the session baud the item started at */
+static uint32_t st_ws_tick;         /**< start of the current window */
+static uint32_t st_ws_rx_tick;      /**< last byte of the current burst */
+static uint32_t st_ws_burst;        /**< bytes in the current burst */
+static uint8_t st_ws_scan;          /**< next index into st_ws_bauds */
+static uint16_t st_ws_fe;           /**< framing errors over every window */
+static uint8_t st_ws_head[4];       /**< first bytes heard, for the report */
+static uint8_t st_ws_head_n;
+#endif
 static int st_tx_evt;               /**< 0 waiting, 1 TX_DONE, -1 timeout, -2 abort, -3 MAC error */
 static int st_tx_status;
 
@@ -411,11 +426,9 @@ static bool process_mac_events(void)
 /* ---- Sensor phases ---- */
 
 #if CC_ENABLE_WS85
-/** Feed pending WS85 bytes to the parser; returns how many arrived. */
-static uint16_t ws85_pump(void)
+/** Feed received WS85 bytes to the parser; a frame refreshes the cache. */
+static void ws85_feed(const uint8_t *buf, uint16_t n)
 {
-	uint8_t buf[64];
-	uint16_t n = CC_HW_uartRead(buf, sizeof(buf));
 	cc_ws85_frame_t f;
 
 	for (uint16_t i = 0; i < n; i++) {
@@ -434,6 +447,15 @@ static uint16_t ws85_pump(void)
 			ws_cache.dir_deg,
 			(int)ws_cache.rain_mm, (unsigned)((int)(ws_cache.rain_mm * 10) % 10));
 	}
+}
+
+/** Feed pending WS85 bytes to the parser; returns how many arrived. */
+static uint16_t ws85_pump(void)
+{
+	uint8_t buf[64];
+	uint16_t n = CC_HW_uartRead(buf, sizeof(buf));
+
+	ws85_feed(buf, n);
 	return n;
 }
 #endif /* CC_ENABLE_WS85 */
@@ -982,6 +1004,48 @@ static void selftest_finish(void)
 
 #if CC_ENABLE_GPS
 /** What drives the GPS data line right now (no session may be open). */
+#if CC_ENABLE_WS85
+/** Start a WS85 listening window at @p baud with a fresh parser. */
+static bool st_ws_listen(uint32_t baud)
+{
+	if (st_ws_baud)
+		st_ws_fe = (uint16_t)(st_ws_fe + CC_HW_uartLineErrors());
+	st_ws_baud = baud;
+	st_ws_burst = 0;
+	st_ws_tick = HAL_GetTick();
+	cc_ws85_init(&ws_parser, CC_WS85_ADDR);
+	return CC_HW_uartOpenBaud(CC_UART_WS85, baud);
+}
+
+/** Next baud to try (the starting one is skipped); 0 when all are done. */
+static uint32_t st_ws_next_baud(void)
+{
+	while (st_ws_scan < sizeof(st_ws_bauds) / sizeof(st_ws_bauds[0])) {
+		uint32_t b = st_ws_bauds[st_ws_scan++];
+
+		if (b != st_ws_first)
+			return b;
+	}
+	return 0;
+}
+
+/** ws85_pump() for the self-test: also tracks the burst and keeps the first bytes heard. */
+static void st_ws_pump(void)
+{
+	uint8_t buf[64];
+	uint16_t n = CC_HW_uartRead(buf, sizeof(buf));
+
+	if (!n || HAL_GetTick() - st_ws_tick < CC_WS85_OPEN_SETTLE_MS)
+		return;
+	for (uint16_t i = 0; i < n && st_ws_head_n < sizeof(st_ws_head); i++)
+		st_ws_head[st_ws_head_n++] = buf[i];
+	ws85_feed(buf, n);
+	st_bytes += n;
+	st_ws_burst += n;
+	st_ws_rx_tick = HAL_GetTick();
+}
+#endif
+
 static cc_line_t st_gps_line(void)
 {
 	bool hi, lo;
@@ -1159,25 +1223,51 @@ static void selftest_run(void)
 		if (st_entry) {
 			st_entry = false;
 			st_bytes = 0;
-			cc_ws85_init(&ws_parser, CC_WS85_ADDR);
-			if (!CC_HW_uartOpen(CC_UART_WS85)) {
+			st_ws_baud = 0;
+			st_ws_fe = 0;
+			st_ws_head_n = 0;
+			st_ws_scan = 0;
+			st_ws_first = CC_HW_ws85Baud();
+			if (!st_ws_listen(st_ws_first)) {
 				st_report(CC_STI_WS85, CC_STV_FAIL, "uart");
 				st_goto(STS_ENV);
 				return;
 			}
 		}
-		st_bytes += ws85_pump();
-		if (ws_parser.frames == 0 && st_elapsed() <= CC_SELFTEST_WS85_MS)
-			return;
+		st_ws_pump();
+		if (ws_parser.frames == 0) {
+			uint32_t now = HAL_GetTick();
+
+			if (st_ws_burst >= CC_WS85_BURST_MIN && now - st_ws_rx_tick > CC_WS85_BURST_GAP_MS) {
+				/* a whole broadcast that did not decode: wait for the next one at another baud */
+				uint32_t next = st_ws_next_baud();
+
+				if (next && st_ws_listen(next))
+					return;
+			} else if (now - st_ws_tick <= (st_ws_scan ? CC_SELFTEST_WS85_SCAN_MS : CC_SELFTEST_WS85_MS)) {
+				return;
+			}
+		}
+		st_ws_fe = (uint16_t)(st_ws_fe + CC_HW_uartLineErrors());
 		CC_HW_uartClose();
 		if (ws_parser.frames > 0) {
-			snprintf(d, sizeof(d), "wind=%d.%u,dir=%u,frames=%lu",
+			/* the cycle's WS85 sessions use the baud that decoded, until the next boot self-test */
+			CC_HW_ws85SetBaud(st_ws_baud);
+			int len = snprintf(d, sizeof(d), "wind=%d.%u,dir=%u,frames=%lu",
 				(int)ws_cache.wind_ms, (unsigned)((int)(ws_cache.wind_ms * 10) % 10),
 				ws_cache.dir_deg, (unsigned long)ws_parser.frames);
+
+			if (st_ws_baud != CC_WS85_BAUD && len > 0 && (size_t)len < sizeof(d))
+				snprintf(d + len, sizeof(d) - (size_t)len, ",baud=%lu", (unsigned long)st_ws_baud);
 			st_report(CC_STI_WS85, CC_STV_PASS, d);
 		} else if (st_bytes) {
-			snprintf(d, sizeof(d), "bytes=%lu,crc_err=%lu", (unsigned long)st_bytes,
-				(unsigned long)ws_parser.crc_errors);
+			char head[2 * sizeof(st_ws_head) + 1];
+
+			for (uint8_t i = 0; i < st_ws_head_n; i++)
+				snprintf(head + 2 * i, sizeof(head) - 2 * i, "%02X", st_ws_head[i]);
+			head[2 * st_ws_head_n] = '\0';
+			snprintf(d, sizeof(d), "bytes=%lu,crc_err=%lu,fe=%u,baud=none,head=%s", (unsigned long)st_bytes,
+				(unsigned long)ws_parser.crc_errors, (unsigned)st_ws_fe, head);
 			st_report(CC_STI_WS85, CC_STV_FAIL, d);
 		} else {
 			st_report(CC_STI_WS85, CC_STV_FAIL, "silent");
