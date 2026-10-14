@@ -2,3 +2,6 @@
 # devcontainer, and bash cannot run CRLF scripts. Everything else keeps the
 # default (core.autocrlf) behaviour this repo has always used on Windows.
 *.sh text eol=lf
+
+# Vendor firmware kept byte-exact (its SHA-256 is checked by the tool's self-test).
+Tools/ws85/*.hex -text

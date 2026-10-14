@@ -32,6 +32,7 @@ Tools/*
 !Tools/naiad_power_model.py
 !Tools/naiad_station.py
 !Tools/naiad_station_selftest.py
+!Tools/ws85/
 Bootloader/build/*
 Tests/report/
 .cache/
