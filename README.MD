@@ -243,8 +243,9 @@ The WS85 item passes on one CRC-valid broadcast:
   carrier removes the cause; v1.0.3 and older read no WS85 data there.
 - `head` is the first bytes heard, for a sensor that sends something else.
 
-Two bench builds (never released) take the GPS path apart; neither starts
-the radio, and both keep the console, `AT+BOOT` and `AT+RESET`:
+Three bench builds (never released) take the GPS path and the supply
+current apart; none starts the radio, and all keep the console, `AT+BOOT`
+and `AT+RESET`:
 - `make ... GPS_LOOPBACK=1 full`: with the GPS and WS85 unplugged and the GPS
   data pin (P11) bridged to P12 or the WS85 data pin (P33), sends a frame
   out of USART1 once a second at 9600 and 115200 and checks it comes back
@@ -253,6 +254,24 @@ the radio, and both keep the console, `AT+BOOT` and `AT+RESET`:
   10 s in turn, steps the baud 9600 → 115200, and prints bytes, valid NMEA,
   errors and the first bytes each second (`+GPSMON=...`); every 10 s
   `+GPSSCOPE=...` times the data pin itself (true bit time, glitches).
+- `make ... POWER_STEPS=1 full`: for a meter on the supply, holds in turn
+  STOP2 with everything off (20 s), STOP2 with P9 (PC0, the PA supply
+  enable) high (20 s), SLEEP (10 s), RUN (10 s) and RUN with P9 high (10 s),
+  GPS off throughout. Each step is announced (`+PWR=<n>/5,...`) and closed
+  with the time it really spent in STOP2 (`+PWR=END,<n>,stop2=<ms>`). Stay
+  off the console while measuring: a line holds the unit out of STOP2 for
+  30 s.
+
+*PA supply (hardware)*: on the current carrier every one of those steps
+reads 57-61 mA. The module has no PA regulator: its GRF5504's enables are
+tied to the PA's own supply (module pads P7/P8), so the PA is biased
+whenever P7/P8 are powered, and the module expects the host board to switch
+them through a regulator or load switch enabled by P9 ("LDO enable", with
+a pull-down; P10 is that regulator's PGOOD/SEL), as Arribada's breakout
+does. The carrier feeds P7/P8 from the always-on 3.3 V rail and leaves
+P9/P10 unconnected, so the PA cannot be switched off. The firmware raises
+P9 250 ms before each frame (`MCU_PA_BOOTDELAY_MS`) and lowers it after
+the frame and before every STOP2.
 
 **Deployment (commissioning) burst** — units are switched on indoors and
 deployed later with no button. The first GPS fix since power-up is the

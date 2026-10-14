@@ -42,6 +42,10 @@ void CC_SLEEP_holdAwake(uint32_t ms);
  *  a bare RX-edge wake alone only holds CC_CONSOLE_EDGE_HOLD_MS. */
 void CC_SLEEP_consoleLine(void);
 
+/** Power-step bench build only (CC_POWER_STEPS): hold P9 (PC0, the PA
+ *  supply enable) HIGH through the following STOP2s instead of low. */
+void CC_SLEEP_benchPaEn(bool on);
+
 /** STOP2 accounting since boot (RTC-measured). */
 uint32_t CC_SLEEP_totalMs(void);
 uint32_t CC_SLEEP_count(void);

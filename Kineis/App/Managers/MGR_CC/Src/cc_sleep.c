@@ -66,6 +66,15 @@ void CC_SLEEP_consoleLine(void)
 	CC_SLEEP_holdAwake(CC_CONSOLE_AWAKE_MS);
 }
 
+#if CC_POWER_STEPS
+static bool s_bench_pa_en;
+
+void CC_SLEEP_benchPaEn(bool on)
+{
+	s_bench_pa_en = on;
+}
+#endif
+
 uint32_t CC_SLEEP_totalMs(void)
 {
 	return s_total_ms;
@@ -184,6 +193,10 @@ bool CC_SLEEP_stop2Until(uint32_t deadline)
 	GPIO_DisableAllToAnalogInput();
 	CC_HW_init();
 	(void)HAL_SUBGHZ_DeInit(&hsubghz);
+#if CC_POWER_STEPS
+	if (s_bench_pa_en)
+		HAL_GPIO_WritePin(PA_PSU_EN_GPIO_Port, PA_PSU_EN_Pin, GPIO_PIN_SET);
+#endif
 
 	bool rx_wake_armed = cc_rxwake_armed(&s_rxwake, HAL_GetTick());
 

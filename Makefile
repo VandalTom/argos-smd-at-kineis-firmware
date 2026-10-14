@@ -682,6 +682,11 @@ endif
 ifeq ($(GPS_MONITOR),1)
 CFLAGS += -DCC_GPS_MONITOR=1
 endif
+# POWER_STEPS=1 (APP=CC_TRACKER) — bench build that holds one power state at a
+# time (STOP2, STOP2 with the PA supply enable high, SLEEP, RUN) for a meter.
+ifeq ($(POWER_STEPS),1)
+CFLAGS += -DCC_POWER_STEPS=1
+endif
 
 ifeq ($(DEBUG), 1)
 CFLAGS += -g -gdwarf-2

@@ -1752,6 +1752,9 @@ void KNS_APP_cc_tracker_init(void)
 		(unsigned long)(CC_GPS_MON_ON_MS / 1000UL), (unsigned long)(CC_GPS_MON_OFF_MS / 1000UL),
 		(unsigned long)CC_HW_gpsBaud());
 #endif
+#if CC_POWER_STEPS
+	MCU_AT_CONSOLE_send("+PWR=READY,GPS off,radio off,stay off the console while measuring\r\n");
+#endif
 
 	transition_to(CC_ST_BOOT);
 }
@@ -2023,6 +2026,67 @@ static void gps_mon_poll(void)
 
 #endif /* CC_GPS_MONITOR */
 
+#if CC_POWER_STEPS
+
+/* ---- Power steps (bench build: no radio, no cycle) ----
+ * One power state at a time for a meter on the supply (cc_conf.h). The GPS
+ * stays off and the radio never starts; P9 (PC0, the PA supply enable) is
+ * low unless the step holds it high. A console line keeps the unit out of
+ * STOP2 for CC_CONSOLE_AWAKE_MS, so stay off the console while measuring. */
+enum pwr_mode { PWR_STOP2, PWR_SLEEP, PWR_RUN };
+
+static const struct {
+	const char *name;
+	enum pwr_mode mode;
+	bool pa_en;
+	uint32_t ms;
+} pwr_steps[] = {
+	{ "STOP2 everything off",     PWR_STOP2, false, CC_PWR_STEP_STOP2_MS },
+	{ "STOP2 P9 PA enable high",  PWR_STOP2, true,  CC_PWR_STEP_STOP2_MS },
+	{ "SLEEP (WFI) everything off", PWR_SLEEP, false, CC_PWR_STEP_AWAKE_MS },
+	{ "RUN everything off",       PWR_RUN,   false, CC_PWR_STEP_AWAKE_MS },
+	{ "RUN P9 PA enable high",    PWR_RUN,   true,  CC_PWR_STEP_AWAKE_MS },
+};
+#define PWR_STEP_COUNT ((uint8_t)(sizeof(pwr_steps) / sizeof(pwr_steps[0])))
+
+static void pwr_steps_poll(void)
+{
+	static uint8_t i = PWR_STEP_COUNT;   /* none yet */
+	static uint32_t start, slept0;
+
+	if (i == PWR_STEP_COUNT || HAL_GetTick() - start >= pwr_steps[i].ms) {
+		if (i != PWR_STEP_COUNT)
+			MCU_AT_CONSOLE_send("+PWR=END,%u,stop2=%lu ms\r\n", (unsigned)(i + 1U),
+				(unsigned long)(CC_SLEEP_totalMs() - slept0));
+		i = (i == PWR_STEP_COUNT) ? 0U : (uint8_t)((i + 1U) % PWR_STEP_COUNT);
+		MCU_AT_CONSOLE_send("+PWR=%u/%u,%s,%lu s\r\n", (unsigned)(i + 1U), (unsigned)PWR_STEP_COUNT,
+			pwr_steps[i].name, (unsigned long)(pwr_steps[i].ms / 1000UL));
+		HAL_GPIO_WritePin(PA_PSU_EN_GPIO_Port, PA_PSU_EN_Pin, pwr_steps[i].pa_en ? GPIO_PIN_SET : GPIO_PIN_RESET);
+		CC_SLEEP_benchPaEn(pwr_steps[i].pa_en && pwr_steps[i].mode == PWR_STOP2);
+		start = HAL_GetTick();
+		slept0 = CC_SLEEP_totalMs();
+	}
+
+	switch (pwr_steps[i].mode) {
+	case PWR_STOP2:
+		/* refused (< CC_STOP2_MIN_MS left, console held) -> the idle WFIs */
+		(void)CC_SLEEP_stop2Until(start + pwr_steps[i].ms);
+		break;
+	case PWR_RUN: {
+		/* busy for up to 100 ms, then back to the loop for the IWDG */
+		uint32_t t = HAL_GetTick();
+
+		while (HAL_GetTick() - t < 100U && HAL_GetTick() - start < pwr_steps[i].ms)
+			__NOP();
+		break;
+	}
+	case PWR_SLEEP:
+	default:
+		break;   /* the idle task WFIs with SysTick running */
+	}
+}
+#endif /* CC_POWER_STEPS */
+
 void KNS_APP_cc_tracker_loop(void)
 {
 	MGR_WDG_refresh();
@@ -2035,13 +2099,15 @@ void KNS_APP_cc_tracker_loop(void)
 		boot_attempts_write(0);
 	}
 
-#if CC_GPS_LOOPBACK || CC_GPS_MONITOR
+#if CC_GPS_LOOPBACK || CC_GPS_MONITOR || CC_POWER_STEPS
 	if (!rescue) {
 		/* bench builds run instead of the cycle: the MAC never starts */
 #if CC_GPS_LOOPBACK
 		gps_loop_poll();
-#else
+#elif CC_GPS_MONITOR
 		gps_mon_poll();
+#else
+		pwr_steps_poll();
 #endif
 		return;
 	}
