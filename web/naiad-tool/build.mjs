@@ -23,6 +23,7 @@ copyFileSync(src, join(dist, 'index.html'));
 const csp = [
 	"default-src 'none'",
 	"script-src 'self' 'unsafe-inline'",
+	"worker-src blob:",          // the page's 1 s tick (background tabs throttle page timers)
 	"style-src 'self' 'unsafe-inline'",
 	"img-src 'self' data:",
 	"connect-src 'self'",

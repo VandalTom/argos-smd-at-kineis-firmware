@@ -384,6 +384,11 @@ Releases with a known problem carry a warning (v1.0.0: do not deploy;
 v1.0.1-v1.0.2: GPS data lost, fixed in v1.0.3; v1.0.3: no WS85 data on
 the carrier, fixed in v1.0.4).
 
+*Keeping the unit awake*: while connected, the tool polls the unit's state
+every 5 s ("Keep the unit awake", ticked by default), also with the tab in
+the background or the window covered. Each console line holds the unit out
+of STOP2 for 30 s, so untick it, or disconnect, to measure sleep current.
+
 *Team vault* (Team credentials panel): one shared table of the CLS
 credential sets for the whole team. Sign in with a @siliconvandals.com
 Google account (Cloudflare Access), then unlock with the team passphrase.

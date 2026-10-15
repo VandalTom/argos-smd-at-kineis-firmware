@@ -382,7 +382,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
         <li><b>Firmware file:</b> flash the app-only <code>build/argos-smd-at-kineis-firmware.bin</code>, never the <code>_full.bin</code> (that one also contains the bootloader).</li>
         <li><b>No DFU entry:</b> if <code>AT+BOOT=</code> is refused, the unit runs an old build. Flash it once over SWD (<code>make flash-full</code>) or ST's ROM bootloader (BOOT0 + <code>Tools/rom_uart_flash.py</code>).</li>
         <li><b>Failed update:</b> the unit stays in the bootloader. Connect again and click Flash. While a valid app is still present, the bootloader returns to it by itself after 2 minutes without commands.</li>
-        <li><b>Sleep:</b> between cycles the unit sleeps (STOP2) and the first received byte only wakes it. The tool sends a short wake preamble before the first command after 20 s of quiet, and retries once if that first command gets no reply. The 5 s state polling keeps the console awake; untick it to measure the real awake duty.</li>
+        <li><b>Sleep:</b> between cycles the unit sleeps (STOP2) and the first received byte only wakes it. The tool sends a short wake preamble before the first command after 20 s of quiet, and retries once if that first command gets no reply. The 5 s state polling keeps the unit awake while the tool is connected, also with the tab in the background or the window covered; untick it to let the unit sleep (power measurements, the real awake duty).</li>
         <li><b>Not provisioned:</b> a unit without ID, ADDR and SECKEY never starts its radio (state NO_CREDS, TX self-test "unprovisioned"). It starts by itself (+PROV=OK) once all three are written. Then reset and re-run the self-test to test TX.</li>
         <li><b>Rescue mode:</b> after 3 failed boots in a row the firmware runs console-only for 10 minutes (+RESCUE=, state RESCUE). Reflash it from the Flash panel.</li>
         <li><b>Battery CRIT:</b> below 2.10 V the unit drops GPS and the deployment burst, sends one TX per 2 h and skips the boot TX self-test (SKIP batt_crit). Charge the pack above 2.15 V and re-run.</li>
@@ -434,7 +434,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
     <div class="row">
       <button id="btnRefresh" class="btn" disabled>Refresh</button>
       <button id="btnReset" class="btn" disabled>Reset unit</button>
-      <label class="chk small"><input type="checkbox" id="autoState" checked> Poll state every 5 s</label>
+      <label class="chk small"><input type="checkbox" id="autoState" checked> Keep the unit awake (poll state every 5 s)</label>
       <span id="unitMsg" class="msg small"></span>
     </div>
   </div>
@@ -793,7 +793,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.5.3';
+const TOOL_VERSION = '1.5.4';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -6614,10 +6614,23 @@ async function doWizard() {
 
 /* ---------- background polling ---------- */
 
+/** fn once a second, from a worker when the page may start one: Chrome slows the timers of a page that
+ *  has been hidden or covered for 5 min to one a minute, which would let the unit sleep between state
+ *  polls (each console line keeps it awake 30 s). Falls back to a page timer. */
+function startTick(fn) {
+  let timer = null;
+  const pageTimer = () => { if (!timer) timer = setInterval(fn, 1000); };
+  try {
+    const w = new Worker(URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 1000);'], { type: 'text/javascript' })));
+    w.onmessage = () => { if (!timer) fn(); };
+    w.onerror = () => { w.terminate(); pageTimer(); };
+  } catch (e) { pageTimer(); }
+}
+
 async function pollTick() {
   if (ui.op) return;
   const link = ui.link;
-  if (!link || !link.isOpen || ui.mode !== 'app' || document.hidden) return;
+  if (!link || !link.isOpen || ui.mode !== 'app') return;        // hidden page too: the poll keeps the unit awake
   if (Date.now() - ui.lastPoll < 5000) return;
   const wantState = $('#autoState').checked && !ui.unsupported.has('STATE');
   const wantComm = $('#cardComm').open && !ui.unsupported.has('COMMISSION');
@@ -8329,7 +8342,7 @@ function init() {
   });
   window.addEventListener('beforeunload', e => { if (ui.op) { e.preventDefault(); e.returnValue = ''; } });
 
-  setInterval(() => { if (ui.op) renderOp(); renderTime(); pollTick(); }, 1000);
+  startTick(() => { if (ui.op) renderOp(); renderTime(); pollTick(); });
   renderUnit(); renderSelftest(); renderCommission(); renderReport(); updateControls();
   initSwd();
   initVoyage();
