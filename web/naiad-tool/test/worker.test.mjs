@@ -9,6 +9,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { crc32 as zcrc32 } from 'node:zlib';
+import { readFileSync } from 'node:fs';
 import worker from '../src/worker.js';
 
 /* ---------- D1 on node:sqlite ---------- */
@@ -159,6 +160,8 @@ await test('releases: Naiad app images only, no drafts or odd tags, notes per re
 	ok(/GPS port loses its data.*fixed in v1\.0\.3/.test(v101.warn), 'v1.0.1 flagged: GPS port');
 	ok(/Do not deploy/.test(r.data.releases[1].warn), 'v1.0.0 flagged');
 	eq(r.data.releases[1].fwId, '', 'v1.0.0 had the long id');
+	ok(/stopped transmitting/.test(v101.changes.join(' ')) && v101.summary, 'v1.0.1 release notes');
+	ok(r.data.releases.every(x => x.summary && x.changes.length), 'every Naiad release has notes');
 });
 
 await test('releases: falls back to the Atom feed when the API is rate-limited', async () => {
@@ -170,6 +173,16 @@ await test('releases: falls back to the Atom feed when the API is rate-limited',
 	eq(r.data.releases.map(x => x.assets.filter(a => a.kind === 'app').map(a => a.variant).join('+')), ['release+bench', 'release'], 'images found');
 	eq(r.data.releases[0].assets.filter(a => a.kind === 'full').map(a => a.name), ['naiad-carrier-release__argos-smd-at-kineis-firmware_full.bin', 'naiad-carrier-bench__argos-smd-at-kineis-firmware_full.bin'], 'full images listed with them');
 	ok(/Do not deploy/.test(r.data.releases[1].warn), 'notes applied');
+});
+
+await test('releases: the version in NAIAD_VERSION has release notes (add them with the release)', async () => {
+	const tag = 'v' + readFileSync(new URL('../../../NAIAD_VERSION', import.meta.url), 'utf8').trim();
+	GH_RELEASES.push({ tag_name: tag, draft: false, prerelease: false, published_at: '2026-10-14T00:00:00Z', assets: [asset('release')] });
+	try {
+		const r = await call(mkEnv(), 'GET', '/api/releases', { token: null });
+		const e = r.data.releases.find(x => x.tag === tag);
+		ok(e && e.summary && e.changes.length, `${tag} has a summary and changes in worker.js RELEASE_NOTES`);
+	} finally { GH_RELEASES.pop(); }
 });
 
 await test('firmware proxy: serves release images, refuses anything else', async () => {

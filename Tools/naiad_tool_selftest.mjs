@@ -1197,6 +1197,15 @@ await test('SWD check (read-only): chip, protection, app/bootloader, firmware ID
   }
 });
 
+await test('Releases: the release a unit runs, from its firmware ID (for its release notes)', () => {
+  eq(P.fwReleaseTag('Naiad v1.0.5 (aa41699)'), 'v1.0.5', 'release build');
+  eq(P.fwReleaseTag('+FW=Naiad v1.0.4 (d41dea8*)'), 'v1.0.4', 'modified tree of a release');
+  eq(P.fwReleaseTag('Naiad v1.0.5+3 (9411808)'), null, 'between releases');
+  eq(P.fwReleaseTag('Naiad v1.0.5-dev (aa41699)'), null, 'before its tag');
+  eq(P.fwReleaseTag('CC_TRACKER v1.4.0'), null, 'not a Naiad ID');
+  eq(P.fwReleaseTag(null), null, 'no firmware text');
+});
+
 await test('Releases: the image offered first is the newest field build without a warning', async () => {
   const a = v => ({ name: `naiad-carrier-${v}__argos-smd-at-kineis-firmware.bin`, variant: v });
   const list = [

@@ -137,6 +137,13 @@ dialog { border: 1px solid var(--border); border-radius: var(--radius); backgrou
 dialog::backdrop { background: rgba(0, 0, 0, .45); }
 dialog h3 { margin: 0 0 8px; font-size: 15px; }
 #dlgBody { white-space: pre-line; margin-bottom: 14px; }
+#dlgNotes { width: min(640px, calc(100vw - 32px)); max-width: none; }
+.notes-body { max-height: min(65vh, 560px); overflow: auto; margin-bottom: 14px; }
+.note-rel { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
+.note-rel.hl { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.note-rel h4 { margin: 0 0 4px; font-size: 14px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.note-rel p { margin: 4px 0; }
+.note-rel ul { margin: 4px 0 0; padding-left: 18px; }
 .help { font-size: 13px; }
 .help > summary { cursor: pointer; color: var(--accent); }
 .help ul { margin: 6px 0; padding-left: 20px; }
@@ -248,6 +255,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
   <span id="fwPill" class="pill idle mono" hidden></span>
   <span id="batPill" class="pill warn" hidden title="Pack below 2.10 V: no GPS, no deployment burst, one TX per 2 h until it recovers past 2.15 V">Battery CRIT</span>
   <span class="spacer"></span>
+  <button type="button" class="vlink" id="btnNotesHdr" title="What changed in each Naiad firmware release">Release notes</button>
   <div class="seg" role="group" aria-label="View">
     <button type="button" id="btnViewVoyage" aria-pressed="false" title="Step by step, for new users">Voyage</button>
     <button type="button" id="btnViewPro" aria-pressed="true" title="Every panel at once">Pro</button>
@@ -448,6 +456,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
       <label class="field" style="flex:1;min-width:260px"><span class="lbl">Released firmware (GitHub Releases)</span>
         <select id="relSelect" aria-label="Released firmware"><option value="">Looking for releases…</option></select></label>
       <button class="btn" id="btnRelLoad" type="button" disabled>Load release</button>
+      <button class="vlink" id="btnRelNotes" type="button">Release notes</button>
     </div>
     <div id="relMsg" class="msg small"></div>
     <div class="drop" id="fwDrop">
@@ -784,6 +793,14 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
       <button value="cancel" class="btn" id="dlgCancel">Cancel</button>
       <button value="ok" class="btn primary" id="dlgOk">OK</button>
     </div>
+  </form>
+</dialog>
+
+<dialog id="dlgNotes" aria-labelledby="notesTitle">
+  <form method="dialog">
+    <h3 id="notesTitle">Naiad firmware release notes</h3>
+    <div id="notesBody" class="notes-body"></div>
+    <div class="row end"><button value="close" class="btn primary">Close</button></div>
   </form>
 </dialog>
 
@@ -1343,6 +1360,12 @@ const GPS_RX_FIXED = [1, 0, 3];
 function naiadVersion(fw) {
   const m = /Naiad v(\d+)\.(\d+)\.(\d+)/.exec(typeof fw === 'string' ? fw : '');
   return m ? { text: m[0], v: m.slice(1).map(Number) } : null;
+}
+/** The release a unit runs, from its AT+FW=? text ('Naiad v1.0.4 (abc1234)' -> 'v1.0.4'); null for
+ *  builds between releases ('Naiad v1.0.4+3 (...)', '-dev') and anything else. */
+function fwReleaseTag(fw) {
+  const m = /Naiad v(\d+\.\d+\.\d+) \(/.exec(typeof fw === 'string' ? fw : '');
+  return m ? `v${m[1]}` : null;
 }
 /** a < b for [major, minor, patch]. */
 function versionBefore(a, b) {
@@ -4706,7 +4729,7 @@ const NaiadProtocol = {
   VAULT_STATUSES, VAULT_KDF_ITER, parseDelimited, unzipEntries, xlsxRows, credentialRowsToRecords, readCredentialFile,
   vaultNormalize, vaultNewData, vaultFind, vaultMerge, vaultNextFree, vaultMarkInUse, vaultMarkFreed, vaultCounts, vaultCsv,
   vaultDeriveKey, vaultSeal, vaultOpen, vaultCreate, b64enc, b64dec,
-  teamImportPreview, teamSealKey, teamOpenKey, teamVaultNew, teamVaultUnlock, teamSealRecords, defaultRelease, releaseLabel,
+  teamImportPreview, teamSealKey, teamOpenKey, teamVaultNew, teamVaultUnlock, teamSealRecords, defaultRelease, releaseLabel, fwReleaseTag,
   DAP_CMD, WL, SWD_APP_PAGES, SWD_BL_PAGES, DapError, CmsisDap, SwdTarget, swdConnect, swdProtectionProblems, analyzeSwdImage, swdFlashStm32wl, SimDapProbe,
   STL, StLinkProbe, StLinkTarget, SimStLinkIo, swdInspect, swdFindFirmwareId,
   NAIAD_RCONF, NAIAD_RCONF_DECODED, SIM_KNOWN_RCONF, simDecodeRconf,
@@ -5172,7 +5195,30 @@ function relSelected() {
   $('#btnRelLoad').disabled = !a;
   if (r && r.warn) setMsg('#relMsg', r.warn, 'err');
   else if (a && a.variant === 'bench') setMsg('#relMsg', 'Bench build: verbose debug log on the console, for the lab only.', 'warn');
-  else setMsg('#relMsg', '');
+  else setMsg('#relMsg', r && r.summary ? `${r.tag}: ${r.summary}` : '');
+}
+
+/* -- release notes: /api/releases carries each release's summary and changes (worker.js RELEASE_NOTES) -- */
+function showReleaseNotes(tag) {
+  const d = $('#dlgNotes'), body = $('#notesBody');
+  const unitTag = ui.mode === 'app' ? fwReleaseTag(ui.unit.fw) : null, latest = defaultRelease(rel.list);
+  let focus = null;
+  body.innerHTML = '';
+  if (!rel.list.length) body.append(el('p', { class: 'muted', text: onSite() ? 'The release list did not load: check the connection and reload the page.' : 'Release notes come with the release list: open the tool from arribada.siliconvandals.com.' }));
+  for (const r of rel.list) {
+    const box = el('section', { class: `note-rel${r.tag === tag ? ' hl' : ''}` },
+      el('h4', {}, el('span', { text: `${r.tag}${r.date ? ` · ${r.date.slice(0, 10)}` : ''}` }),
+        r.warn ? badge('DO NOT DEPLOY', 'fail') : null, latest && latest.release.tag === r.tag ? badge('LATEST', 'pass') : null,
+        unitTag === r.tag ? badge('ON THIS MODULE', 'run') : null, r.prerelease ? badge('PRE-RELEASE', 'warn') : null),
+      r.summary ? el('p', {}, el('b', { text: r.summary })) : el('p', { class: 'muted', text: 'No notes for this release.' }),
+      r.changes && r.changes.length ? el('ul', {}, r.changes.map(c => el('li', { text: c }))) : null,
+      r.warn ? el('p', { class: 'msg err', text: r.warn }) : null,
+      r.url ? el('p', { class: 'small' }, el('a', { href: r.url, target: '_blank', rel: 'noopener', text: 'Release page and files on GitHub' })) : null);
+    if (r.tag === tag) focus = box;
+    body.append(box);
+  }
+  d.showModal();
+  if (focus) focus.scrollIntoView({ block: 'start' }); else body.scrollTop = 0;
 }
 async function relLoad() {
   const { r, a } = relPicked();
@@ -6718,6 +6764,8 @@ function renderConn() {
 function renderUnit() {
   const u = ui.unit;
   $('#uFw').textContent = valText(u.fw);
+  const fwTag = fwReleaseTag(u.fw);
+  if (fwTag && rel.list.some(r => r.tag === fwTag)) $('#uFw').append(' ', el('button', { type: 'button', class: 'vlink', onclick: () => showReleaseNotes(fwTag) }, 'release notes'));
   $('#uVer').textContent = valText(u.atVersion);
   const testId = isTestIdentity(u);
   $('#uId').textContent = u.id === '4294967295' ? '4294967295 (unset)'
@@ -7553,6 +7601,7 @@ const VVIEWS = {
     out.push(vLead('Your module should run the latest released Naiad firmware. The update goes over the same serial cable, takes about half a minute, and keeps the module’s credentials.'));
     if (voy.busy) { out.push(vProgress()); return out; }
     const tag = L ? L.release.tag : null;
+    if (rel.list.length) out.push(el('p', { class: 'vlead small' }, vLink(tag ? `What’s new in ${tag}: release notes` : 'Release notes', () => showReleaseNotes(tag || fwReleaseTag(fw)))));
     const install = () => vInstall(L);
     if (voy.err.firmware) {
       const e = voy.err.firmware;
@@ -8250,6 +8299,8 @@ function init() {
   $('#btnChooseBin').addEventListener('click', () => $('#fwFile').click());
   $('#fwFile').addEventListener('change', e => loadImageFile(e.target.files[0]));
   $('#relSelect').addEventListener('change', relSelected);
+  $('#btnRelNotes').addEventListener('click', () => { const { r } = relPicked(); showReleaseNotes(r ? r.tag : null); });
+  $('#btnNotesHdr').addEventListener('click', () => { const d = defaultRelease(rel.list); showReleaseNotes((ui.mode === 'app' && fwReleaseTag(ui.unit.fw)) || (d && d.release.tag)); });
   $('#btnRelLoad').addEventListener('click', () => void relLoad());
   $('#expectFw').addEventListener('input', e => { e.target.dataset.auto = ''; });
   void relInit();

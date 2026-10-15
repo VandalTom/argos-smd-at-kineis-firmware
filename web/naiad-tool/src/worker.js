@@ -24,13 +24,57 @@ const RELEASE_ASSET = /^naiad-carrier-(release|bench)__argos-smd-at-kineis-firmw
 const assetInfo = name => { const m = RELEASE_ASSET.exec(name); return { variant: m[1], kind: m[2] ? 'full' : 'app' }; };
 const VARIANTS = ['release', 'bench'];
 const TAG = /^v\d+\.\d+\.\d+$/;
-/** Per-release notes shown in the tool. fwId: false = predates the short 'Naiad vX.Y.Z (sha)' ID. */
+/** Per-release notes shown in the tool (one entry per Naiad release tag): summary + changes are the
+ *  release notes, warn flags a release not to deploy. fwId: false = predates the short
+ *  'Naiad vX.Y.Z (sha)' ID. */
 const GPS_PORT_WARN = 'Do not deploy: the GPS port loses its data whenever the processor idles, so position fixes fail; the WS85 wind sensor shares that port (fixed in v1.0.3).';
 const RELEASE_NOTES = {
-	'v1.0.0': { warn: 'Do not deploy: units stop transmitting after their first deep sleep (fixed in v1.0.1).', fwId: false },
-	'v1.0.1': { warn: GPS_PORT_WARN },
-	'v1.0.2': { warn: GPS_PORT_WARN },
-	'v1.0.3': { warn: 'Do not deploy: on the carrier the unit reads no WS85 wind or rain data (each WS85 frame loses its first bytes); fixed in v1.0.4.' },
+	'v1.0.0': {
+		warn: 'Do not deploy: units stop transmitting after their first deep sleep (fixed in v1.0.1).', fwId: false,
+		summary: 'First Naiad release.',
+		changes: [
+			'Weather tracker over Kinéis on the Arribada argos-smd module: WS85 wind and rain, BME280 air sensor and GPS position in every frame.',
+			'Firmware updates and a console over the serial cable, a boot self-test, provisioning, a deployment burst after the first GPS fix, deep sleep between cycles, battery-aware schedules, a GPS-anchored clock and a rescue mode.',
+		],
+	},
+	'v1.0.1': {
+		warn: GPS_PORT_WARN,
+		summary: 'Units keep transmitting after their first deep sleep.',
+		changes: [
+			'Deep sleep is measured correctly: v1.0.0 measured 0 s, so the cycle deadline was never reached and units stopped transmitting after their first deep sleep.',
+			'AT+PROV=ERASE blanks the credentials (ID, ADDR, SECKEY and their backup copy).',
+			'+PROV=OK is also answered during the boot self-test.',
+			'AT+FW=? reports a short ID: "Naiad v1.0.1 (<commit>)".',
+		],
+	},
+	'v1.0.2': {
+		warn: GPS_PORT_WARN,
+		summary: 'A GPS self-test that diagnoses its own wiring.',
+		changes: [
+			'The GPS self-test reports what it heard (bytes, valid NMEA sentences, checksum and framing errors), probes the GPS data line with the receiver off and on, checks the GPS enable line and tries other speeds; the web tool turns the result into assembly checks.',
+			'The sensor UART receive pins are pulled up.',
+		],
+	},
+	'v1.0.3': {
+		warn: 'Do not deploy: on the carrier the unit reads no WS85 wind or rain data (each WS85 frame loses its first bytes); fixed in v1.0.4.',
+		summary: 'GPS and WS85 data no longer lost while the processor idles.',
+		changes: [
+			'The sensor UART (GPS and WS85) keeps its clock while the processor idles between loop passes. Before, almost all GPS and WS85 bytes were lost, so position fixes and wind readings failed.',
+		],
+	},
+	'v1.0.4': {
+		summary: 'WS85 wind and rain readings on the carrier, at any WS85 speed.',
+		changes: [
+			'Reads WS85 broadcasts that lose their first bytes on the carrier (its WS85 data line idles low between frames): the header is rebuilt and the frame kept only when its CRC, address and baud code agree.',
+			'The WS85 self-test finds the sensor\'s speed (115200, then 9600, 19200 and 4800: a freshly reset or updated WS85 talks at 9600) and the cycle uses it until the next boot.',
+		],
+	},
+	'v1.0.5': {
+		summary: 'Naiad\'s radio configuration on every unit.',
+		changes: [
+			'Every boot stores Naiad\'s radio configuration (RCONF: 401.62-401.68 MHz, 27 dBm, LDA2) when the unit holds another one, so a unit on an older key moves over on its first boot. A key written over the console lasts until the next boot.',
+		],
+	},
 };
 const STATUSES = ['free', 'in use', 'retired'];
 const EDITABLE = ['addr', 'key_enc', 'rconf', 'status', 'sn', 'fw', 'assigned', 'note'];
@@ -89,9 +133,10 @@ function fwIdFor(tag) {
 }
 
 function releaseEntry(env, tag, { name, date, prerelease = false, url, assets }) {
+	const note = RELEASE_NOTES[tag] || {};
 	return {
 		tag, name: name || tag, date: date || '', prerelease, url: url || `https://github.com/${env.GITHUB_REPO}/releases/tag/${tag}`,
-		warn: (RELEASE_NOTES[tag] || {}).warn || '', fwId: fwIdFor(tag),
+		warn: note.warn || '', fwId: fwIdFor(tag), summary: note.summary || '', changes: note.changes || [],
 		assets: assets.map(a => ({ ...a, url: `/api/firmware/${encodeURIComponent(tag)}/${encodeURIComponent(a.name)}` })),
 	};
 }

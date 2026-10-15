@@ -382,7 +382,13 @@ GitHub Releases (field and bench builds) and loads one with a click; the
 flash is then verified against the release's firmware ID (`Naiad vX.Y.Z (`).
 Releases with a known problem carry a warning (v1.0.0: do not deploy;
 v1.0.1-v1.0.2: GPS data lost, fixed in v1.0.3; v1.0.3: no WS85 data on
-the carrier, fixed in v1.0.4).
+the carrier, fixed in v1.0.4). *Release notes* for every Naiad release open
+from the header (both views), next to the release picker, beside the unit's
+firmware in Unit info (when it runs a release) and in the Voyage firmware
+step. They live with the warnings in `RELEASE_NOTES` in
+`web/naiad-tool/src/worker.js` (summary + changes per tag): add an entry with
+each release; the Worker test fails while the version in `NAIAD_VERSION`
+has none.
 
 *Keeping the unit awake*: while connected, the tool polls the unit's state
 every 5 s ("Keep the unit awake", ticked by default), also with the tab in
