@@ -75,6 +75,13 @@ const RELEASE_NOTES = {
 			'Every boot stores Naiad\'s radio configuration (RCONF: 401.62-401.68 MHz, 27 dBm, LDA2) when the unit holds another one, so a unit on an older key moves over on its first boot. A key written over the console lasts until the next boot.',
 		],
 	},
+	'v1.0.6': {
+		summary: 'The unit\'s own log can be switched on and watched live.',
+		changes: [
+			'AT+LOGLVL switches the unit\'s own log on the console: 0 everything, 1 state changes, 2 warnings, 3 errors, 4 silent (the default). The level lasts through resets until power is removed, and the lines arrive as they happen. The web tool\'s Unit log sets it.',
+			'The PA supply enable (P9) goes low at the end of every frame, not only before deep sleep, so a carrier that switches the PA supply with P9 keeps it off while the unit is awake between frames. The current carrier does not wire P9: its PA stays powered (about 57 mA) until it gets a switch.',
+		],
+	},
 };
 const STATUSES = ['free', 'in use', 'retired'];
 const EDITABLE = ['addr', 'key_enc', 'rconf', 'status', 'sn', 'fw', 'assigned', 'note'];
