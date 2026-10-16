@@ -396,6 +396,15 @@ every 5 s ("Keep the unit awake", ticked by default), also with the tab in
 the background or the window covered. Each console line holds the unit out
 of STOP2 for 30 s, so untick it, or disconnect, to measure sleep current.
 
+*Unit log* (header, both views): a panel docked at the bottom of the page
+with everything the unit prints, live, its state line (state, uptime,
+frames sent, awake share, battery, orders), Pause, Save (.txt) and a
+Detail switch that sets the unit's own log level (`AT+LOGLVL`, firmware
+after v1.0.5): silent, errors, warnings, state changes or everything. A
+field build is silent until switched; the tool puts the level it found
+back when it disconnects. On older firmware the switch is disabled and the
+panel shows only what the unit sends by itself.
+
 *Team vault* (Team credentials panel): one shared table of the CLS
 credential sets for the whole team. Sign in with a @siliconvandals.com
 Google account (Cloudflare Access), then unlock with the team passphrase.

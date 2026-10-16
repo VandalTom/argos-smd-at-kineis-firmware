@@ -131,6 +131,14 @@ progress { width: 100%; height: 10px; accent-color: var(--accent); }
 .conlines.hide-logs .ln.log { display: none; }
 .conlines.hide-poll .ln.quiet { display: none; }
 .conlines.hide-ts .ts { display: none; }
+.logdock { position: fixed; left: 0; right: 0; bottom: 0; height: 42vh; min-height: 200px; z-index: 30; display: flex; flex-direction: column; background: var(--panel); border-top: 1px solid var(--border); box-shadow: 0 -6px 18px rgba(0, 0, 0, .18); }
+.logdock[hidden] { display: none; }
+.logdock-head { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 6px 12px; }
+.logdock-head select { font: inherit; }
+.logdock .conlines { min-height: 0; border-bottom: 0; }
+#logNote { padding: 0 12px 6px; }
+#logNote:empty { display: none; }
+body.log-open { padding-bottom: 42vh; }
 .confoot { display: flex; gap: 6px; padding: 8px 12px; }
 .confoot input { flex: 1; min-width: 0; }
 dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text); max-width: min(520px, calc(100vw - 32px)); padding: 16px; }
@@ -255,6 +263,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
   <span id="fwPill" class="pill idle mono" hidden></span>
   <span id="batPill" class="pill warn" hidden title="Pack below 2.10 V: no GPS, no deployment burst, one TX per 2 h until it recovers past 2.15 V">Battery CRIT</span>
   <span class="spacer"></span>
+  <button type="button" class="vlink" id="btnLogHdr" title="Watch what the unit prints, live">Unit log</button>
   <button type="button" class="vlink" id="btnNotesHdr" title="What changed in each Naiad firmware release">Release notes</button>
   <div class="seg" role="group" aria-label="View">
     <button type="button" id="btnViewVoyage" aria-pressed="false" title="Step by step, for new users">Voyage</button>
@@ -785,6 +794,29 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 </aside>
 </main>
 
+<section id="logDock" class="logdock" hidden aria-label="Unit log">
+  <div class="logdock-head">
+    <b>Unit log</b>
+    <span id="logState" class="mono small muted"></span>
+    <span class="spacer"></span>
+    <label class="small">Detail
+      <select id="logLevel" disabled aria-label="What the unit logs">
+        <option value="4">Silent (field default)</option>
+        <option value="3">Errors</option>
+        <option value="2">Warnings and errors</option>
+        <option value="1">State changes</option>
+        <option value="0">Everything</option>
+      </select></label>
+    <label class="chk small"><input type="checkbox" id="logPoll"> Show polling</label>
+    <label class="chk small"><input type="checkbox" id="logPause"> Pause</label>
+    <button class="btn small" id="btnLogSave" type="button">Save</button>
+    <button class="btn small" id="btnLogClear" type="button">Clear</button>
+    <button class="btn small" id="btnLogClose" type="button">Close</button>
+  </div>
+  <div id="logNote" class="msg small"></div>
+  <div id="logLines" class="conlines" role="log" aria-live="off" tabindex="0"></div>
+</section>
+
 <dialog id="dlg" aria-labelledby="dlgTitle">
   <form method="dialog">
     <h3 id="dlgTitle"></h3>
@@ -810,7 +842,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.5.4';
+const TOOL_VERSION = '1.5.5';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -1112,6 +1144,14 @@ function atCmd(link, cmd, opts = {}) {
     }
   }, { timeout, signal, what, retry });
 }
+
+/** AT+LOGLVL=? (Naiad v1.0.6+): the console log stream's detail, 0 everything .. 3 errors, 4 silent;
+ *  null on firmware without the command (it answers 1203). */
+async function getLogLevel(link, opts = {}) {
+  try { return Number(await atCmd(link, 'AT+LOGLVL=?', { expect: '+LOGLVL=', ...opts })); }
+  catch (e) { if (e.code === '1203') return null; throw e; }
+}
+async function setLogLevel(link, level, opts = {}) { await atCmd(link, `AT+LOGLVL=${level}`, opts); }
 
 function normalizeIdReadback(s) {
   // Firmware prints the ID with %d: values >= 2^31 come back negative.
@@ -2611,7 +2651,9 @@ class NaiadSimulator {
       crashOnBoot: false,     // the app faults during init; after 3 failed boots in a row it boots into RESCUE
       wakeLatencyMs: 0,       // extra bytes lost while waking from STOP2 (tests the retry-once after a wake)
       batMv: 2650,            // NiMH pack voltage; < 2100 mV = CRIT (no GPS, no burst, 1 TX / 2 h, boot TX self-test skipped)
+      logLevel: 1,            // AT+LOGLVL: 0 everything .. 3 errors, 4 silent; null = firmware without the command
     }, opts);
+    this.logLevel = this.o.logLevel;
     this.gpsTime = false;      // GPS time acquired since power-up (survives resets): utc= is 0 until then
     this.clockSkewS = this.o.seed % 3;   // device clock vs PC (0..2 s), so the UI's difference display has something to show
     this.batSeen = 0;          // last measured pack voltage reported as bat= (0 = not measured yet)
@@ -2745,7 +2787,10 @@ class NaiadSimulator {
       this._blLine(line);
     }
   }
-  _log(text) { if (this.mode === 'app' && this.consoleReady) this._out(text); }
+  _log(text) {
+    const lvl = { T: 0, D: 0, I: 1, W: 2, E: 3 }[(/^\[([TDIWE])\]/.exec(text) || [])[1]] ?? 1;
+    if (this.mode === 'app' && this.consoleReady && (this.logLevel == null || (this.logLevel < 4 && lvl >= this.logLevel))) this._out(text);
+  }
   _randomLog() {
     const r = this.rand();
     if (r < 0.3) return `[D] lpm: sleep ${50 + Math.floor(this.rand() * 900)} ms`;
@@ -3029,6 +3074,12 @@ class NaiadSimulator {
       if (!(name === 'BOOT' || name === 'RESET' || credWrite || (q && name !== 'SELFTEST'))) { this._err('1203'); return; }
     }
     h.call(this, { q, hasEq, arg });
+  }
+  _cmd_LOGLVL({ q, arg }) {
+    if (this.o.logLevel == null) return this._err('1203');
+    if (q) return this._ok([`+LOGLVL=${this.logLevel}`]);
+    if (!/^[0-4]$/.test(arg)) return this._err('1203');
+    this.logLevel = Number(arg); this._ok();
   }
   _cmd_FW({ q }) { if (!q) return this._err('1203'); this._ok([`+FW=${this.fw}`]); }
   _cmd_VERSION({ q }) { if (!q) return this._err('1203'); this._ok(['+VERSION=0.7']); }
@@ -4717,7 +4768,7 @@ const NaiadProtocol = {
   Clock, sleep, CancelledError, TimeoutError, ProtocolError,
   crc32Ieee, crc32Mpeg2, hexToBytes, bytesToHex, hex8, isHex, u32le, putU32le, asciiBytes, latin1,
   redactLine, LineSplitter, Mutex, Link, flushLine, WAKE_IDLE_MS,
-  atCmd, atError, normalizeIdReadback, querySecKeyCrc, detectUnit, waitForApp, readUnitInfo, resetApp,
+  atCmd, atError, getLogLevel, setLogLevel, normalizeIdReadback, querySecKeyCrc, detectUnit, waitForApp, readUnitInfo, resetApp,
   parseKv, parseState, awakeDuty, deviceClock, parseRescueLine, UnitMonitor, parseCommission, getState, commissionCmd,
   parseStLine, parseSelftestStatus, newRun, txDeferral, isTxDeferred, gpsDiagnosis, ws85Diagnosis, sensorDiagnosis, evaluateSelftest, runSelftest, querySelftest, pollBootSelftest,
   WIZARD_STEPS, commissionUnit, lastOrBootSelftest,
@@ -4887,6 +4938,14 @@ function conDisplay(e) {
   else if (e.kind === 'note') t = '# ' + t;
   return t;
 }
+function conLineEl(e) {
+  const div = document.createElement('div');
+  div.className = 'ln ' + conClass(e) + (e.quiet ? ' quiet' : '');
+  const ts = document.createElement('span'); ts.className = 'ts';
+  ts.textContent = e.ts.toTimeString().slice(0, 8) + '.' + String(e.ts.getMilliseconds()).padStart(3, '0');
+  div.append(ts, document.createTextNode(conDisplay(e)));
+  return div;
+}
 function conFlush() {
   if (con.raf) cancelAnimationFrame(con.raf);
   con.raf = 0;
@@ -4896,13 +4955,9 @@ function conFlush() {
   const frag = document.createDocumentFragment();
   for (const e of con.pending) {
     con.entries.push(e);
-    const div = document.createElement('div');
-    div.className = 'ln ' + conClass(e) + (e.quiet ? ' quiet' : '');
-    const ts = document.createElement('span'); ts.className = 'ts';
-    ts.textContent = e.ts.toTimeString().slice(0, 8) + '.' + String(e.ts.getMilliseconds()).padStart(3, '0');
-    div.append(ts, document.createTextNode(conDisplay(e)));
-    frag.append(div);
+    frag.append(conLineEl(e));
   }
+  ulogFeed(con.pending);
   con.pending = [];
   box.append(frag);
   while (box.childElementCount > con.max) box.firstElementChild.remove();
@@ -4910,6 +4965,88 @@ function conFlush() {
   if (stick) box.scrollTop = box.scrollHeight;
 }
 function note(msg, level = 'info') { conAdd('note', msg, { level }); }
+
+/* ---------- unit log: a dock (both views) with everything the unit prints, its live state and the
+ * log detail switch (AT+LOGLVL, Naiad v1.0.6+). The level the tool finds is put back on disconnect. ---------- */
+const ulog = { buf: [], level: null, restore: null, seen: null };   // seen: the link whose level the dock shows
+function ulogShown() { return !$('#logDock').hidden; }
+function ulogWanted(e) { return $('#logPoll').checked || !e.quiet; }
+function ulogRender(list) {
+  const box = $('#logLines'), frag = document.createDocumentFragment();
+  for (const e of list) if (ulogWanted(e)) frag.append(conLineEl(e));
+  box.append(frag);
+  while (box.childElementCount > 3000) box.firstElementChild.remove();
+  box.scrollTop = box.scrollHeight;
+}
+function ulogRebuild() { $('#logLines').innerHTML = ''; ulogRender(ulog.buf.slice(-2000)); }
+function ulogFeed(list) {
+  for (const e of list) ulog.buf.push(e);
+  if (ulog.buf.length > 4000) ulog.buf.splice(0, ulog.buf.length - 3000);
+  if (ulogShown() && !$('#logPause').checked) ulogRender(list);
+}
+function ulogState() {
+  if (!ulogShown()) return;
+  const s = ui.unit.state;
+  const duty = s && typeof s === 'object' ? awakeDuty(s) : null;
+  $('#logState').textContent = !(ui.link && ui.link.isOpen) ? 'not connected'
+    : s && typeof s === 'object' && s.state ? [s.state, `up ${s.up} s`, `tx ${s.tx}`, duty != null ? `${(duty * 100).toFixed(1)} % awake` : null,
+      s.bat ? `${s.bat} mV ${s.tier || ''}`.trim() : null, s.comm ? `comm ${s.comm}` : null].filter(Boolean).join(' · ')
+    : 'state not read yet';
+}
+const LOG_LEVEL_NAMES = ['everything', 'state changes', 'warnings and errors', 'errors', 'silent'];
+async function ulogReadLevel() {
+  const sel = $('#logLevel');
+  sel.disabled = true;
+  if (!(ui.link && ui.link.isOpen && ui.mode === 'app')) { setMsg('#logNote', 'Connect a module to choose what it logs.'); return; }
+  const link = ui.link;
+  const r = await runOp('Reading the log detail', signal => getLogLevel(link, { signal }));
+  if (!r.ok && r.busy) {                                // the tool is busy (connecting, flashing...): try again shortly
+    setMsg('#logNote', 'Waiting for the tool to finish what it is doing…');
+    setTimeout(() => { if (ulogShown() && ui.link === link) void ulogReadLevel(); }, 1500);
+    return;
+  }
+  if (!r.ok) { setMsg('#logNote', `Log detail not read: ${r.error ? r.error.message : 'cancelled'}`, 'warn'); return; }
+  if (r.value == null) {
+    setMsg('#logNote', 'This firmware has no log switch (Naiad v1.0.5 and older): a field build prints no log, a bench build prints its state changes. What the unit sends by itself still shows here.', 'warn');
+    return;
+  }
+  ulog.level = r.value;
+  if (ulog.restore == null) ulog.restore = r.value;
+  sel.value = String(r.value);
+  sel.disabled = false;
+  setMsg('#logNote', '');
+}
+async function ulogSetLevel() {
+  const v = Number($('#logLevel').value);
+  const r = await runOp('Setting the log detail', signal => setLogLevel(ui.link, v, { signal }));
+  if (r.ok) {
+    ulog.level = v;
+    setMsg('#logNote', v === ulog.restore ? '' : `The unit now logs ${LOG_LEVEL_NAMES[v]}. It keeps that through resets until its power is removed; the tool puts back "${LOG_LEVEL_NAMES[ulog.restore]}" when it disconnects.`, 'ok');
+  } else {
+    setMsg('#logNote', `Log detail not changed: ${r.error ? r.error.message : 'cancelled'}`, 'err');
+    if (ulog.level != null) $('#logLevel').value = String(ulog.level);
+  }
+}
+function ulogOpen() {
+  $('#logDock').hidden = false;
+  document.body.classList.add('log-open');
+  ulogRebuild();
+  ulog.seen = undefined;                                 // read the level of whatever is connected now
+  ulogConn();
+}
+/** The dock follows the connection: a newly connected module's level is read, a disconnect disables the switch. */
+function ulogConn() {
+  if (!ulogShown()) return;
+  const live = !!(ui.link && ui.link.isOpen && ui.mode === 'app');
+  if (live && ulog.seen !== ui.link) { ulog.seen = ui.link; void ulogReadLevel(); }
+  else if (!live && ulog.seen !== null) { ulog.seen = null; $('#logLevel').disabled = true; setMsg('#logNote', 'Connect a module to choose what it logs.'); }
+  ulogState();
+}
+function ulogClose() { $('#logDock').hidden = true; document.body.classList.remove('log-open'); }
+function ulogSave() {
+  const text = ulog.buf.filter(ulogWanted).map(e => `${e.ts.toISOString()} ${conDisplay(e)}`).join('\n') + '\n';
+  download(`naiad_unit-log_${stamp()}.txt`, text, 'text/plain');
+}
 
 /* ---------- link wiring ---------- */
 
@@ -5050,6 +5187,10 @@ async function connect() {
 async function disconnect(lost) {
   if (ui.op) ui.op.ac.abort();
   const link = ui.link;
+  if (!lost && link && link.isOpen && ui.mode === 'app' && ulog.restore != null && ulog.level !== ulog.restore) {
+    try { await setLogLevel(link, ulog.restore, { timeout: 1500 }); } catch (e) { note(`Log detail not put back: ${e.message}`, 'warn'); }
+  }
+  ulog.level = ulog.restore = null;
   ui.link = null; ui.mode = null;
   if (link) { try { await link.close(); } catch (e) { /* ignore */ } }
   if (!lost) note('Disconnected');
@@ -6743,6 +6884,7 @@ function downloadReportJson(r) { download(reportFileStem(r) + '.json', JSON.stri
 /* ---------- rendering: header, unit, controls ---------- */
 
 function renderConn() {
+  ulogConn();
   vSchedule();
   const pill = $('#connPill');
   const conn = ui.link && ui.link.isOpen;
@@ -6762,6 +6904,7 @@ function renderConn() {
   $('#connSum').innerHTML = ''; if (conn) $('#connSum').append(badge(ui.mode === 'app' ? 'APP' : ui.mode === 'bl' ? 'BOOTLOADER' : 'NO REPLY', cls));
 }
 function renderUnit() {
+  ulogState();
   const u = ui.unit;
   $('#uFw').textContent = valText(u.fw);
   const fwTag = fwReleaseTag(u.fw);
@@ -8300,6 +8443,13 @@ function init() {
   $('#fwFile').addEventListener('change', e => loadImageFile(e.target.files[0]));
   $('#relSelect').addEventListener('change', relSelected);
   $('#btnRelNotes').addEventListener('click', () => { const { r } = relPicked(); showReleaseNotes(r ? r.tag : null); });
+  $('#btnLogHdr').addEventListener('click', () => (ulogShown() ? ulogClose() : ulogOpen()));
+  $('#btnLogClose').addEventListener('click', ulogClose);
+  $('#btnLogClear').addEventListener('click', () => { ulog.buf = []; $('#logLines').innerHTML = ''; });
+  $('#btnLogSave').addEventListener('click', ulogSave);
+  $('#logPoll').addEventListener('change', ulogRebuild);
+  $('#logPause').addEventListener('change', () => { if (!$('#logPause').checked) ulogRebuild(); });
+  $('#logLevel').addEventListener('change', () => void ulogSetLevel());
   $('#btnNotesHdr').addEventListener('click', () => { const d = defaultRelease(rel.list); showReleaseNotes((ui.mode === 'app' && fwReleaseTag(ui.unit.fw)) || (d && d.release.tag)); });
   $('#btnRelLoad').addEventListener('click', () => void relLoad());
   $('#expectFw').addEventListener('input', e => { e.target.dataset.auto = ''; });

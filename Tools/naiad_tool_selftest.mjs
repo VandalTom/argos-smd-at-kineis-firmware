@@ -639,6 +639,28 @@ await test('Commissioning: query, START burst (TX every minute), SKIP, ARM; STAT
   } finally { r.done(); }
 });
 
+await test('Unit log: AT+LOGLVL reads and sets what the unit logs; older firmware has no switch', async () => {
+  const r = await rig({ pendingChance: 0, provisioned: true });
+  try {
+    eq(await P.getLogLevel(r.link), 1, 'state changes by default (simulator)');
+    await P.setLogLevel(r.link, 4);
+    eq(await P.getLogLevel(r.link), 4, 'silent');
+    const before = r.log.length;
+    r.sim._log('[I] [CC] a state change');
+    r.sim._log('[E] [CC] an error');
+    const mine = () => r.log.slice(before).filter(l => /a state change|an error/.test(l));
+    eq(mine().length, 0, 'silent: no log lines');
+    await P.setLogLevel(r.link, 3);
+    r.sim._log('[I] [CC] a state change');
+    r.sim._log('[E] [CC] an error');
+    await P.sleep(50);
+    eq(mine().join('|'), '< [E] [CC] an error', 'errors only');
+    await rejects(P.setLogLevel(r.link, 7), e => e.code === '1203', 'an unknown level is refused');
+  } finally { r.done(); }
+  const old = await rig({ pendingChance: 0, provisioned: true, logLevel: null });
+  try { eq(await P.getLogLevel(old.link), null, 'v1.0.5 and older: no switch'); } finally { old.done(); }
+});
+
 await test('STATE parsing is generic (slp, prov, future fields); awake duty; rescue/provisioning monitor', () => {
   const s = P.parseState('CYCLE_WAIT,up=200,tx=4,mac=1,comm=DONE,st=PASS,slp=150,prov=1,future=x');
   eq(s.state, 'CYCLE_WAIT', 'state'); eq(s.slp, '150', 'slp'); eq(s.prov, '1', 'prov'); eq(s.future, 'x', 'unknown trailing field kept');
