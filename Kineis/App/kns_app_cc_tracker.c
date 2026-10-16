@@ -74,6 +74,7 @@
 #include "cc_hw.h"
 #include "cc_payload.h"
 #include "cc_tier.h"
+#include "cc_reset.h"
 #include "cc_ws85.h"
 #include "cc_nmea.h"
 #include "cc_i2c_sens.h"
@@ -1721,7 +1722,15 @@ void KNS_APP_cc_tracker_init(void)
 	MGR_ERR_init();
 
 	{
-		uint32_t attempts = boot_attempts_read() + 1;
+		/* A reset from the reset pin alone (a button, a debug probe) is
+		 * deliberate: it restarts the count, so only watchdog, crash and
+		 * brownout resets add up to rescue mode (cc_reset.h) */
+		extern uint32_t g_boot_rcc_csr_raw;   /* main(): RCC_CSR before it is cleared */
+		_Static_assert(CC_CSR_PINRSTF == RCC_CSR_PINRSTF && CC_CSR_BORRSTF == RCC_CSR_BORRSTF &&
+			CC_CSR_SFTRSTF == RCC_CSR_SFTRSTF && CC_CSR_IWDGRSTF == RCC_CSR_IWDGRSTF &&
+			CC_CSR_WWDGRSTF == RCC_CSR_WWDGRSTF && CC_CSR_LPWRRSTF == RCC_CSR_LPWRRSTF &&
+			CC_CSR_OBLRSTF == RCC_CSR_OBLRSTF, "cc_reset.h RCC_CSR bits");
+		uint32_t attempts = cc_reset_from_pin_only(g_boot_rcc_csr_raw) ? 1u : boot_attempts_read() + 1;
 
 		boot_attempts_write(attempts);
 		if (attempts > CC_RESCUE_AFTER_FAILED_BOOTS) {

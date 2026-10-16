@@ -479,6 +479,9 @@ python Tools/naiad_station.py --port COM5 --flash build/argos-smd-at-kineis-firm
    once it stays up 90 s) the next boot is a **rescue boot** — no sensors, no
    radio, console only for 10 min (`+RESCUE=failed_boots=N,window_s=600`),
    enough to `AT+BOOT` and reflash. Fault handlers always reset (never hang).
+   Only watchdog, software (crash) and brownout resets count: a reset from
+   the reset pin alone (a reset button, a debug probe), seen in RCC_CSR as
+   PINRSTF without any other reset flag, restarts the count (`cc_reset.h`).
 4. Last resort: BOOT0 test pad high at power-up + `Tools/rom_uart_flash.py`,
    or SWD (`make flash-full`).
 
