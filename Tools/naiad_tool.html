@@ -842,7 +842,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.5.5';
+const TOOL_VERSION = '1.5.6';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -4868,7 +4868,7 @@ const UNSET_KEY_CRC = seckeyCrc('F'.repeat(32));   // CRC-32 of an erased (all-0
 const ui = {
   link: null, transport: null, sim: null, port: null, mode: null, op: null,
   unit: {}, image: null, flash: null, selftest: null, creds: null, commission: null, commUpdated: null,
-  unsupported: new Set(), lastPoll: 0, history: [], histPos: -1, lastFailedFlash: false,
+  unsupported: new Set(), lastPoll: 0, history: [], histPos: -1, lastFailedFlash: false, portFailed: false,
   mon: new UnitMonitor(), wizard: null, ws85: null,
 };
 
@@ -5103,16 +5103,18 @@ function portLabel(port) {
   } catch (e) { return { text: 'Serial port', warn: '' }; }
 }
 function showPortInfo() {
-  if (!ui.port) { $('#portInfo').textContent = 'No port chosen yet. Connect asks for one.'; return; }
+  if (!ui.port) { $('#portInfo').textContent = 'No port chosen yet. Connect asks for one.'; $('#portInfo').className = 'muted small'; return; }
   const l = portLabel(ui.port);
-  $('#portInfo').textContent = l.text + (l.warn ? `: ${l.warn}` : '');
+  $('#portInfo').textContent = l.text + (l.warn ? `: ${l.warn}` : '') + (ui.portFailed ? ' (the last attempt failed: Connect asks which port to use)' : '');
   $('#portInfo').className = l.warn ? 'msg warn small' : 'muted small';
 }
 async function choosePort() {
   if (!('serial' in navigator)) return false;
-  try { ui.port = await navigator.serial.requestPort(); showPortInfo(); return true; }
+  try { ui.port = await navigator.serial.requestPort(); ui.portFailed = false; showPortInfo(); return true; }
   catch (e) { setMsg('#connMsg', 'No port selected.', 'warn'); return false; }
 }
+/** The remembered port did not work: the next Connect asks which port to use. */
+function portFailed() { ui.portFailed = true; showPortInfo(); }
 
 /* ---------- operations ---------- */
 
@@ -5188,7 +5190,7 @@ async function connect({ reconnect = false } = {}) {
   let transport;
   if (srcValue() === 'serial') {
     if (!('serial' in navigator)) { setMsg('#connMsg', 'Web Serial is not available: use Chrome or Edge on desktop, or pick the Simulator.', 'err'); return; }
-    if (!ui.port && !(await choosePort())) return;
+    if ((!ui.port || (ui.portFailed && !reconnect)) && !(await choosePort())) return;
     transport = new WebSerialTransport(ui.port);
     Clock.scale = 1;
   } else {
@@ -5202,7 +5204,8 @@ async function connect({ reconnect = false } = {}) {
   catch (e) {
     if (reconnect) return;
     const busy = /already open|failed to open/i.test(e.message);
-    setMsg('#connMsg', `Could not open the port: ${e.message}${busy ? ' (close any other serial terminal that is using it)' : ''}`, 'err');
+    if (transport.kind !== 'sim') portFailed();
+    setMsg('#connMsg', `Could not open the port: ${e.message}${busy ? ' (close any other serial terminal that is using it, or choose another port)' : ''}. Connect asks which port to use next time.`, 'err');
     return;
   }
   ui.link = link; ui.transport = transport; ui.mode = null; ui.unsupported.clear(); ui.unit = {}; ui.commission = null;
@@ -5210,8 +5213,9 @@ async function connect({ reconnect = false } = {}) {
   note(`Opened ${transport.kind === 'sim' ? 'simulator' : 'serial port'}${transport.kind === 'sim' && Clock.scale !== 1 ? ` (timing x${+(1 / Clock.scale).toFixed(2)})` : ''}`);
   renderConn(); renderUnit(); updateControls();
   const r = await runOp('Connecting', signal => detectUnit(link, { bauds, signal, onTry: t => setMsg('#connMsg', `Trying the ${t}…`) }));
-  if (!r.ok) { setMsg('#connMsg', r.error ? r.error.message : 'Cancelled', 'err'); renderConn(); return; }
+  if (!r.ok) { if (transport.kind !== 'sim' && !reconnect) portFailed(); setMsg('#connMsg', r.error ? r.error.message : 'Cancelled', 'err'); renderConn(); return; }
   const d = r.value;
+  if (d.mode === 'app' || d.mode === 'bl') { ui.portFailed = false; showPortInfo(); }
   if (d.mode === 'app') {
     ui.mode = 'app';
     setMsg('#connMsg', `Application answered at ${d.baud} baud.`, 'ok');
@@ -5224,7 +5228,8 @@ async function connect({ reconnect = false } = {}) {
     setMsg('#connMsg', `The unit is in the DFU bootloader (${d.bl}) at ${d.baud} baud. Flash firmware to finish an update, or use Exit bootloader.`, 'warn');
   } else {
     ui.mode = null;
-    setMsg('#connMsg', `No reply at ${bauds.join(' or ')} baud. Check the wiring (adapter TX → P4/PA3, RX ← P5/PA2, GND) and power. The port stays open for manual commands.`, 'err');
+    if (transport.kind !== 'sim' && !reconnect) portFailed();
+    setMsg('#connMsg', `No reply at ${bauds.join(' or ')} baud. Check the wiring (adapter TX → P4/PA3, RX ← P5/PA2, GND) and power, or that this is the right port. The port stays open for manual commands; after Disconnect, Connect asks which port to use.`, 'err');
     showRecovery('#connRecovery', '');
   }
   renderConn(); updateControls();
@@ -7753,6 +7758,13 @@ const VVIEWS = {
         out.push(...vSwdPanel());
         out.push(el('div', { class: 'vactions' }, vBtn(vPracticeProbe() ? 'Hail the simulated module' : 'Hail the module (serial adapter)', vConnect, { primary: !!voy.swdDone })));
       } else out.push(el('div', { class: 'vactions' }, vBtn('Hail the module', vConnect, { primary: true })));
+      if (serialOk && (src === 'serial' || (src === 'probe' && !vPracticeProbe()))) {
+        out.push(el('p', { class: 'vlead small' },
+          !ui.port ? 'Chrome or Edge asks which adapter to use. '
+            : ui.portFailed ? `The last try with ${portLabel(ui.port).text} failed: hailing asks which adapter to use. `
+            : `Adapter: ${portLabel(ui.port).text}. `,
+          vLink(ui.port ? 'Choose another adapter…' : 'Choose the adapter now…', async () => { if (await choosePort()) { voy.err.connect = null; } vRender(); })));
+      }
       out.push(el('details', { class: 'help' }, el('summary', { text: 'How to wire the adapter' }), vFixes([
         'Adapter TX → module P4 (PA3), adapter RX ← module P5 (PA2), GND ↔ GND.',
         'Use a 3.3 V adapter (CP2102, CH340 or FT232). Never 5 V signals.',
