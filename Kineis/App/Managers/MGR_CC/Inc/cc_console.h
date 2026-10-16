@@ -21,6 +21,10 @@
  *   - AT+PROV=ERASE                          -> CC_CON_PROV_ERASE (blank ID/ADDR/
  *                                               SECKEY + mirror, then reboot;
  *                                               refused while transmitting)
+ *   - AT+LOGLVL=?                            -> CC_CON_LOGLVL_QUERY
+ *   - AT+LOGLVL=<0..4>                       -> CC_CON_LOGLVL (console log stream:
+ *                                               0 trace .. 3 errors, 4 silent;
+ *                                               kept across soft resets)
  *   - read-only status queries (=?) below    -> CC_CON_DISPATCH (standard handler)
  *   - anything else                          -> CC_CON_REJECT (+ERROR)
  *
@@ -46,6 +50,8 @@ typedef enum {
 	CC_CON_CRED,
 	CC_CON_KEYCRC,
 	CC_CON_PROV_ERASE,
+	CC_CON_LOGLVL_QUERY,
+	CC_CON_LOGLVL,
 } cc_con_action_t;
 
 /**

@@ -1599,6 +1599,22 @@ static void console_poll(void)
 				MCU_AT_CONSOLE_send("+PROV=ERASE_FAILED\r\n");
 			}
 			break;
+		case CC_CON_LOGLVL_QUERY:
+			MCU_AT_CONSOLE_send("+LOGLVL=%u\r\n", vMGR_LOG_isEnabled() ?
+				(unsigned)MGR_LOG_getLevel() : (unsigned)MGR_LOG_LVL_NONE);
+			bMGR_AT_CMD_logSucceedMsg();
+			break;
+		case CC_CON_LOGLVL: {
+			/* Console log stream: 0 trace, 1 state changes, 2 warnings,
+			 * 3 errors, 4 silent (the field build's default). Kept across
+			 * soft resets; power loss restores the build's default. */
+			unsigned lvl = (unsigned)(cc_console_params(l)[0] - '0');
+
+			vMGR_LOG_setEnabled(lvl < (unsigned)MGR_LOG_LVL_NONE);
+			MGR_LOG_setLevel((MGR_LOG_Level_t)lvl);
+			bMGR_AT_CMD_logSucceedMsg();
+			break;
+		}
 		case CC_CON_DISPATCH:
 			MGR_AT_CMD_decodeAt(line);
 			break;
@@ -2090,6 +2106,11 @@ static void pwr_steps_poll(void)
 void KNS_APP_cc_tracker_loop(void)
 {
 	MGR_WDG_refresh();
+	/* A field build's OS loop never flushes the log (DEBUG only), so with
+	 * the log switched on (AT+LOGLVL) it would leave only at the next
+	 * STOP2, which a connected tool keeps away: send it as it comes */
+	if (vMGR_LOG_isEnabled())
+		(void)MGR_LOG_flush();
 	console_poll();
 	service_requests();
 	poll_provisioning();

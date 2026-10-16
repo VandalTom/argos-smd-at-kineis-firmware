@@ -75,6 +75,22 @@ void test_prov_erase(void)
 	TEST_PASS();
 }
 
+/** The console log detail: a query, or one digit 0..4. */
+void test_loglvl(void)
+{
+	ASSERT_EQ(CC_CON_LOGLVL_QUERY, cc_console_classify("AT+LOGLVL=?\r\n"));
+	ASSERT_EQ(CC_CON_LOGLVL, cc_console_classify("AT+LOGLVL=0\r\n"));
+	ASSERT_EQ(CC_CON_LOGLVL, cc_console_classify("AT+LOGLVL=1"));
+	ASSERT_EQ(CC_CON_LOGLVL, cc_console_classify("AT+LOGLVL=4\r\n"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+LOGLVL=5\r\n"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+LOGLVL=10\r\n"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+LOGLVL=\r\n"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+LOGLVL\r\n"));
+	ASSERT_EQ(CC_CON_REJECT, cc_console_classify("AT+LOGLVL=x\r\n"));
+	ASSERT_EQ('3', cc_console_params("AT+LOGLVL=3\r\n")[0]);
+	TEST_PASS();
+}
+
 /** Anything that could drive the MAC directly is refused. */
 void test_actions_rejected(void)
 {
@@ -119,6 +135,7 @@ int main(void)
 	RUN_TEST(test_control_commands);
 	RUN_TEST(test_credentials);
 	RUN_TEST(test_prov_erase);
+	RUN_TEST(test_loglvl);
 	RUN_TEST(test_actions_rejected);
 	RUN_TEST(test_near_misses_rejected);
 	RUN_TEST(test_params_and_crc);

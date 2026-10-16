@@ -189,6 +189,7 @@ console can drive the radio behind the tracker's back:
 | `AT+STATE=?` | `+STATE=<state>,up=<s>,tx=<n>,mac=<0/1>,comm=<phase>,st=<NONE/RUNNING/PASS/FAIL>,slp=<s in STOP2>,prov=<0/1>,bat=<mV>,tier=<HIGH/MID/LOW/CRIT>,utc=<unix, 0 = no fix yet>` |
 | `AT+SELFTEST=[GPS,WS85,ENV,ADC,TX]` / `AT+SELFTEST=?` | run (all items by default) / replay the last report |
 | `AT+COMMISSION=?` / `=START` / `=SKIP` / `=ARM` | deployment-burst status / force / mark done / re-arm |
+| `AT+LOGLVL=?` / `AT+LOGLVL=<0-4>` | `+LOGLVL=<n>` / `+OK`: the unit's own log on this console, 0 everything, 1 state changes, 2 warnings, 3 errors, 4 silent (a field build's default; a bench build starts at 1). Kept across resets until power is removed. Older firmware answers `+ERROR=1203` |
 | `AT+RESET=` | `+RESET=OK` (or `+RESET=PENDING` until a TX finishes), reboot |
 | `AT+BOOT=` | `+BOOT=OK` (or `PENDING`), hands over to the UART DFU bootloader |
 

@@ -72,6 +72,11 @@ cc_con_action_t cc_console_classify(const char *line)
 		return CC_CON_KEYCRC;
 	if (body_is(line, len, "AT+PROV=ERASE"))
 		return CC_CON_PROV_ERASE;
+	if (body_is(line, len, "AT+LOGLVL=?"))
+		return CC_CON_LOGLVL_QUERY;
+	/* One digit, a valid level: the handler only applies it */
+	if (len == 11 && strncmp(line, "AT+LOGLVL=", 10) == 0 && line[10] >= '0' && line[10] <= '4')
+		return CC_CON_LOGLVL;
 	if (is_action(line, len, "AT+SAVE_RCONF", 0))
 		return CC_CON_CRED;
 
