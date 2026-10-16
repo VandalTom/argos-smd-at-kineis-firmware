@@ -82,6 +82,13 @@ const RELEASE_NOTES = {
 			'The PA supply enable (P9) goes low at the end of every frame, not only before deep sleep, so a carrier that switches the PA supply with P9 keeps it off while the unit is awake between frames. The current carrier does not wire P9: its PA stays powered (about 57 mA) until it gets a switch.',
 		],
 	},
+	'v1.0.7': {
+		summary: 'Arming probes the GPS at once; a reset button no longer leads to rescue mode.',
+		changes: [
+			'AT+COMMISSION=ARM (the web tool\'s "Give the orders") starts the next cycle at once, and its GPS step tries for the first fix whatever the battery tier or cycle period: no more waiting up to 9 minutes, and it also works on a LOW pack (a critical pack still holds that cycle\'s frame). Later cycles follow the battery tier again.',
+			'A reset from the reset pin alone (an external reset button, a debug probe) restarts the failed-boot count, so pressing reset several times no longer sends the unit into its 10-minute rescue mode. Watchdog, crash and brownout resets still count.',
+		],
+	},
 };
 const STATUSES = ['free', 'in use', 'retired'];
 const EDITABLE = ['addr', 'key_enc', 'rconf', 'status', 'sn', 'fw', 'assigned', 'note'];
