@@ -395,6 +395,10 @@ has none.
 every 5 s ("Keep the unit awake", ticked by default), also with the tab in
 the background or the window covered. Each console line holds the unit out
 of STOP2 for 30 s, so untick it, or disconnect, to measure sleep current.
+If the USB serial adapter drops out (a transmit near the adapter or its
+cable can knock a CH340 off USB for a second: every minute during a
+deployment burst), the tool reopens the same adapter when Windows brings it
+back, within 60 s ("Reconnecting…" in the header meanwhile).
 
 *Unit log* (header, both views): a panel docked at the bottom of the page
 with everything the unit prints, live, its state line (state, uptime,

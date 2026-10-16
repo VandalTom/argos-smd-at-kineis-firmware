@@ -5068,7 +5068,7 @@ function wireLink(link) {
       note(`Connection lost${info ? ': ' + info : ''}`, 'error');
       if (ui.op) ui.op.ac.abort();
       ui.mode = null;
-      setTimeout(() => { if (ui.link === link) disconnect(true); }, 0);
+      setTimeout(async () => { if (ui.link === link) { await disconnect(true); reconnectArm(); } }, 0);
     }
     renderConn();
   });
@@ -5137,7 +5137,52 @@ async function runOp(name, fn, { cancellable = true } = {}) {
 function setCancellable(v) { if (ui.op) { ui.op.cancellable = v; renderOp(); updateControls(); } }
 function cancelOp() { if (ui.op && ui.op.cancellable) ui.op.ac.abort(); }
 
-async function connect() {
+/* ---------- reconnect after the USB adapter drops out: a transmit (every minute in a deployment burst)
+ * can knock a CH340 off USB for a second. The same adapter (USB vendor/product ID) is reopened when
+ * Windows brings it back, within RECONNECT_MS; Connect or Disconnect cancels the wait. ---------- */
+const RECONNECT_MS = 60000;
+const rec = { pending: null };          // { port, info, since, timer, busy }
+function usbIdOf(port) {
+  try { const i = port.getInfo(); return i && i.usbVendorId != null ? `${i.usbVendorId}:${i.usbProductId}` : null; } catch (e) { return null; }
+}
+function reconnectArm() {
+  if (rec.pending || !ui.port || !('serial' in navigator) || srcValue() !== 'serial') return;
+  rec.pending = { port: ui.port, info: usbIdOf(ui.port), since: Date.now(), busy: false, timer: setInterval(() => void reconnectTry(), 1000) };
+  note('The serial adapter dropped out: reconnecting when it comes back (up to 60 s)…', 'warn');
+  renderConn();
+}
+function reconnectCancel(msg) {
+  if (!rec.pending) return;
+  clearInterval(rec.pending.timer);
+  rec.pending = null;
+  if (msg) note(msg, 'warn');
+  renderConn();
+}
+async function reconnectTry(port) {
+  const p = rec.pending;
+  if (!p || p.busy || ui.op || (ui.link && ui.link.isOpen)) return;
+  if (Date.now() - p.since > RECONNECT_MS) { reconnectCancel('The serial adapter did not come back within 60 s: plug it in again and click Connect.'); return; }
+  p.busy = true;
+  try {
+    if (!port) {
+      const ports = await navigator.serial.getPorts();
+      port = ports.find(x => x === p.port) || (p.info ? ports.find(x => usbIdOf(x) === p.info) : null);
+    } else if (port !== p.port && (!p.info || usbIdOf(port) !== p.info)) port = null;
+    if (!port || rec.pending !== p) return;
+    ui.port = port;
+    await connect({ reconnect: true });
+    if (ui.link && ui.link.isOpen && rec.pending === p) {
+      clearInterval(p.timer);
+      rec.pending = null;
+      note(`Reconnected ${((Date.now() - p.since) / 1000).toFixed(1)} s after the adapter dropped out`);
+      renderConn();
+    }
+  } catch (e) { /* not back yet: the next tick tries again */ }
+  finally { p.busy = false; }
+}
+
+async function connect({ reconnect = false } = {}) {
+  if (!reconnect) reconnectCancel();
   if (ui.op || (ui.link && ui.link.isOpen)) return;
   hideRecovery('#connRecovery');
   let transport;
@@ -5155,6 +5200,7 @@ async function connect() {
   const bauds = baudList();
   try { await link.open(bauds[0]); }
   catch (e) {
+    if (reconnect) return;
     const busy = /already open|failed to open/i.test(e.message);
     setMsg('#connMsg', `Could not open the port: ${e.message}${busy ? ' (close any other serial terminal that is using it)' : ''}`, 'err');
     return;
@@ -5185,12 +5231,13 @@ async function connect() {
 }
 
 async function disconnect(lost) {
+  if (!lost) reconnectCancel();
   if (ui.op) ui.op.ac.abort();
   const link = ui.link;
   if (!lost && link && link.isOpen && ui.mode === 'app' && ulog.restore != null && ulog.level !== ulog.restore) {
     try { await setLogLevel(link, ulog.restore, { timeout: 1500 }); } catch (e) { note(`Log detail not put back: ${e.message}`, 'warn'); }
   }
-  ulog.level = ulog.restore = null;
+  if (!lost) ulog.level = ulog.restore = null;            // a dropped link keeps them: the unit still holds its level
   ui.link = null; ui.mode = null;
   if (link) { try { await link.close(); } catch (e) { /* ignore */ } }
   if (!lost) note('Disconnected');
@@ -6898,6 +6945,7 @@ function renderConn() {
     else { text = `No reply · ${b}`; cls = 'fail'; }
     if (sim) text = 'SIM · ' + text;
   }
+  if (!conn && rec.pending) { text = 'Reconnecting…'; cls = 'warn'; }
   pill.textContent = text; pill.className = 'pill ' + cls;
   const fw = typeof ui.unit.fw === 'string' ? ui.unit.fw : '';
   $('#fwPill').hidden = !(conn && fw); $('#fwPill').textContent = fw;
@@ -8417,9 +8465,15 @@ function init() {
   for (const id of ['#simWs85', '#simBusy', '#simCrash', '#simBat', '#simGps']) $(id).addEventListener('change', () => { if (ui.sim) Object.assign(ui.sim.o, simOptions()); });
   if ('serial' in navigator) {
     navigator.serial.getPorts().then(ports => { if (ports.length === 1 && !ui.port) { ui.port = ports[0]; showPortInfo(); } }).catch(() => {});
-    navigator.serial.addEventListener('disconnect', e => {
-      if (ui.port && e.target === ui.port) { note('The USB serial adapter was unplugged', 'error'); if (ui.link) disconnect(true); }
+    navigator.serial.addEventListener('disconnect', async e => {
+      if (ui.port && e.target === ui.port) {
+        note('The USB serial adapter was unplugged', 'error');
+        const was = !!(ui.link && ui.transport && ui.transport.kind !== 'sim');
+        if (ui.link) await disconnect(true);
+        if (was) reconnectArm();
+      }
     });
+    navigator.serial.addEventListener('connect', e => { if (rec.pending) void reconnectTry(e.target); });
   }
   $('#btnPort').addEventListener('click', choosePort);
   $('#btnConnect').addEventListener('click', connect);
