@@ -842,7 +842,7 @@ body.voyage-mode .layout, body.voyage-mode #rescueBanner, body.voyage-mode #prov
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.5.6';
+const TOOL_VERSION = '1.5.7';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -7938,7 +7938,7 @@ const VVIEWS = {
     const pick = voy.ordersPick;
     out.push(el('div', { class: 'vchoices', role: 'group', 'aria-label': 'Orders' },
       el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(pick === 'ARM'), onclick: () => { voy.ordersPick = 'ARM'; vRender(); } },
-        el('b', { text: 'Ready for deployment' }), el('span', { text: 'Burst after the first GPS fix outdoors. Choose this for units going to sea.' })),
+        el('b', { text: 'Ready for deployment' }), el('span', { text: 'Burst after the first GPS fix outdoors. Choose this for units going to sea. On firmware after v1.0.6 the module tries for a fix straight away.' })),
       el('button', { type: 'button', class: 'vchoice', 'aria-pressed': String(pick === 'SKIP'), onclick: () => { voy.ordersPick = 'SKIP'; vRender(); } },
         el('b', { text: 'No burst' }), el('span', { text: 'Bench units, or a unit that is already deployed.' }))));
     if (voy.orders) out.push(vState('ok', voy.orders === 'ARM' ? 'Orders given: ready for deployment' : 'Orders given: no burst', ''));
