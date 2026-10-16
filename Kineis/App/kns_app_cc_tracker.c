@@ -194,6 +194,8 @@ static int st_tx_evt;               /**< 0 waiting, 1 TX_DONE, -1 timeout, -2 ab
 static int st_tx_status;
 
 static cc_comm_t comm;
+static bool arm_probe;   /**< armed from the console: the next cycle starts now and
+                          *   probes the GPS whatever the battery tier */
 
 static void after_mac_ready(void);
 static void tx_finished(void);
@@ -784,25 +786,32 @@ static void gps_plan(void)
 	cc_comm_gps_t pol = cc_comm_gps_policy(&comm, powerup_ms(), CC_COMM_FAST_GPS_MS);
 
 	gps_planned = false;
-	if (tier.tier == CC_TIER_CRIT) {
-		MGR_LOG_DEBUG("[GPS] skipped (battery critical)\r\n");
-		return;
-	}
-	if (pol == CC_COMM_GPS_SKIP) {
-		MGR_LOG_DEBUG("[GPS] skipped (deployment burst)\r\n");
-		return;
-	}
-	/* LOW battery: no every-cycle commissioning probes; sparser fixes */
-	gps_fast = (pol == CC_COMM_GPS_FAST) && tier.tier != CC_TIER_LOW;
-	if (!gps_fast && gps_countdown > 0) {
-		gps_countdown--;
-		MGR_LOG_DEBUG("[GPS] scheduled skip (%u left)\r\n", gps_countdown);
-		return;
-	}
-	if (!gps_fast && gps_skip_cycles > 0) {
-		gps_skip_cycles--;
-		MGR_LOG_DEBUG("[GPS] backoff skip (%u left)\r\n", gps_skip_cycles);
-		return;
+	if (arm_probe) {
+		/* Just armed from the console: probe now, whatever the battery
+		 * tier or the GPS schedule (a critical pack still holds the TX) */
+		arm_probe = false;
+		gps_fast = true;
+	} else {
+		if (tier.tier == CC_TIER_CRIT) {
+			MGR_LOG_DEBUG("[GPS] skipped (battery critical)\r\n");
+			return;
+		}
+		if (pol == CC_COMM_GPS_SKIP) {
+			MGR_LOG_DEBUG("[GPS] skipped (deployment burst)\r\n");
+			return;
+		}
+		/* LOW battery: no every-cycle commissioning probes; sparser fixes */
+		gps_fast = (pol == CC_COMM_GPS_FAST) && tier.tier != CC_TIER_LOW;
+		if (!gps_fast && gps_countdown > 0) {
+			gps_countdown--;
+			MGR_LOG_DEBUG("[GPS] scheduled skip (%u left)\r\n", gps_countdown);
+			return;
+		}
+		if (!gps_fast && gps_skip_cycles > 0) {
+			gps_skip_cycles--;
+			MGR_LOG_DEBUG("[GPS] backoff skip (%u left)\r\n", gps_skip_cycles);
+			return;
+		}
 	}
 	if (gps_fast) {
 		/* Waiting to be deployed: every cycle, one fixed window */
@@ -1508,6 +1517,10 @@ static void commission_cmd(const char *line)
 	} else {
 		cc_comm_init(&comm, false);
 		comm_flag_write(false);
+		/* Armed: the next cycle starts now and its GPS step probes for the
+		 * first fix, whatever the battery tier or the cycle period */
+		arm_probe = true;
+		MGR_LOG_INFO("[COMM] armed from console: GPS probe now\r\n");
 	}
 	send_commission();
 }
@@ -2388,6 +2401,8 @@ void KNS_APP_cc_tracker_loop(void)
 
 	case CC_ST_CYCLE_WAIT:
 	{
+		if (arm_probe)
+			cycle_period_ms = 1; /* armed from the console: next cycle now */
 		/* Compute this cycle's period once, on entry (marked by 0) */
 		if (cycle_period_ms == 0) {
 			bool crit = (tier.tier == CC_TIER_CRIT);

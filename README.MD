@@ -283,7 +283,13 @@ not at LOW or CRIT battery) and the window ends 45 s after GPS power-up if
 the receiver tracks fewer than two satellites above 20 dBHz (indoors),
 judged over at least 3 complete GSV groups. The "done" flag lives in a TAMP backup register: it
 survives watchdog/soft resets and updates and is cleared only by real power
-loss.
+loss. A boot goes straight from its self-test into a cycle, so after a reset
+the first GPS window opens within about a minute. `AT+COMMISSION=ARM` (the
+web tool's "Give the orders") starts the next cycle at once and its GPS
+step probes for the fix whatever the battery tier or cycle period (a
+critical pack still holds that cycle's frame); later cycles follow the
+tier rules again. A burst interrupted by a reset is not kept: the unit is
+armed again and the next fix starts a new one.
 
 **Clock** — GPS time is anchored to the RTC calendar (anchor in TAMP
 BKP8R/BKP9R). The calendar and the anchor survive every reset — watchdog,
