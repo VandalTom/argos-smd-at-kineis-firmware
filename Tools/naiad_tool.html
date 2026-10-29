@@ -402,8 +402,8 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
       <summary>Help: browser, adapter, wiring, recovery</summary>
       <ul>
         <li><b>Browser:</b> Chrome or Edge on a desktop computer (Web Serial), at <a href="https://arribada.siliconvandals.com">arribada.siliconvandals.com</a>. Offline, open this file directly (file://) or serve it with <code>python -m http.server</code> and use http://localhost. Firefox and Safari don't support Web Serial.</li>
-        <li data-only="kim2"><b>Cable:</b> a USB-C data cable to the XIAO's own USB port: no adapter, no wiring. The XIAO shows up as a serial port (Seeed XIAO, USB ID 2886:8044) and is powered from USB while connected. Its console answers at any time (no sleep wake-up), in every CounterCurrent build.</li>
-        <li data-only="kim2"><b>Firmware update:</b> over the same cable. The tool restarts the XIAO into its bootloader (AT+BOOT=, or the 1200-baud touch for a build without the console). The bootloader is a different USB device (2886:0044): the first time, the browser asks you to pick it.</li>
+        <li data-only="kim2"><b>Cable:</b> a USB-C data cable to the XIAO's own USB port: no adapter, no wiring. The XIAO shows up as a serial port (Seeed XIAO, USB ID 2886:8044, or 2886:8045 for a board built as the Sense variant, which CounterCurrent's are) and is powered from USB while connected. Its console answers at any time (no sleep wake-up), in every CounterCurrent build.</li>
+        <li data-only="kim2"><b>Firmware update:</b> over the same cable. The tool restarts the XIAO into its bootloader (AT+BOOT=, or the 1200-baud touch for a build without the console). The bootloader is a different USB device (2886:0044 or 2886:0045): the first time, the browser asks you to pick it.</li>
         <li data-only="kim2"><b>Stuck XIAO:</b> double-tap its reset button: the LED pulses and the bootloader waits for an update. Connect to that port and click Flash.</li>
         <li data-only="kim2"><b>Credentials:</b> a KIM2 carries its Argos ID, address and key from the factory. The tool reads the ID and address (the key never leaves the module) and records them in the team vault.</li>
         <li data-only="kim2"><b>Resets:</b> each reset or update drops the USB port for a moment; the tool reconnects by itself.</li>
@@ -510,7 +510,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
     </div>
     <div id="flashResult"></div>
     <div id="flashRecovery" class="callout warn" hidden></div>
-    <p class="muted small" style="margin:0" data-only="kim2">Over the XIAO's own USB: the tool restarts it into its bootloader (AT+BOOT=, or the 1200-baud touch for a build without the console) and sends the image the way the Arduino IDE does (Adafruit nRF52 serial DFU). The bootloader is a separate USB device (Seeed XIAO bootloader, 2886:0044): the first time, the browser asks you to pick it. The saved radio configuration survives an update. If an update stops, the XIAO waits in its bootloader: flash again (double-tap its reset button if its port is gone).</p>
+    <p class="muted small" style="margin:0" data-only="kim2">Over the XIAO's own USB: the tool restarts it into its bootloader (AT+BOOT=, or the 1200-baud touch for a build without the console) and sends the image the way the Arduino IDE does (Adafruit nRF52 serial DFU). The bootloader is a separate USB device (Seeed XIAO bootloader, 2886:0044 or 2886:0045): the first time, the browser asks you to pick it. The saved radio configuration survives an update. If an update stops, the XIAO waits in its bootloader: flash again (double-tap its reset button if its port is gone).</p>
     <fieldset id="swdBox" data-only="arribada">
       <legend>Debug probe (SWD)</legend>
       <p class="muted small" style="margin:0">For modules the serial update cannot reach: factory firmware without the update bootloader, or a module that stays silent. Wire an ST-Link or a CMSIS-DAP probe to the module's SWD pads: SWDIO (P26), SWCLK (P25), GND and NRST (P35); on the Naiad carrier, the debug JST. It writes the full image (app + bootloader); the credentials and their backup copy are kept.</p>
@@ -873,7 +873,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.6.0';
+const TOOL_VERSION = '1.6.1';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -5317,7 +5317,9 @@ function ws85Builtin() { return ws85ImageOf(b64dec(WS85_FW.b64), WS85_FW.file); 
 const NRF = {
   APP_BASE: 0x27000, APP_LIMIT: 0xED000,      // S140 7.3.0 below, InternalFS (Settings.h) + the bootloader above
   RAM_START: 0x20000000, RAM_END: 0x20040000,
-  VID: 0x2886, PID_APP: 0x8044, PID_BL: 0x0044,
+  // The plain XIAO nRF52840 is 2886:8044 (app) / 0044 (bootloader); a board built as the Sense variant
+  // (CounterCurrent's own boards, built with the Sense target) is 8045 / 0045. Both pairs are ours.
+  VID: 0x2886, PID_APP: [0x8044, 0x8045], PID_BL: [0x0044, 0x0045],
   INIT: 1, START: 3, DATA: 4, STOP: 5, MODE_APP: 4,
   PACKET: 512, PAGE: 4096, PAGE_ERASE_MS: 89.7, PAGE_WRITE_MS: 102.4, ACK_MS: 1000, TRIES: 3,
   DEV_TYPE: 0x0052, DEV_REV: 0xFFFF, APP_VERSION: 0xFFFFFFFF, SD_REQ: 0x0123,
@@ -5946,7 +5948,7 @@ function portLabel(port) {
     if (!i.usbVendorId) return { text: 'Serial port (no USB info)', warn: '' };
     const vid = i.usbVendorId, pid = i.usbProductId;
     const names = { 0x10C4: 'Silicon Labs CP210x', 0x1A86: 'WCH CH340/CH9102', 0x0403: 'FTDI FT232', 0x067B: 'Prolific PL2303', 0x0483: 'STMicro', [NRF.VID]: 'Seeed XIAO' };
-    const name = vid === NRF.VID && pid === NRF.PID_BL ? 'Seeed XIAO bootloader' : names[vid] || 'USB serial';
+    const name = vid === NRF.VID && NRF.PID_BL.includes(pid) ? 'Seeed XIAO bootloader' : names[vid] || 'USB serial';
     const id = `${vid.toString(16).padStart(4, '0')}:${(pid || 0).toString(16).padStart(4, '0')}`;
     return { text: `${name} (${id})`, warn: vid === 0x067B ? 'Prolific adapter: PL2303TA/HXA clones are blocked by the Windows 11 driver. If nothing answers, use a CP2102, CH340 or FT232 adapter.' : '' };
   } catch (e) { return { text: 'Serial port', warn: '' }; }
@@ -6062,7 +6064,7 @@ async function connect({ reconnect = false } = {}) {
   ui.mon.reset(); renderBanners();
   note(`Opened ${transport.kind === 'sim' ? 'simulator' : 'serial port'}${transport.kind === 'sim' && Clock.scale !== 1 ? ` (timing x${+(1 / Clock.scale).toFixed(2)})` : ''}`);
   renderConn(); renderUnit(); updateControls();
-  if (isKim2() && transport.kind !== 'sim' && usbIdOf(ui.port) === `${NRF.VID}:${NRF.PID_BL}`) {
+  if (isKim2() && transport.kind !== 'sim' && isXiaoPort(ui.port, NRF.PID_BL)) {
     // the XIAO's bootloader speaks binary DFU, not the console: an update is waiting for its image
     ui.mode = 'bl'; ui.portFailed = false; showPortInfo();
     setMsg('#connMsg', 'This is the XIAO bootloader (DFU mode): flash CounterCurrent firmware to finish an update.', 'warn');
@@ -6326,7 +6328,8 @@ async function relLoad() {
 /* -- KIM2 mode: the XIAO's USB update (kim2FlashFirmware). On real USB the XIAO changes ports: the app
  *    (2886:8044) leaves when it restarts into the bootloader (2886:0044, asked for once), which leaves again
  *    when the new app starts. ui.expectDrop keeps the reconnect logic out of the way meanwhile. -- */
-function isXiaoPort(port, pid) { try { const i = port.getInfo(); return i.usbVendorId === NRF.VID && i.usbProductId === pid; } catch (e) { return false; } }
+/** A XIAO port of one kind: `pids` is NRF.PID_APP or NRF.PID_BL (both USB ID pairs). */
+function isXiaoPort(port, pids) { try { const i = port.getInfo(); return i.usbVendorId === NRF.VID && pids.includes(i.usbProductId); } catch (e) { return false; } }
 async function kim2FindPort(pid, ms, signal) {
   const t0 = Date.now();
   for (;;) {
@@ -6348,9 +6351,9 @@ async function kim2Touch1200() {
 async function kim2OpenBootloader({ signal }) {
   let port = await kim2FindPort(NRF.PID_BL, 8000, signal);
   if (!port) {
-    const go = await confirmDialog('Choose the XIAO bootloader', 'The XIAO restarted into its bootloader, which is a separate USB device. Click "Choose port" and pick "Seeed XIAO bootloader" (USB ID 2886:0044). The browser remembers it for this XIAO.', 'Choose port');
+    const go = await confirmDialog('Choose the XIAO bootloader', 'The XIAO restarted into its bootloader, which is a separate USB device. Click "Choose port" and pick "Seeed XIAO bootloader" (USB ID 2886:0044 or 2886:0045). The browser remembers it for this XIAO.', 'Choose port');
     if (!go) throw new CancelledError();
-    try { port = await navigator.serial.requestPort({ filters: [{ usbVendorId: NRF.VID, usbProductId: NRF.PID_BL }] }); }
+    try { port = await navigator.serial.requestPort({ filters: NRF.PID_BL.map(p => ({ usbVendorId: NRF.VID, usbProductId: p })) }); }
     catch (e) { throw new ProtocolError('No bootloader port chosen: the XIAO waits in its bootloader. Connect to its port (Seeed XIAO bootloader) and click Flash.'); }
   }
   const t = new WebSerialTransport(port);
@@ -9178,8 +9181,8 @@ const VVIEWS_KIM2 = {
         !ui.port ? 'Chrome or Edge asks which port to use. ' : `Port: ${portLabel(ui.port).text}. `,
         vLink(ui.port ? 'Choose another port…' : 'Choose the port now…', async () => { if (await choosePort()) { voy.err.connect = null; } vRender(); })));
       out.push(el('details', { class: 'help' }, el('summary', { text: 'The cable and the ports' }), vFixes([
-        "Plug the cable into the XIAO's own USB-C port. It shows up as \"Seeed XIAO\" (USB ID 2886:8044).",
-        'A XIAO waiting in its bootloader shows up as "Seeed XIAO bootloader" (2886:0044): hail that port and the next sea installs the firmware.',
+        "Plug the cable into the XIAO's own USB-C port. It shows up as \"Seeed XIAO\" (USB ID 2886:8044 or 2886:8045).",
+        'A XIAO waiting in its bootloader shows up as "Seeed XIAO bootloader" (2886:0044 or 2886:0045): hail that port and the next sea installs the firmware.',
         "Nothing appears? Try another cable (many are charge-only), or double-tap the XIAO's reset button to start its bootloader.",
       ])));
       return out;

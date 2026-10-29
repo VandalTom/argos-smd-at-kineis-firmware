@@ -330,12 +330,13 @@ Arribada argos-smd module) as described here. **KIM2 mode** commissions
 CounterCurrent units: a Seeed XIAO nRF52840 driving a Kinéis KIM2 (CounterCurrent
 repo, `firmware/WS85-Tracker`, whose USB console speaks this tool's command set,
 see its README). In KIM2 mode:
-- *Connect* over the XIAO's own USB (2886:8044): no adapter, no baud choice, no
+- *Connect* over the XIAO's own USB (2886:8044, or 8045 for a board built as the
+  Sense variant, which CounterCurrent's are): no adapter, no baud choice, no
   wake preamble.
 - *Firmware*: the CounterCurrent releases (`/api/releases?product=kim2`), or the
   Arduino build's DFU package (`WS85-Tracker.ino.zip`), `.hex` or `.bin`. The tool
   restarts the XIAO into its Adafruit bootloader (`AT+BOOT=`, or the 1200-baud touch
-  for a build without the console), opens the bootloader's own USB port (2886:0044,
+  for a build without the console), opens the bootloader's own USB port (2886:0044 or 0045,
   picked once per XIAO) and sends the image with adafruit-nrfutil's serial DFU
   protocol (SLIP/HCI, init packet as `dfu genpkg` builds it), then waits for the
   app's port to come back and checks the firmware ID. No SWD.
