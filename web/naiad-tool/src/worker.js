@@ -92,20 +92,23 @@ const RELEASE_NOTES = {
 		],
 	},
 };
-/** KIM2 mode: CounterCurrent firmware for the XIAO nRF52840 (CounterCurrent repo, .github/workflows/firmware.yml).
- *  The .zip is the DFU package the tool flashes over USB; the .hex is for the Arduino IDE / nrfjprog. */
-const KIM2_ASSET = /^countercurrent-xiao-(release|bench)\.(zip|hex)$/;
-const kim2AssetInfo = name => { const m = KIM2_ASSET.exec(name); return { variant: m[1], kind: m[2] === 'zip' ? 'app' : 'hex' }; };
+/** KIM2 mode: CounterCurrent firmware for the XIAO nRF52840 (CounterCurrent repo, .github/workflows/firmware.yml,
+ *  one build per tag): naiad-<version>.zip is the DFU package the tool flashes over USB (the same file the
+ *  companion app bundles), .hex is for nrfjprog / the Arduino IDE, .uf2 for drag-and-drop recovery through the
+ *  bootloader's drive. The .sha256 next to them is not an image. */
+const KIM2_ASSET = /^naiad-(\d+\.\d+\.\d+)\.(zip|hex|uf2)$/;
+const kim2AssetInfo = name => { const m = KIM2_ASSET.exec(name); return { variant: 'release', kind: m[2] === 'zip' ? 'app' : m[2] }; };
 const KIM2_REPO = env => env.KIM2_GITHUB_REPO || 'SiliconVandals/CounterCurrent';
 /** Per-release notes for CounterCurrent tags (same shape as RELEASE_NOTES). */
 const KIM2_RELEASE_NOTES = {
-	'v1.0.0': {
-		summary: 'The USB console: the commissioning tool drives the unit in KIM2 mode.',
+	'v1.5.0': {
+		summary: 'The USB console speaks this tool\'s command set: the first release the tool can commission.',
 		changes: [
-			"The Naiad console commands on the XIAO's USB port, in every build: unit state, self-test, install burst, log level, reset, bootloader.",
+			"The Naiad console commands on the XIAO's USB port, answered whenever a cable is in: unit state, self-test (GPS, WS85, air sensor, battery and supercap, one real frame), install burst, log level, reset, bootloader.",
 			"The KIM2's factory ID and address are read for the tool and the team vault; the key never leaves the module.",
-			'A radio configuration can be saved over the console (AT+RCONF=, AT+SAVE_RCONF=) instead of rebuilding.',
-			"Arming the install burst over the console starts a cycle at once; the boot-time 'burst' window is gone.",
+			'AT+BOOT= restarts the XIAO into its USB bootloader for the update; the app\'s Bluetooth update is unchanged.',
+			'Unit label, vessel and organisation can be written over the console (AT+SET=) as well as from the phone app.',
+			'Everything the app already had: Bluetooth companion services, records log, settings, updates over Bluetooth, ~0.2 mA idle.',
 		],
 	},
 };

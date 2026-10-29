@@ -69,10 +69,10 @@ const ATTACHED = { 'v1.0.1': ['release', 'bench'], 'v1.0.0': ['release'] };
 const IMAGE = new Uint8Array(4096).map((_, i) => i & 0xFF);
 const KIM2_RELEASES = [
 	{ tag_name: 'v1.0.0', draft: false, prerelease: false, published_at: '2026-10-20T09:00:00Z', html_url: 'https://github.com/SiliconVandals/CounterCurrent/releases/tag/v1.0.0',
-		assets: [{ id: 501, name: 'countercurrent-xiao-release.zip', size: 4096 }, { id: 502, name: 'countercurrent-xiao-release.hex', size: 9000 },
-			{ id: 503, name: 'countercurrent-xiao-bench.zip', size: 4100 }, { id: 504, name: 'notes.txt', size: 3 }] },
-	{ tag_name: 'v0.1.0', draft: false, assets: [{ id: 505, name: 'something-else.bin', size: 1 }] },
-	{ tag_name: 'v2.0.0', draft: true, assets: [{ id: 506, name: 'countercurrent-xiao-release.zip', size: 1 }] },
+		assets: [{ id: 501, name: 'naiad-1.0.0.zip', size: 4096 }, { id: 502, name: 'naiad-1.0.0.hex', size: 9000 },
+			{ id: 503, name: 'naiad-1.0.0.uf2', size: 4100 }, { id: 504, name: 'naiad-1.0.0.zip.sha256', size: 82 }, { id: 505, name: 'notes.txt', size: 3 }] },
+	{ tag_name: 'v0.1.0', draft: false, assets: [{ id: 506, name: 'something-else.bin', size: 1 }] },
+	{ tag_name: 'v2.0.0', draft: true, assets: [{ id: 507, name: 'naiad-2.0.0.zip', size: 1 }] },
 ];
 const net = { apiStatus: 200, certFetches: 0, log: [] };
 globalThis.fetch = async (input, init = {}) => {
@@ -211,12 +211,12 @@ await test('KIM2 releases: CounterCurrent DFU packages from the private repo (to
 	eq(r.data.releases.map(x => x.tag), ['v1.0.0'], 'drafts and releases without a package left out');
 	const v = r.data.releases[0];
 	eq(v.fwId, 'CounterCurrent v1.0.0 (', 'firmware ID to verify');
-	eq(v.assets.map(a => [a.name, a.variant, a.kind]), [['countercurrent-xiao-release.zip', 'release', 'app'], ['countercurrent-xiao-release.hex', 'release', 'hex'], ['countercurrent-xiao-bench.zip', 'bench', 'app']], 'assets');
-	ok(v.summary && v.changes.length, 'release notes');
+	eq(v.assets.map(a => [a.name, a.variant, a.kind]), [['naiad-1.0.0.zip', 'release', 'app'], ['naiad-1.0.0.hex', 'release', 'hex'], ['naiad-1.0.0.uf2', 'release', 'uf2']], 'assets (the .sha256 is not an image)');
+	ok(!v.summary && !v.changes.length, 'no notes written for this tag');
 	eq(net.kim2Auth, 'Bearer kim2-token', 'token sent to GitHub');
-	const f = await call(env, 'GET', `/api/firmware/v1.0.0/countercurrent-xiao-release.zip`, { token: null, raw: true });
+	const f = await call(env, 'GET', `/api/firmware/v1.0.0/naiad-1.0.0.zip`, { token: null, raw: true });
 	eq([f.status, (await f.arrayBuffer()).byteLength], [200, 4096], 'package proxied');
-	eq((await call(env, 'GET', '/api/firmware/v1.0.0/countercurrent-xiao-bench.hex', { token: null })).status, 404, 'not attached');
+	eq((await call(env, 'GET', '/api/firmware/v1.0.0/naiad-1.0.1.hex', { token: null })).status, 404, 'not attached');
 	eq((await call(env, 'GET', '/api/releases', { token: null })).data.repo, REPO, 'Naiad releases unchanged without ?product');
 });
 
