@@ -2,7 +2,9 @@
  * Naiad tool Worker: the static page (dist/, served before this code runs) plus a small API.
  *
  *   GET  /api/releases                    Naiad firmware releases on GitHub (cached 5 min)
- *   GET  /api/firmware/<tag>/<file>       one release image, proxied same-origin (cached 1 hour)
+ *   GET  /api/releases?product=kim2       CounterCurrent (XIAO + KIM2) releases: a private repo, so
+ *                                         KIM2_GITHUB_TOKEN (read access) must be set (cached 5 min)
+ *   GET  /api/firmware/<tag>/<file>       one release image of either, proxied same-origin (cached 1 hour)
  *   /api/vault/...                        the team's shared credentials vault (D1)
  *
  * The vault takes two keys. Cloudflare Access (Google, @siliconvandals.com) decides who reaches
@@ -90,6 +92,23 @@ const RELEASE_NOTES = {
 		],
 	},
 };
+/** KIM2 mode: CounterCurrent firmware for the XIAO nRF52840 (CounterCurrent repo, .github/workflows/firmware.yml).
+ *  The .zip is the DFU package the tool flashes over USB; the .hex is for the Arduino IDE / nrfjprog. */
+const KIM2_ASSET = /^countercurrent-xiao-(release|bench)\.(zip|hex)$/;
+const kim2AssetInfo = name => { const m = KIM2_ASSET.exec(name); return { variant: m[1], kind: m[2] === 'zip' ? 'app' : 'hex' }; };
+const KIM2_REPO = env => env.KIM2_GITHUB_REPO || 'SiliconVandals/CounterCurrent';
+/** Per-release notes for CounterCurrent tags (same shape as RELEASE_NOTES). */
+const KIM2_RELEASE_NOTES = {
+	'v1.0.0': {
+		summary: 'The USB console: the commissioning tool drives the unit in KIM2 mode.',
+		changes: [
+			"The Naiad console commands on the XIAO's USB port, in every build: unit state, self-test, install burst, log level, reset, bootloader.",
+			"The KIM2's factory ID and address are read for the tool and the team vault; the key never leaves the module.",
+			'A radio configuration can be saved over the console (AT+RCONF=, AT+SAVE_RCONF=) instead of rebuilding.',
+			"Arming the install burst over the console starts a cycle at once; the boot-time 'burst' window is gone.",
+		],
+	},
+};
 const STATUSES = ['free', 'in use', 'retired'];
 const EDITABLE = ['addr', 'key_enc', 'rconf', 'status', 'sn', 'fw', 'assigned', 'note'];
 const IMPORT_MAX = 500;
@@ -105,7 +124,7 @@ export default {
 		const url = new URL(request.url);
 		if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
 		try {
-			if (url.pathname === '/api/releases' && request.method === 'GET') return await releases(env, ctx);
+			if (url.pathname === '/api/releases' && request.method === 'GET') return await releases(env, ctx, url.searchParams.get('product') === 'kim2' ? 'kim2' : 'naiad');
 			const fw = url.pathname.match(/^\/api\/firmware\/([^/]+)\/([^/]+)$/);
 			if (fw && request.method === 'GET') return await firmware(env, ctx, decodeURIComponent(fw[1]), decodeURIComponent(fw[2]));
 			if (url.pathname === '/api/vault' || url.pathname.startsWith('/api/vault/')) return await vault(request, env, url);
@@ -193,12 +212,51 @@ async function listReleases(env) {
 	return found.filter(Boolean);
 }
 
-async function releases(env, ctx) {
-	const res = await cached(ctx, 'releases-v3', 300, async () => json({ repo: env.GITHUB_REPO, releases: await listReleases(env) }));
+async function releases(env, ctx, product = 'naiad') {
+	const res = product === 'kim2'
+		? await cached(ctx, 'releases-kim2-v1', 300, async () => json({ repo: KIM2_REPO(env), product, releases: await listKim2Releases(env) }))
+		: await cached(ctx, 'releases-v3', 300, async () => json({ repo: env.GITHUB_REPO, releases: await listReleases(env) }));
 	return new Response(res.body, { status: res.status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=120', 'x-content-type-options': 'nosniff' } });
 }
 
+/** GitHub API headers for the private CounterCurrent repo; 503 until the token is set. */
+function kim2Auth(env) {
+	const token = env.KIM2_GITHUB_TOKEN || env.GITHUB_TOKEN;
+	if (!token) throw new HttpError(503, `CounterCurrent releases are not set up yet: the Worker needs the secret KIM2_GITHUB_TOKEN (read access to ${KIM2_REPO(env)})`, { code: 'not_configured' });
+	return { 'user-agent': 'naiad-tool', accept: 'application/vnd.github+json', authorization: `Bearer ${token}` };
+}
+async function listKim2Releases(env) {
+	const repo = KIM2_REPO(env);
+	const api = await gh(`https://api.github.com/repos/${repo}/releases?per_page=30`, { headers: kim2Auth(env) });
+	if (!api.ok) throw new HttpError(502, `GitHub answered ${api.status} for ${repo}${api.status === 404 ? ' (check KIM2_GITHUB_TOKEN can read it)' : ''}`);
+	return (await api.json()).filter(r => !r.draft && TAG.test(r.tag_name)).map(r => {
+		const note = KIM2_RELEASE_NOTES[r.tag_name] || {};
+		return {
+			tag: r.tag_name, name: r.name || r.tag_name, date: r.published_at || '', prerelease: !!r.prerelease, url: r.html_url,
+			warn: note.warn || '', fwId: `CounterCurrent ${r.tag_name} (`, summary: note.summary || '', changes: note.changes || [],
+			assets: r.assets.filter(a => KIM2_ASSET.test(a.name)).map(a => ({ name: a.name, size: a.size, ...kim2AssetInfo(a.name),
+				url: `/api/firmware/${encodeURIComponent(r.tag_name)}/${encodeURIComponent(a.name)}` })),
+		};
+	}).filter(r => r.assets.some(a => a.kind === 'app')).sort(newestFirst);
+}
+/** A private release asset: its API id from the tag's release, then the bytes (GitHub redirects to storage). */
+async function kim2Firmware(env, ctx, tag, name) {
+	return cached(ctx, `fw-kim2/${tag}/${name}`, 3600, async () => {
+		const repo = KIM2_REPO(env), headers = kim2Auth(env);
+		const rel = await gh(`https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`, { headers });
+		if (!rel.ok) throw new HttpError(rel.status === 404 ? 404 : 502, `Release ${tag} not available (GitHub ${rel.status})`);
+		const asset = ((await rel.json()).assets || []).find(a => a.name === name);
+		if (!asset) throw new HttpError(404, `${name} is not attached to ${tag}`);
+		const res = await gh(`https://api.github.com/repos/${repo}/releases/assets/${asset.id}`, { redirect: 'follow', headers: { ...headers, accept: 'application/octet-stream' } });
+		if (!res.ok) throw new HttpError(502, `Release file not available (GitHub ${res.status})`);
+		return new Response(res.body, {
+			headers: { 'content-type': 'application/octet-stream', 'content-disposition': `attachment; filename="${tag}__${name}"`, 'x-content-type-options': 'nosniff' },
+		});
+	});
+}
+
 async function firmware(env, ctx, tag, name) {
+	if (TAG.test(tag) && KIM2_ASSET.test(name)) return kim2Firmware(env, ctx, tag, name);
 	if (!TAG.test(tag) || !RELEASE_ASSET.test(name)) throw new HttpError(404, 'Not a Naiad release image');
 	return cached(ctx, `fw2/${tag}/${name}`, 3600, async () => {     // 1 h: a re-published release reaches the tool quickly
 		const res = await gh(`https://github.com/${env.GITHUB_REPO}/releases/download/${tag}/${name}`, { redirect: 'follow', headers: { 'user-agent': 'naiad-tool' } });
@@ -267,8 +325,12 @@ function normalize(src) {
 	const errors = {};
 	if (!/^\d+$/.test(r.id) || Number(r.id) < 1 || Number(r.id) > 2 ** 31) errors.id = 'decimal 1..2147483648'; else r.id = String(Number(r.id));
 	if (!isHex(r.addr, 8)) errors.addr = '8 hex';
-	if (!isSealed(r.key_enc)) errors.key_enc = 'key sealed with the team passphrase';
-	if (!isHex(r.key_crc, 8)) errors.key_crc = '8 hex';
+	if (src.source === 'kim2') {               // a KIM2 module's factory set: its key never leaves the module
+		if (r.key_enc || r.key_crc) errors.key_enc = 'a KIM2 module keeps its key: none in the vault';
+	} else {
+		if (!isSealed(r.key_enc)) errors.key_enc = 'key sealed with the team passphrase';
+		if (!isHex(r.key_crc, 8)) errors.key_crc = '8 hex';
+	}
 	if (r.rconf && !isHex(r.rconf, 32)) errors.rconf = '32 hex or empty';
 	if (!STATUSES.includes(r.status)) errors.status = STATUSES.join(', ');
 	if (r.assigned && !/^\d{4}-\d{2}-\d{2}$/.test(r.assigned)) errors.assigned = 'YYYY-MM-DD or empty';
@@ -357,7 +419,7 @@ async function vault(request, env, url) {
 		if (Number(b.version) !== kdf.version) throw new HttpError(409, 'The passphrase was changed meanwhile: unlock again');
 		const keys = Array.isArray(b.keys) ? b.keys : [];
 		if (!keys.every(k => k && isSealed(k.key_enc))) throw new HttpError(400, 'Every key must be sealed with the new passphrase');
-		const { results: cur } = await env.DB.prepare('SELECT id, version FROM creds').all();
+		const { results: cur } = await env.DB.prepare("SELECT id, version FROM creds WHERE key_enc <> ''").all();   // KIM2 sets have no key
 		const sent = new Map(keys.map(k => [String(k.id), Number(k.version)]));
 		if (sent.size !== cur.length || keys.length !== cur.length || cur.some(r => sent.get(r.id) !== r.version)) throw new HttpError(409, 'Sets were added or changed meanwhile: unlock again and retry');
 		const now = new Date().toISOString();
@@ -365,7 +427,7 @@ async function vault(request, env, url) {
 			env.DB.prepare("UPDATE meta SET v = ?, version = version + 1, updated = ?, updated_by = ? WHERE k = 'kdf'")
 				.bind(JSON.stringify({ alg: b.kdf.alg, iter: b.kdf.iter, salt: b.kdf.salt, check: b.kdf.check }), now, email),
 			env.DB.prepare(`UPDATE creds SET key_enc = (SELECT json_extract(value, '$.key_enc') FROM json_each(?) WHERE json_extract(value, '$.id') = creds.id),
-				version = version + 1, updated = ?, updated_by = ?`).bind(JSON.stringify(keys.map(k => ({ id: String(k.id), key_enc: k.key_enc }))), now, email),
+				version = version + 1, updated = ?, updated_by = ? WHERE key_enc <> ''`).bind(JSON.stringify(keys.map(k => ({ id: String(k.id), key_enc: k.key_enc }))), now, email),
 			hist(env, VAULT_ROW, 'passphrase changed', email, `${keys.length} key(s) re-sealed`),
 		]);
 		return json({ kdf: await getKdf(env) });
@@ -378,13 +440,47 @@ async function vault(request, env, url) {
 
 	if (path === 'export' && method === 'GET') {                   // every sealed key: backup or passphrase change
 		const { results } = await env.DB.prepare(`SELECT ${PUBLIC_COLS}, key_enc FROM creds ORDER BY added, CAST(id AS INTEGER)`).all();
-		if (results.length) await histMany(env, results.map(r => r.id), 'key exported', email, String(url.searchParams.get('why') || '').slice(0, 120)).run();
+		const keyed = results.filter(r => r.key_enc).map(r => r.id);
+		if (keyed.length) await histMany(env, keyed, 'key exported', email, String(url.searchParams.get('why') || '').slice(0, 120)).run();
 		return json({ email, kdf, records: results });
 	}
 
 	if (path === 'history' && method === 'GET') {                  // the vault's own events
 		const { results } = await env.DB.prepare('SELECT t, ev, by, note FROM history WHERE cred_id = ? ORDER BY seq').bind(VAULT_ROW).all();
 		return json({ history: results });
+	}
+
+	// KIM2 mode: a module's factory credentials, read off the board by the tool. No key (it stays in the module),
+	// so no passphrase is needed. A new ID is added in use on the unit; the same module seen again (e.g. moved to
+	// another XIAO) is re-recorded; an ID or ADDR that belongs to another set is a conflict.
+	if (path === 'kim2' && method === 'POST') {
+		const b = await body(request);
+		const today = new Date().toISOString().slice(0, 10);
+		const { rec, errors } = normalize({ id: b.id, addr: b.addr, source: 'kim2', status: 'in use', sn: b.sn, fw: b.fw, assigned: today,
+			note: 'KIM2 factory credentials: the key stays inside the module' });
+		const bad = ['id', 'addr'].filter(f => errors[f]);
+		if (bad.length) throw new HttpError(400, bad.map(f => `${f.toUpperCase()}: ${errors[f]}`).join('; '));
+		if (!rec.sn) throw new HttpError(400, "SN: the unit's serial number is needed");
+		const other = await env.DB.prepare('SELECT id FROM creds WHERE addr = ? AND id <> ?').bind(rec.addr, rec.id).first();
+		if (other) throw new HttpError(409, `ADDR ${rec.addr} already belongs to ID ${other.id}`);
+		const cur = await getRec(env, rec.id), now = new Date().toISOString();
+		if (cur) {
+			if (cur.source !== 'kim2') throw new HttpError(409, `ID ${rec.id} is in the vault as a CLS set with a key, not as a KIM2 module's`);
+			if (cur.addr !== rec.addr) throw new HttpError(409, `ID ${rec.id} is in the vault with ADDR ${cur.addr}, but the module reports ${rec.addr}`);
+			const moved = cur.sn && cur.sn !== rec.sn ? ` (was on ${cur.sn})` : '';
+			await env.DB.batch([
+				env.DB.prepare("UPDATE creds SET status = 'in use', sn = ?, fw = ?, assigned = ?, updated = ?, updated_by = ?, version = version + 1 WHERE id = ?")
+					.bind(rec.sn, rec.fw, today, now, email, rec.id),
+				hist(env, rec.id, 'recorded from KIM2', email, `${rec.sn}${moved}`),
+			]);
+			return json({ record: await getRec(env, rec.id), added: false });
+		}
+		await env.DB.batch([
+			env.DB.prepare(`INSERT INTO creds (id, addr, key_enc, key_crc, rconf, status, sn, fw, assigned, note, source, added, updated, updated_by)
+				VALUES (?, ?, '', '', '', 'in use', ?, ?, ?, ?, 'kim2', ?, ?, ?)`).bind(rec.id, rec.addr, rec.sn, rec.fw, today, rec.note, now, now, email),
+			hist(env, rec.id, 'recorded from KIM2', email, rec.sn),
+		]);
+		return json({ record: await getRec(env, rec.id), added: true });
 	}
 
 	if (path === 'import' && method === 'POST') {
@@ -434,10 +530,12 @@ async function vault(request, env, url) {
 	}
 	if (sub === 'key' && method === 'GET') {
 		const row = await env.DB.prepare('SELECT key_enc FROM creds WHERE id = ?').bind(id).first();
+		if (!row.key_enc) throw new HttpError(409, `ID ${id} is a KIM2 module's: its key never leaves the module`, { code: 'no_key' });
 		await hist(env, id, 'key read', email, String(url.searchParams.get('why') || '').slice(0, 120)).run();
 		return json({ id, key_enc: row.key_enc, kdfVersion: kdf.version });
 	}
 	if (sub === 'track' && method === 'POST') {
+		if (cur.source === 'kim2') throw new HttpError(400, `ID ${id} is a KIM2 module's: recorded from the module, never written or erased`);
 		const b = await body(request);
 		const sn = String(b.sn || '').slice(0, 64), fw = String(b.fw || '').slice(0, 96), now = new Date().toISOString();
 		const late = b.t && Date.parse(b.t) < Date.now() - 300e3 ? ` (recorded ${String(b.t).slice(0, 16).replace('T', ' ')} UTC)` : '';
@@ -461,6 +559,7 @@ async function vault(request, env, url) {
 		if (Number(b.version) !== cur.version) throw changedBy(id, cur);
 		const fields = EDITABLE.filter(f => f in b);
 		const newKey = fields.includes('key_enc');
+		if (newKey && cur.source === 'kim2') throw new HttpError(400, `ID ${id} is a KIM2 module's: its key stays in the module`);
 		if (newKey && Number(b.kdfVersion) !== kdf.version) throw new HttpError(409, 'The team passphrase was changed: unlock again', { code: 'rekeyed' });
 		const row = await env.DB.prepare('SELECT key_enc FROM creds WHERE id = ?').bind(id).first();
 		const { rec, errors } = normalize({ ...cur, key_enc: row.key_enc, ...Object.fromEntries(fields.map(f => [f, b[f]])), key_crc: newKey ? b.key_crc : cur.key_crc });

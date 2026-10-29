@@ -67,6 +67,13 @@ const ATOM = `<?xml version="1.0"?><feed>${feedEntry('v3.9.1', '2025-01-01T00:00
 ${feedEntry('v3.10.0', '2025-02-01T00:00:00Z')}${feedEntry('nightly', '2026-10-01T00:00:00Z')}${feedEntry('v1.0.0', '2026-10-11T09:00:00Z')}</feed>`;
 const ATTACHED = { 'v1.0.1': ['release', 'bench'], 'v1.0.0': ['release'] };
 const IMAGE = new Uint8Array(4096).map((_, i) => i & 0xFF);
+const KIM2_RELEASES = [
+	{ tag_name: 'v1.0.0', draft: false, prerelease: false, published_at: '2026-10-20T09:00:00Z', html_url: 'https://github.com/SiliconVandals/CounterCurrent/releases/tag/v1.0.0',
+		assets: [{ id: 501, name: 'countercurrent-xiao-release.zip', size: 4096 }, { id: 502, name: 'countercurrent-xiao-release.hex', size: 9000 },
+			{ id: 503, name: 'countercurrent-xiao-bench.zip', size: 4100 }, { id: 504, name: 'notes.txt', size: 3 }] },
+	{ tag_name: 'v0.1.0', draft: false, assets: [{ id: 505, name: 'something-else.bin', size: 1 }] },
+	{ tag_name: 'v2.0.0', draft: true, assets: [{ id: 506, name: 'countercurrent-xiao-release.zip', size: 1 }] },
+];
 const net = { apiStatus: 200, certFetches: 0, log: [] };
 globalThis.fetch = async (input, init = {}) => {
 	const u = String(input instanceof Request ? input.url : input);
@@ -78,6 +85,16 @@ globalThis.fetch = async (input, init = {}) => {
 	if (dl && init.method === 'HEAD') {                // GitHub redirects an attached asset to its storage
 		const variant = (dl[2].match(/^naiad-carrier-(\w+)__/) || [])[1];
 		return (ATTACHED[dl[1]] || []).includes(variant) ? new Response(null, { status: 302, headers: { location: 'https://objects.example/x' } }) : new Response(null, { status: 404 });
+	}
+	const cc = u.match(/^https:\/\/api\.github\.com\/repos\/SiliconVandals\/CounterCurrent\/releases(.*)$/);
+	if (cc) {                                          // the private CounterCurrent repo: only with the token
+		const h = init.headers || {};
+		net.kim2Auth = h.authorization || '';
+		if (h.authorization !== 'Bearer kim2-token') return new Response('Not Found', { status: 404 });
+		if (cc[1] === '?per_page=30') return Response.json(KIM2_RELEASES);
+		if (cc[1] === '/tags/v1.0.0') return Response.json(KIM2_RELEASES[0]);
+		if (cc[1] === '/assets/501' && h.accept === 'application/octet-stream') return new Response(IMAGE);
+		return new Response('Not Found', { status: 404 });
 	}
 	if (dl && dl[1] === 'v9.9.8') throw new TypeError('fetch failed');                   // network down
 	if (dl) return dl[1] === 'v9.9.9' ? new Response('Not Found', { status: 404 }) : new Response(IMAGE);
@@ -183,6 +200,24 @@ await test('releases: the version in NAIAD_VERSION has release notes (add them w
 		const e = r.data.releases.find(x => x.tag === tag);
 		ok(e && e.summary && e.changes.length, `${tag} has a summary and changes in worker.js RELEASE_NOTES`);
 	} finally { GH_RELEASES.pop(); }
+});
+
+await test('KIM2 releases: CounterCurrent DFU packages from the private repo (token needed), proxied by asset id', async () => {
+	const none = await call(mkEnv(), 'GET', '/api/releases?product=kim2', { token: null });
+	eq([none.status, none.data.code], [503, 'not_configured'], 'no token: not set up');
+	const env = mkEnv({ KIM2_GITHUB_TOKEN: 'kim2-token' });
+	const r = await call(env, 'GET', '/api/releases?product=kim2', { token: null });
+	eq([r.status, r.data.product, r.data.repo], [200, 'kim2', 'SiliconVandals/CounterCurrent'], 'listed');
+	eq(r.data.releases.map(x => x.tag), ['v1.0.0'], 'drafts and releases without a package left out');
+	const v = r.data.releases[0];
+	eq(v.fwId, 'CounterCurrent v1.0.0 (', 'firmware ID to verify');
+	eq(v.assets.map(a => [a.name, a.variant, a.kind]), [['countercurrent-xiao-release.zip', 'release', 'app'], ['countercurrent-xiao-release.hex', 'release', 'hex'], ['countercurrent-xiao-bench.zip', 'bench', 'app']], 'assets');
+	ok(v.summary && v.changes.length, 'release notes');
+	eq(net.kim2Auth, 'Bearer kim2-token', 'token sent to GitHub');
+	const f = await call(env, 'GET', `/api/firmware/v1.0.0/countercurrent-xiao-release.zip`, { token: null, raw: true });
+	eq([f.status, (await f.arrayBuffer()).byteLength], [200, 4096], 'package proxied');
+	eq((await call(env, 'GET', '/api/firmware/v1.0.0/countercurrent-xiao-bench.hex', { token: null })).status, 404, 'not attached');
+	eq((await call(env, 'GET', '/api/releases', { token: null })).data.repo, REPO, 'Naiad releases unchanged without ?product');
 });
 
 await test('firmware proxy: serves release images, refuses anything else', async () => {
@@ -378,6 +413,35 @@ await test('passphrase change: every key re-sealed atomically; stale or partial 
 	eq((await call(env, 'GET', '/api/vault/creds')).data.kdfVersion, 2, 'list tells stations');
 	eq((await call(env, 'POST', '/api/vault/import', { body: { kdfVersion: 1, records: await sealed([{ id: '100020', addr: '0C000001', key: '8'.repeat(32) }]) } })).data.code, 'rekeyed', 'old-key import refused');
 	eq((await call(env, 'GET', '/api/vault/history')).data.history.map(h => h.ev), ['vault created', 'passphrase changed'], 'vault history');
+});
+
+await test("KIM2: a module's factory set recorded without a key; seen again on another unit; conflicts; no key to fetch; rekey skips it", async () => {
+	const env = await seeded();
+	const rec = b => call(env, 'POST', '/api/vault/kim2', { body: b });
+	let r = await rec({ id: '2345678', addr: 'c0ffee01', sn: 'CC-0011223344556677', fw: 'CounterCurrent v1.0.0 (abc1234)' });
+	eq([r.status, r.data.added, r.data.record.status, r.data.record.source, r.data.record.addr, r.data.record.key_crc], [200, true, 'in use', 'kim2', 'C0FFEE01', ''], 'added in use, no key');
+	r = await rec({ id: '2345678', addr: 'C0FFEE01', sn: 'CC-8899AABBCCDDEEFF', fw: 'CounterCurrent v1.0.1 (def5678)' });
+	eq([r.data.added, r.data.record.sn, r.data.record.fw, r.data.record.version], [false, 'CC-8899AABBCCDDEEFF', 'CounterCurrent v1.0.1 (def5678)', 2], 're-recorded on another unit');
+	const h = await call(env, 'GET', '/api/vault/creds/2345678/history');
+	eq(h.data.history.map(x => `${x.ev}: ${x.note}`), ['recorded from KIM2: CC-0011223344556677', 'recorded from KIM2: CC-8899AABBCCDDEEFF (was on CC-0011223344556677)'], 'history');
+	eq((await rec({ id: '2345678', addr: 'C0FFEE02', sn: 'CC-1' })).status, 409, 'same ID, another ADDR');
+	eq((await rec({ id: '100001', addr: '0A1B2C3D', sn: 'CC-1' })).status, 409, 'the ID of a CLS set');
+	eq((await rec({ id: '2345679', addr: '0A1B2C3E', sn: 'CC-1' })).status, 409, 'an ADDR of another set');
+	eq((await rec({ id: 'x', addr: 'C0FFEE03', sn: 'CC-1' })).status, 400, 'bad ID');
+	eq((await rec({ id: '2345680', addr: 'C0FFEE03' })).status, 400, 'no SN');
+	eq((await call(env, 'GET', '/api/vault/creds/2345678/key')).data.code, 'no_key', 'no key to fetch');
+	eq((await call(env, 'POST', '/api/vault/creds/2345678/track', { body: { kind: 'erased' } })).status, 400, 'never erased or provisioned');
+	const cur = (await call(env, 'GET', '/api/vault/creds')).data.records.find(x => x.id === '2345678');
+	eq((await call(env, 'PATCH', '/api/vault/creds/2345678', { body: { version: cur.version, note: 'on buoy 7' } })).data.record.note, 'on buoy 7', 'notes editable');
+	eq((await call(env, 'PATCH', '/api/vault/creds/2345678', { body: { version: cur.version + 1, key_enc: await seal('2345678', '1'.repeat(32)), key_crc: crcOf('1'.repeat(32)), kdfVersion: 1 } })).status, 400, 'no key can be added');
+	const ex = (await call(env, 'GET', '/api/vault/export?why=backup')).data;
+	eq(env.DB.db.prepare("SELECT COUNT(*) AS n FROM history WHERE ev = 'key exported' AND note = 'backup'").get().n, 3, 'only keyed sets logged as exported');
+	const newAes = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+	const keys = [];
+	for (const x of ex.records.filter(x => x.key_enc)) keys.push({ id: x.id, version: x.version, key_enc: await seal(x.id, await unseal(x.id, x.key_enc), newAes) });
+	const kdf2 = { ...KDF, salt: b64(crypto.getRandomValues(new Uint8Array(16))), check: await seal('check', '0'.repeat(32), newAes) };
+	eq((await call(env, 'POST', '/api/vault/rekey', { body: { version: 1, kdf: kdf2, keys } })).status, 200, 'rekey covers the keyed sets only');
+	eq(env.DB.db.prepare("SELECT key_enc FROM creds WHERE id = '2345678'").get().key_enc, '', 'the KIM2 set stays key-less');
 });
 
 const failed = results.filter(r => !r[1]).length;

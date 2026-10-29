@@ -319,8 +319,41 @@ battery tier, device UTC), flash with progress and the vector-table-last
 order, self-test, credential entry (key masked, checked by CRC),
 commissioning controls, console, reports, and a guided "Commission
 unit" wizard. A built-in simulator runs everything without hardware;
-`node Tools/naiad_tool_selftest.mjs` tests the protocol layer against it.
+`node Tools/naiad_tool_selftest.mjs` tests the protocol layer against it
+(`NAIAD_TEST_ONLY=<regex>` runs a subset; `KIM2_DFU_ZIP=<path>` adds a test
+with a real CounterCurrent DFU package).
 Windows blocks PL2303 clones: use a CP2102/CH340/FTDI adapter.
+
+*Modes* (header: Arribada | KIM2, remembered; a connected unit's firmware
+switches it): **Arribada mode** commissions Naiad units (this firmware on the
+Arribada argos-smd module) as described here. **KIM2 mode** commissions
+CounterCurrent units: a Seeed XIAO nRF52840 driving a Kinéis KIM2 (CounterCurrent
+repo, `firmware/WS85-Tracker`, whose USB console speaks this tool's command set,
+see its README). In KIM2 mode:
+- *Connect* over the XIAO's own USB (2886:8044): no adapter, no baud choice, no
+  wake preamble.
+- *Firmware*: the CounterCurrent releases (`/api/releases?product=kim2`), or the
+  Arduino build's DFU package (`WS85-Tracker.ino.zip`), `.hex` or `.bin`. The tool
+  restarts the XIAO into its Adafruit bootloader (`AT+BOOT=`, or the 1200-baud touch
+  for a build without the console), opens the bootloader's own USB port (2886:0044,
+  picked once per XIAO) and sends the image with adafruit-nrfutil's serial DFU
+  protocol (SLIP/HCI, init packet as `dfu genpkg` builds it), then waits for the
+  app's port to come back and checks the firmware ID. No SWD.
+- *Credentials*: the KIM2's Argos ID, address and key are set at the factory.
+  "Read from the KIM2" reads ID and ADDR (`AT+ID=?`, `AT+ADDR=?`; the key never
+  leaves the module). "Record in the team vault" adds the set to the team vault
+  with no key (`POST /api/vault/kim2`, source `kim2`, in use on the unit's serial
+  number; the same module seen on another XIAO is re-recorded). Only the sign-in
+  is needed, not the passphrase, and a record made while signed out waits in the
+  browser like provisioning tracking. Key-less sets are never handed out, shown,
+  exported as keys or re-sealed.
+- *Commissioning* is the install burst: `ARMED` until a cycle reads the supercap at
+  4.0 V, then one frame a minute for 30 minutes. Arming starts a cycle at once.
+- The *guided run* and the *Voyage* follow the KIM2 order: flash, sensor self-test,
+  the papers (read and record), TX self-test, orders, report. Reports, PDFs and the
+  production log (kept apart from the Naiad log) say CounterCurrent.
+- A reset or an update re-enumerates the XIAO's USB: the tool moves its link onto
+  the returning port, and reconnects by itself after an unexpected drop.
 
 *Reports*: one PDF per unit for people to read and file (A4: serial number,
 Argos ID, firmware, a PASS/FAIL/INCOMPLETE banner with the reasons, the
@@ -443,6 +476,12 @@ JWT check). Workers Builds deploys every push to `naiad` (root
 `web/naiad-tool`, build `npm run build`, deploy `npx wrangler deploy`);
 `npm test` there runs the Worker against mocked GitHub/Access and SQLite.
 The page's CSP allows network requests to its own origin only.
+KIM2 mode's releases come from the private repo `SiliconVandals/CounterCurrent`
+(`KIM2_GITHUB_REPO` to change it): add a fine-grained GitHub token with read access
+to its contents as the Worker secret `KIM2_GITHUB_TOKEN` (`npx wrangler secret put
+KIM2_GITHUB_TOKEN`, or in the dashboard). Without it the KIM2 release list answers
+"not set up" and the tool takes local files only. CounterCurrent release notes
+live in `KIM2_RELEASE_NOTES` in `src/worker.js`.
 Vault setup (done 2026-10-12): D1 database `naiad-vault` (binding `DB`);
 Zero Trust Free, team `siliconvandals` (siliconvandals.cloudflareaccess.com);
 Access application "Naiad team vault" on `arribada.siliconvandals.com/api/vault`

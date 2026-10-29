@@ -10,6 +10,7 @@
  *   docker run --rm -v "$PWD":/w -w /w node:20 node Tools/naiad_tool_selftest.mjs
  *
  * NAIAD_TEST_SCALE (default 0.05) compresses every simulated and protocol delay/timeout.
+ * NAIAD_TEST_ONLY=<regex> runs only the tests whose name matches (e.g. NAIAD_TEST_ONLY=KIM2).
  * Exit code 0 = all tests passed.
  */
 
@@ -38,7 +39,9 @@ async function rejects(promise, check, msg) {
   try { await promise; } catch (e) { if (check && !check(e)) throw new Error(`${msg}: unexpected error ${e.name}: ${e.message}`); return e; }
   throw new Error(`${msg}: expected a rejection`);
 }
+const only = process.env.NAIAD_TEST_ONLY ? new RegExp(process.env.NAIAD_TEST_ONLY, 'i') : null;   // run a subset by name
 async function test(name, fn) {
+  if (only && !only.test(name)) return;
   const t0 = Date.now();
   try {
     const info = await fn();
@@ -1349,6 +1352,324 @@ await test('WS85: up-to-date sensors are left alone; refusals, silence and cance
   const unknown = await P.ws85Flash(S85({ firmware: 118 }), { ...img, version: null, versionNum: null });
   assert(!unknown.upToDate, 'a file without a version in its name is always written');
 });
+
+/* ---------- KIM2 mode: CounterCurrent (XIAO nRF52840 + KIM2) ---------- */
+
+/** A simulated CounterCurrent unit on the XIAO's USB. */
+async function kimRig(simOpts = {}, { waitApp = true } = {}) {
+  const sim = new P.Kim2Simulator({ seed: 4321, pendingChance: 0, ...simOpts });
+  const link = new P.Link(new P.SimTransport(sim));
+  const log = [];
+  link.on('rx', l => log.push('< ' + l));
+  link.on('tx', l => log.push('> ' + l));
+  await link.open(115200);
+  const app = waitApp ? await P.waitForApp(link, { bauds: [115200], settle: 0, timeout: 20000 })
+    : (await until(() => sim.mode === 'app' && sim.consoleReady, 20000, 'the app'), null);
+  return { sim, link, log, app, done: () => sim.destroy() };
+}
+/** Until the simulated unit is between cycles (where self-tests and RCONF writes run). */
+async function napping(r, ms = 20000) { await until(() => r.sim.state === 'CYCLE_WAIT' && !r.sim.radioBusy, ms, 'CYCLE_WAIT'); }
+
+await test('KIM2 mode: product profiles, firmware IDs and their releases', () => {
+  eq(P.fwProduct('CounterCurrent v1.0.0 (abc1234)'), 'kim2', 'CounterCurrent firmware -> KIM2 mode');
+  eq(P.fwProduct('CounterCurrent v1.0.0-dev (local)'), 'kim2', 'a local build is still KIM2');
+  eq(P.fwProduct('Naiad v1.0.7 (f852eb0)'), 'arribada', 'Naiad firmware -> Arribada mode');
+  eq(P.fwProduct('CC_TRACKER v0.9.0-factory (sim)'), null, 'factory build: unknown');
+  eq(P.fwReleaseTag('CounterCurrent v1.2.3 (abc1234)'), 'v1.2.3', 'CounterCurrent release');
+  eq(P.fwReleaseTag('CounterCurrent v1.0.0-dev (local)'), null, 'a local build is no release');
+  eq(P.PRODUCTS.kim2.creds, 'read', 'KIM2 credentials are read, not written');
+  eq(P.PRODUCTS.arribada.creds, 'write', 'Arribada credentials are written');
+  eq(P.PRODUCTS.kim2.rconfDecoded, '401610000,401680000,27,LDA2', "CounterCurrent's RCONF as the KIM2 decodes it");
+});
+
+await test('KIM2 unit: identity read off the module, credentials refused, no SECKEY or PROV, no wake loss', async () => {
+  const r = await kimRig();
+  try {
+    assert(/^CounterCurrent v0\.9\.0/.test(r.app.fw), `firmware ID (${r.app.fw})`);
+    const info = await P.readUnitInfo(r.link);
+    assert(/^\d{6,7}$/.test(info.id), `factory ID (${info.id})`);
+    assert(/^[0-9A-F]{8}$/.test(info.addr), `factory ADDR (${info.addr})`);
+    assert(/^CC-[0-9A-F]{16}$/.test(info.sn), `XIAO chip ID as SN (${info.sn})`);
+    eq(info.rconf, P.KIM2_RCONF_DECODED, 'the build RCONF');
+    eq(info.seckeyCrc.code, '1203', 'no AT+SECKEY: the key stays in the KIM2');
+    eq(info.state.prov, '1', 'prov=1: the module carries an identity');
+    await rejects(P.atCmd(r.link, 'AT+ID=1234567'), e => e.code === '1002', 'ID write refused (factory-set)');
+    await rejects(P.atCmd(r.link, 'AT+ADDR=A1B2C3D4'), e => e.code === '1002', 'ADDR write refused');
+    await rejects(P.atCmd(r.link, 'AT+PROV=ERASE', { expect: '+PROV=' }), e => e.code === '1203', 'no AT+PROV');
+    const papers = await P.readKim2Papers(r.link);
+    assert(papers.ok, 'papers usable: ' + papers.problems.join('; '));
+    eq(papers.id, info.id, 'papers ID'); eq(papers.addr, info.addr, 'papers ADDR'); eq(papers.sn, info.sn, 'papers SN');
+    await P.sleep(35000);                       // longer than Naiad's STOP2 idle: the XIAO never loses a byte
+    eq((await P.atCmd(r.link, 'AT+FW=?', { expect: '+FW=', retry: false })).slice(0, 16), 'CounterCurrent v', 'answers after a long idle');
+    eq(r.sim.droppedWakeBytes, 0, 'no wake-up byte lost');
+  } finally { r.done(); }
+});
+
+await test('KIM2 unit: a silent module (NO_KIM2) shows in the papers, the STATE line and the TX self-test', async () => {
+  const r = await kimRig({ kimSilent: true });
+  try {
+    const papers = await P.readKim2Papers(r.link);
+    assert(!papers.ok, 'papers unusable');
+    assert(papers.problems.some(p => /AT\+ID=\?: the KIM2 did not answer/.test(p)), `problem named (${papers.problems.join('; ')})`);
+    const st = await P.getState(r.link);
+    eq(st.prov, '0', 'prov=0'); eq(st.mac, '0', 'mac=0');
+    await napping(r);
+    const run = await P.runSelftest(r.link, ['TX']);
+    eq(run.items.TX.verdict, 'FAIL', 'TX fails'); eq(run.items.TX.detail, 'no_reply', 'no_reply');
+  } finally { r.done(); }
+});
+
+await test('KIM2 unit: install burst ARMED until the supercap reads 4.0 V; START, SKIP; STATE fields', async () => {
+  const r = await kimRig({ scapMv: 3500, batMv: 2300 });
+  try {
+    eq((await P.commissionCmd(r.link, null)).state, 'DONE', 'nothing armed at boot');
+    const a = await P.commissionCmd(r.link, 'ARM');
+    eq(a.state, 'ARMED', 'armed'); eq(a.extra.need, '4000', 'supercap gate');
+    await until(() => r.sim.scapSeen > 0 && r.sim.state === 'CYCLE_WAIT', 20000, 'a cycle that read the supercap');
+    const a2 = await P.commissionCmd(r.link, null);
+    eq(a2.state, 'ARMED', 'still armed below 4.0 V'); eq(a2.extra.scap, String(r.sim.scapSeen), 'the reading shown');
+    r.sim.o.scapMv = 4800;
+    await P.commissionCmd(r.link, 'ARM');       // ARM starts a cycle at once
+    await until(() => r.sim.commission.state === 'BURST', 20000, 'the burst to start');
+    const b = await P.commissionCmd(r.link, null);
+    eq(b.state, 'BURST', 'burst'); eq(b.target, 30, 'target'); assert(Number(b.extra.left) > 0, 'time left');
+    await P.sleep(75000);
+    assert((await P.commissionCmd(r.link, null)).sent >= 1, 'burst frames counted');
+    eq((await P.commissionCmd(r.link, 'SKIP')).state, 'DONE', 'skip cancels');
+    eq((await P.commissionCmd(r.link, 'START')).state, 'BURST', 'start skips the gate');
+    const st = await P.getState(r.link);
+    eq(st.comm, 'BURST', 'comm field'); eq(st.tier, 'MID', 'NiMH 2.30 V -> MID'); eq(st.nimh, st.bat, 'nimh = bat');
+    assert(Number(st.scap) >= 4700, `scap field (${st.scap})`); assert(/^\d+$/.test(st.slp), 'slp field');
+  } finally { r.done(); }
+});
+
+await test('KIM2 unit: self-tests start between cycles; formats; replay; RCONF write and save', async () => {
+  const r = await kimRig({ ws85: true, cycleS: 30 });
+  try {
+    await until(() => ['SAMPLE_WS85', 'SAMPLE_ENV', 'SAMPLE_GPS'].includes(r.sim.state), 20000, 'a cycle in progress');
+    const statuses = [];
+    const run = await P.runSelftest(r.link, P.ST_ITEMS, { onUpdate: x => statuses.push(x.status) });
+    eq(statuses[0], 'PENDING', 'PENDING while a cycle runs');
+    eq(run.status, 'PASS', `all pass (${run.summary})`);
+    assert(/^wind=[\d.]+,gust=[\d.]+,dir=\d+,t=[\d.]+,rain=[\d.]+$/.test(run.items.WS85.detail), `WS85 detail (${run.items.WS85.detail})`);
+    assert(/^nimh=\d+,scap=\d+,vbat=\d+$/.test(run.items.ADC.detail), `ADC detail (${run.items.ADC.detail})`);
+    assert(/^bytes=\d+,nmea=\d+,cs_err=\d+,sats=\d+,fix=[01]$/.test(run.items.GPS.detail), `GPS detail (${run.items.GPS.detail})`);
+    assert(/^ms=\d+$/.test(run.items.TX.detail), 'TX detail');
+    eq(P.evaluateSelftest(run.items, ['GPS', 'ENV', 'ADC', 'TX']).verdict, 'PASS', 'verdict');
+    const q = await P.querySelftest(r.link);
+    eq(q.status, 'PASS', 'replay'); eq(q.lines.length, 6, 'five +ST lines and the summary');
+    await until(() => r.sim.state !== 'CYCLE_WAIT', 40000, 'the next cycle');
+    await rejects(P.atCmd(r.link, `AT+RCONF=${'2C93600D6BE3BAC0CCFE9047C02C058E'}`), e => e.code === 'BUSY', 'RCONF write mid-cycle: BUSY');
+    await rejects(P.atCmd(r.link, 'AT+RCONF=12'), e => e.code === '250', 'malformed RCONF: 250');
+    await napping(r, 40000);
+    await P.atCmd(r.link, 'AT+RCONF=2C93600D6BE3BAC0CCFE9047C02C058E');
+    eq((await P.atCmd(r.link, 'AT+RCONF=?', { expect: '+RCONF=' })).trim(), '402890000,402990000,27,LDA2', 'new RCONF in use');
+    await P.atCmd(r.link, 'AT+SAVE_RCONF=');
+    await P.resetApp(r.link, { bauds: [115200] });
+    eq((await P.atCmd(r.link, 'AT+RCONF=?', { expect: '+RCONF=' })).trim(), '402890000,402990000,27,LDA2', 'saved RCONF kept across a reset');
+  } finally { r.done(); }
+});
+
+/** A fake XIAO app: nRF52840 vectors (SP in RAM, odd reset vector inside the image) and a firmware ID. */
+function fakeNrfImage(size, seed, fw) {
+  const r = P.mulberry32(seed);
+  const img = new Uint8Array(size);
+  for (let i = 0; i < size; i++) img[i] = Math.floor(r() * 256);
+  P.putU32le(img, 0, 0x20040000);
+  P.putU32le(img, 4, P.NRF.APP_BASE + 0x1F1);
+  img.set(ascii(`${fw}\0`), 0x400);
+  return img;
+}
+/** Intel HEX the way the Arduino nRF52 core writes it: 02 (extended segment) records, 16 bytes a line. */
+function toIntelHex(bytes, start) {
+  const rec = (type, addr, data) => {
+    const b = [data.length, (addr >> 8) & 0xFF, addr & 0xFF, type, ...data];
+    const sum = (0x100 - (b.reduce((a, x) => a + x, 0) & 0xFF)) & 0xFF;
+    return ':' + [...b, sum].map(x => x.toString(16).toUpperCase().padStart(2, '0')).join('');
+  };
+  const lines = [];
+  let seg = -1;
+  for (let o = 0; o < bytes.length; o += 16) {
+    const a = start + o, s = (a >> 4) & 0xF000;
+    if (s !== seg) { seg = s; lines.push(rec(0x02, 0, [s >> 8, s & 0xFF])); }
+    lines.push(rec(0x00, a - s * 16, Array.from(bytes.subarray(o, o + 16))));
+  }
+  lines.push(rec(0x03, 0, [0, 0, 0, 0]), rec(0x01, 0, []));
+  return lines.join('\r\n') + '\r\n';
+}
+/** A stored (uncompressed) zip, like `adafruit-nrfutil dfu genpkg` writes. */
+function zipStored(files) {
+  const local = [], central = [];
+  let off = 0;
+  for (const [name, data] of files) {
+    const nm = Buffer.from(name), d = Buffer.from(data);
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt32LE(d.length, 18); lh.writeUInt32LE(d.length, 22); lh.writeUInt16LE(nm.length, 26);
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6);
+    ch.writeUInt32LE(d.length, 20); ch.writeUInt32LE(d.length, 24); ch.writeUInt16LE(nm.length, 28); ch.writeUInt32LE(off, 42);
+    local.push(lh, nm, d); central.push(ch, nm);
+    off += 30 + nm.length + d.length;
+  }
+  const cd = Buffer.concat(central), eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(off, 16);
+  return new Uint8Array(Buffer.concat([...local, cd, eocd]));
+}
+/** The bootloader side for kim2FlashFirmware in the simulator: the same transport, now speaking SLIP. */
+const simBootloader = r => async () => ({ transport: r.link.t });
+
+await test('KIM2 DFU: CRC-16, init packet (as dfu genpkg), SLIP and HCI framing', () => {
+  eq(P.crc16Ccitt(ascii('123456789')), 0x29B1, 'CRC-16/CCITT-FALSE("123456789")');
+  const bin = fakeNrfImage(3000, 1, 'CounterCurrent v1.0.0 (test)');
+  const crc = P.crc16Ccitt(bin);
+  eq(P.bytesToHex(P.nrfInitPacket(bin)), '5200FFFFFFFFFFFF01002301' + P.bytesToHex(Uint8Array.of(crc & 0xFF, crc >> 8)), 'init packet layout');
+  const parsed = P.parseNrfInitPacket(P.hexToBytes('5200ffffffffffff010023019385'));   // the real WS85-Tracker.ino.dat
+  eq(parsed.devType, 0x52, 'device type'); eq(parsed.sdReq.join(), String(0x123), 'S140 7.3.0'); eq(parsed.crc16, 0x8593, 'CRC');
+  const payload = Uint8Array.of(0xC0, 0xDB, 1, 2, 0xC0, 0xDD);
+  const frame = P.hciFrame(5, payload);
+  eq(frame[0], 0xC0, 'SLIP start'); eq(frame[frame.length - 1], 0xC0, 'SLIP end');
+  assert(!frame.subarray(1, -1).includes(0xC0), 'no bare delimiter inside');
+  const [f] = new P.SlipDecoder().feed(frame);
+  const p = P.hciParse(f);
+  assert(p && p.ok, 'frame parses, CRC ok'); eq(p.seq, 5, 'sequence'); eq(p.ack, 6, 'next sequence'); eq(p.rp, 1, 'reliable'); eq(p.type, 14, 'type');
+  eq(P.bytesToHex(p.payload), P.bytesToHex(payload), 'payload round trip');
+  const bad = f.slice(); bad[6] ^= 1;
+  assert(!P.hciParse(bad).ok, 'corrupted payload fails the CRC');
+  const [a] = new P.SlipDecoder().feed(P.hciAck(6));
+  const ack = P.hciParse(a);
+  assert(ack.ok && !ack.rp && ack.ack === 6 && ack.len === 0, 'ACK frame');
+});
+
+await test('KIM2 DFU: images from the DFU package (.zip), the .hex and a raw .bin; refusals', async () => {
+  const fw = 'CounterCurrent v1.2.3 (abc1234)';
+  const bin = fakeNrfImage(20000, 2, fw), dat = P.nrfInitPacket(bin);
+  const manifest = JSON.stringify({ manifest: { application: { bin_file: 'WS85-Tracker.ino.bin', dat_file: 'WS85-Tracker.ino.dat', init_packet_data: {} }, dfu_version: 0.5 } });
+  const zip = zipStored([['manifest.json', manifest], ['WS85-Tracker.ino.bin', bin], ['WS85-Tracker.ino.dat', dat]]);
+  const z = await P.nrfImage(zip, 'WS85-Tracker.ino.zip');
+  assert(z.ok, 'zip ok: ' + z.errors.join(' ')); eq(z.source, 'zip', 'source'); eq(z.fw, fw, 'firmware ID found'); eq(z.size, 20000, 'size');
+  const h = await P.nrfImage(ascii(toIntelHex(bin, P.NRF.APP_BASE)), 'WS85-Tracker.ino.hex');
+  assert(h.ok, 'hex ok: ' + h.errors.join(' ')); eq(P.bytesToHex(h.dat), P.bytesToHex(dat), 'init packet built for the .hex');
+  assert(sameBytes(h.bin, bin), '.hex -> the same bytes');
+  const b = await P.nrfImage(bin, 'app.bin');
+  assert(b.ok && b.source === 'bin', 'raw .bin');
+  const naiad = await P.nrfImage(fakeImage(20000, 3, 'Naiad v1.0.7 (x)'), 'argos.bin');
+  assert(!naiad.ok && naiad.errors.some(e => /stack pointer|Reset vector/.test(e)), 'an STM32 (Arribada) image is refused');
+  const other = await P.nrfImage(ascii(toIntelHex(bin, 0x26000)), 'other.hex');
+  assert(!other.ok && /0x00026000/.test(other.errors[0]), 'a .hex linked elsewhere is refused');
+  const wrongDat = zipStored([['manifest.json', manifest], ['WS85-Tracker.ino.bin', bin], ['WS85-Tracker.ino.dat', P.nrfInitPacket(fakeNrfImage(20000, 9, fw))]]);
+  assert((await P.nrfImage(wrongDat, 'x.zip')).errors.some(e => /CRC/.test(e)), 'a .dat for another .bin is refused');
+  const sd = zipStored([['manifest.json', manifest], ['WS85-Tracker.ino.bin', bin], ['WS85-Tracker.ino.dat', P.nrfInitPacket(bin, { sdReq: [0x00B6] })]]);
+  assert((await P.nrfImage(sd, 'x.zip')).errors.some(e => /SoftDevice/.test(e)), 'another SoftDevice is refused');
+});
+
+await test('KIM2 DFU: update over AT+BOOT= (CounterCurrent firmware), the new app reports its ID', async () => {
+  const r = await kimRig();
+  try {
+    const fw = 'CounterCurrent v1.2.3 (abc1234)';
+    const img = await P.nrfImage(fakeNrfImage(60000, 4, fw), 'new.bin');
+    const phases = [];
+    let last = null;
+    const res = await P.kim2FlashFirmware(r.link, img, {
+      openBootloader: simBootloader(r), expectFw: 'CounterCurrent v1.2.3 (', onPhase: p => phases.push(p), onProgress: x => { last = x; },
+    });
+    assert(res.ok, 'update ok'); eq(res.entered, 'console', 'entered with AT+BOOT='); eq(res.newFw, fw, 'new firmware ID'); eq(res.fwCheck, true, 'matches the release');
+    assert(/^CounterCurrent v0\.9\.0/.test(res.oldFw), 'old firmware recorded');
+    eq(last.sent, 60000, 'progress reached the end');
+    eq(phases.join(','), 'enter,port,start,init,write,stop,wait', 'phases');
+    assert(sameBytes(r.sim.flash.subarray(0, 60000), img.bin), 'XIAO flash == image');
+    assert(r.sim.flash.subarray(60000).every(x => x === 0xFF), 'the rest erased');
+    eq(r.sim.dfuLog.length, 1, 'one bootloader session'); assert(r.sim.dfuLog[0].ok, 'it ended well');
+    eq((await P.getState(r.link)).state !== undefined, true, 'the console answers again');
+  } finally { r.done(); }
+});
+
+await test('KIM2 DFU: 1200-baud touch for a build without the console; lost frames resent; refused image stays in DFU', async () => {
+  const r = await kimRig({ noConsole: true, blDropEvery: 7 }, { waitApp: false });
+  try {
+    const fw = 'CounterCurrent v1.0.0 (first)';
+    const img = await P.nrfImage(fakeNrfImage(9000, 5, fw), 'first.bin');
+    const t = r.link.t;
+    const touch1200 = async () => { await t.open(1200); await t.close(); await P.sleep(300); await t.open(115200); };
+    const res = await P.kim2FlashFirmware(r.link, img, { openBootloader: simBootloader(r), touch1200, expectFw: 'CounterCurrent v1.0.0 (' });
+    eq(res.entered, 'touch', 'entered with the 1200-baud touch'); assert(res.ok, 'update ok'); eq(res.newFw, fw, 'new firmware');
+    assert(r.sim.dfuLog[0].frames > Math.ceil(9000 / 512) + 3, 'dropped frames were sent again');
+  } finally { r.done(); }
+  const r2 = await kimRig();
+  try {
+    const good = await P.nrfImage(fakeNrfImage(9000, 6, 'CounterCurrent v1.0.1 (x)'), 'x.bin');
+    const forged = Object.assign({}, good, { dat: P.nrfInitPacket(fakeNrfImage(9000, 7, 'other')) });   // CRC of another image
+    const e = await rejects(P.kim2FlashFirmware(r2.link, forged, { openBootloader: simBootloader(r2) }), e => e.inBootloader, 'refused image');
+    assert(/did not start/.test(e.message), `explained (${e.message})`);
+    eq(r2.sim.mode, 'nrfbl', 'XIAO waits in its bootloader'); eq(r2.sim.dfuLog[0].error, 'image CRC does not match the init packet', 'why');
+    const res = await P.kim2FlashFirmware(r2.link, good, { openBootloader: simBootloader(r2), inBootloader: true });
+    assert(res.ok && /v1\.0\.1/.test(res.newFw), 'a second try from the bootloader works');
+  } finally { r2.done(); }
+});
+
+await test('KIM2 guided commissioning: flash -> sensors -> papers -> TX -> burst state; a silent KIM2 stops at the papers', async () => {
+  const r = await kimRig({ ws85: true });
+  try {
+    const img = await P.nrfImage(fakeNrfImage(30000, 8, 'CounterCurrent v1.1.0 (cafe123)'), 'new.bin');
+    const steps = [];
+    const res = await P.commissionKim2Unit(r.link, {
+      mode: 'app', image: img, expectFw: 'CounterCurrent v1.1.0 (', required: ['GPS', 'WS85', 'ENV', 'ADC', 'TX'],
+      flash: image => P.kim2FlashFirmware(r.link, image, { openBootloader: simBootloader(r), expectFw: 'CounterCurrent v1.1.0 (' }),
+    }, { onStep: (k, s) => steps.push(`${k}:${s}`) });
+    assert(res.ok, 'run ok');
+    eq(steps.filter(x => !x.endsWith(':run')).join(' '), 'connect:ok flash:ok st1:ok papers:ok st2:ok comm:ok', 'every step');
+    eq(res.flash.newFw, 'CounterCurrent v1.1.0 (cafe123)', 'flashed');
+    eq(res.verdict, 'PASS', 'self-test verdict'); eq(Object.keys(res.selftest.items).sort().join(), 'ADC,ENV,GPS,TX,WS85', 'merged items');
+    assert(res.papers.ok && /^\d+$/.test(res.papers.id), 'papers read'); eq(res.commission.state, 'DONE', 'burst state');
+    const again = await P.commissionKim2Unit(r.link, { mode: 'app', image: img, expectFw: 'CounterCurrent v1.1.0 (', required: ['GPS', 'ENV', 'ADC'], flash: () => { throw new Error('should skip'); } }, {});
+    assert(again.ok, 'second run ok'); eq(again.selftest, again.st1, 'TX not required: sensors only');
+  } finally { r.done(); }
+  const dead = await kimRig({ kimSilent: true, ws85: true });
+  try {
+    const e = await rejects(P.commissionKim2Unit(dead.link, { mode: 'app', required: ['GPS', 'ENV', 'ADC', 'TX'] }, {}), e => e.step === 'papers', 'stops at the papers');
+    assert(/KIM2 did not answer/.test(e.message), `explained (${e.message})`);
+  } finally { dead.done(); }
+});
+
+await test('KIM2 report: credentials read off the module, no key, vault record; CSV line; PDF wording', () => {
+  const papers = { id: '2345678', addr: 'C0FFEE01', sn: 'CC-0011223344556677', fw: 'CounterCurrent v1.0.0 (abc1234)', rconf: P.KIM2_RCONF_DECODED, problems: [], ok: true };
+  const items = Object.fromEntries(P.ST_ITEMS.map(i => [i, { verdict: 'PASS', detail: { GPS: 'bytes=700,nmea=10,cs_err=0,sats=5,fix=0', WS85: 'wind=3.2,gust=4.1,dir=200,t=21.0,rain=0.0', ENV: 't=21.4,p=1012.0,rh=48.0', ADC: 'nimh=2640,scap=4800,vbat=4110', TX: 'ms=6100' }[i] }]));
+  const st = Object.assign(P.newRun('manual', P.ST_ITEMS), { status: 'PASS', items, summary: '+SELFTEST=PASS' });
+  const base = { product: 'kim2', unit: { fw: papers.fw, id: papers.id, addr: papers.addr, sn: papers.sn, rconf: papers.rconf, state: P.parseState('CYCLE_WAIT,up=100,tx=3,mac=1,comm=DONE,st=PASS,slp=80,prov=1,bat=2640,tier=HIGH,utc=0,nimh=2640,scap=4800') },
+    selftest: st, required: ['GPS', 'ENV', 'ADC', 'TX'], commission: P.parseCommission('ARMED,scap=4800,need=4000'), operator: 'Tom' };
+  const rep = P.buildReport({ ...base, creds: { kim2: papers, at: '2026-10-20T10:00:00Z', recorded: { at: '2026-10-20T10:01:00Z', added: true, by: 'tom@siliconvandals.com' } } });
+  eq(rep.product, 'kim2', 'product'); eq(rep.verdict, 'PASS', 'verdict');
+  eq(rep.credentials.source, 'kim2', 'credentials source'); eq(rep.credentials.recorded.added, true, 'vault record');
+  assert(!JSON.stringify(rep).match(/seckey|SECKEY/) || rep.unit.seckeyCrc == null, 'no key material');
+  const row = P.csvRecord(P.reportToCsvRow(rep));
+  eq(row.credentials, 'KIM2 factory set read, recorded in the team vault', 'CSV credentials'); eq(row.seckey_crc, '', 'no key CRC');
+  const { s, pages } = pdfCheck(P.buildReportPdf(rep));
+  const texts = pdfTexts(s).join(' | ');
+  assert(/CounterCurrent commissioning report/.test(texts), 'title'); assert(/Inside the KIM2/.test(texts), 'key line');
+  assert(/Armed for installation/.test(texts), 'install orders'); assert(/CounterCurrent's/.test(texts), "CounterCurrent's RCONF");
+  assert(!/Naiad/.test(texts), 'no Naiad wording'); pdfSave('kim2_pass.pdf', P.buildReportPdf(rep));
+  const bad = P.buildReport({ ...base, creds: { kim2: { ...papers, ok: false, problems: ['AT+ID=?: the KIM2 did not answer the XIAO'] }, at: '2026-10-20T10:00:00Z', recorded: null } });
+  eq(bad.verdict, 'FAIL', 'unusable papers fail the unit'); assert(P.verdictReasons(bad).some(x => /Credentials not verified: AT\+ID/.test(x)), 'reason');
+  const silent = P.buildReport({ ...base, unit: { ...base.unit, state: P.parseState('CYCLE_WAIT,up=1,prov=0,mac=0') } });
+  assert(P.verdictReasons(silent).some(x => /KIM2 did not report an Argos identity/.test(x)), 'KIM2 wording for prov=0');
+  return `${pages} page(s)`;
+});
+
+const realZip = process.env.KIM2_DFU_ZIP;     // a CounterCurrent build's WS85-Tracker.ino.zip (arduino-cli build folder)
+if (realZip && existsSync(realZip)) {
+  await test('KIM2 DFU: the real CounterCurrent DFU package parses and flashes into the simulator', async () => {
+    const img = await P.nrfImage(new Uint8Array(readFileSync(realZip)), path.basename(realZip));
+    assert(img.ok, 'real package passes: ' + img.errors.join(' '));
+    assert(/^CounterCurrent v\d+\.\d+\.\d+/.test(img.fw), `firmware ID inside (${img.fw})`);
+    eq(P.bytesToHex(P.nrfInitPacket(img.bin)), P.bytesToHex(img.dat), 'our init packet == dfu genpkg .dat');
+    const r = await kimRig();
+    try {
+      const res = await P.kim2FlashFirmware(r.link, img, { openBootloader: simBootloader(r) });
+      eq(res.newFw, img.fw, 'the simulator boots it and reports its ID');
+      return `${img.size} B, ${img.fw}`;
+    } finally { r.done(); }
+  });
+}
 
 const realBin = path.join(here, '..', 'build', 'argos-smd-at-kineis-firmware.bin');
 if (existsSync(realBin)) {
