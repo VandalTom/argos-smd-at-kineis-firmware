@@ -1399,6 +1399,18 @@ await test('KIM2 unit: identity read off the module, credentials refused, no SEC
     const papers = await P.readKim2Papers(r.link);
     assert(papers.ok, 'papers usable: ' + papers.problems.join('; '));
     eq(papers.id, info.id, 'papers ID'); eq(papers.addr, info.addr, 'papers ADDR'); eq(papers.sn, info.sn, 'papers SN');
+    // the unit's own identity (AT+GET / AT+SET): empty on a new unit, written and read back, validated first
+    eq(JSON.stringify(await P.readUnitIdentity(r.link)), JSON.stringify({ label: '', vessel: '', organisation: '' }), 'identity empty on a new unit');
+    const w = await P.writeUnitIdentity(r.link, { label: 'Buoy 7 north', vessel: 'MV Silicon, Vandal', organisation: '' });
+    assert(w.ok && !w.mismatches.length, 'identity written and read back');
+    eq(JSON.stringify(w.values), JSON.stringify({ label: 'Buoy 7 north', vessel: 'MV Silicon, Vandal', organisation: '' }), 'identity values (a comma inside a value survives)');
+    eq(P.identityText(w.values), 'Buoy 7 north · MV Silicon, Vandal', 'identity text leaves empty fields out');
+    const partial = await P.writeUnitIdentity(r.link, { organisation: 'Silicon Vandals' });
+    eq(partial.values.label, 'Buoy 7 north', 'a partial write leaves the other fields alone');
+    const bad = P.validateIdentity({ label: 'x'.repeat(24), vessel: ' ok ', organisation: 'ünïcode' });
+    assert(!bad.ok && bad.errors.label && bad.errors.organisation && !bad.errors.vessel && bad.values.vessel === 'ok', 'identity validation: length, ASCII, trimming');
+    await rejects(P.writeUnitIdentity(r.link, { label: 'x'.repeat(24) }), e => /at most 23/.test(e.message), 'too long: refused before anything is written');
+    await rejects(P.atCmd(r.link, 'AT+GET=nosuchkey', { expect: '+GET=' }), e => e.code === '1200', 'unknown key');
     await P.sleep(35000);                       // longer than Naiad's STOP2 idle: the XIAO never loses a byte
     eq((await P.atCmd(r.link, 'AT+FW=?', { expect: '+FW=', retry: false })).slice(0, 16), 'CounterCurrent v', 'answers after a long idle');
     eq(r.sim.droppedWakeBytes, 0, 'no wake-up byte lost');

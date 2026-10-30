@@ -489,7 +489,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
         <button class="btn" id="btnChooseBin" type="button">Choose .bin…</button>
         <input type="file" id="fwFile" accept=".bin,application/octet-stream" hidden>
         <span class="muted small" data-only="arribada">or drop the app-only <code>argos-smd-at-kineis-firmware.bin</code> here</span>
-        <span class="muted small" data-only="kim2">or drop the Arduino build's DFU package <code>WS85-Tracker.ino.zip</code> (or its <code>.hex</code>) here</span>
+        <span class="muted small" data-only="kim2">or drop a CounterCurrent release package <code>naiad-&lt;version&gt;.zip</code> (or its <code>.hex</code>) here</span>
       </div>
       <dl class="kv" id="fwInfo" hidden style="margin-top:8px"></dl>
       <div id="fwErrors" class="msg err small"></div>
@@ -596,6 +596,20 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
         <span id="kimMsg" class="msg small"></span>
       </div>
       <dl class="kv" id="kimPapers" hidden></dl>
+      <fieldset style="margin-top:8px">
+        <legend>Unit identity</legend>
+        <p class="muted small" style="margin:0">The unit's own label (its name in the phone app), vessel and organisation: kept in the unit's settings, written over the console here or from the phone app later. Plain letters, digits and punctuation, up to 23 characters each; an empty field clears the value. Firmware 1.5.0 or later.</p>
+        <div class="grid2">
+          <label class="field"><span class="lbl">Label</span><input type="text" id="identLabel" maxlength="23" autocomplete="off" spellcheck="false" placeholder="e.g. Buoy 7 north"></label>
+          <label class="field"><span class="lbl">Vessel</span><input type="text" id="identVessel" maxlength="23" autocomplete="off" spellcheck="false"></label>
+          <label class="field"><span class="lbl">Organisation</span><input type="text" id="identOrg" maxlength="23" autocomplete="off" spellcheck="false"></label>
+        </div>
+        <div class="row">
+          <button id="btnIdentWrite" class="btn primary" disabled title="AT+SET= each field, then read them back">Write to the unit</button>
+          <button id="btnIdentRead" class="btn" disabled title="AT+GET= the three fields">Read from the unit</button>
+          <span id="identMsg" class="msg small"></span>
+        </div>
+      </fieldset>
     </div>
     <div data-only="arribada">
     <label class="field"><span class="lbl">Paste a CLS line or CSV (optional; fills the fields below, then clears itself)</span>
@@ -873,7 +887,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.6.1';
+const TOOL_VERSION = '1.7.0';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -1356,6 +1370,43 @@ async function readKim2Papers(link, { signal } = {}) {
   out.ok = !out.problems.length && out.id != null && out.addr != null;
   return out;
 }
+
+/* ---------- KIM2 mode: the unit's own identity (label, vessel, organisation: CounterCurrent settings, 23 chars each) ---------- */
+const IDENTITY_KEYS = ['label', 'vessel', 'organisation'];
+const IDENTITY_MAX = 23;
+/** Plain ASCII, at most 23 characters each (the firmware's 24-byte field with its terminator). Keys not given are left alone. */
+function validateIdentity(v) {
+  const errors = {}, values = {};
+  for (const k of IDENTITY_KEYS) {
+    if (v == null || v[k] == null) continue;
+    const s = String(v[k]).trim();
+    if (s.length > IDENTITY_MAX) errors[k] = `at most ${IDENTITY_MAX} characters`;
+    else if (/[^\x20-\x7E]/.test(s)) errors[k] = 'plain letters, digits and punctuation only';
+    else values[k] = s;
+  }
+  return { ok: !Object.keys(errors).length, errors, values };
+}
+/** AT+GET=<key> for each identity key -> { label, vessel, organisation }; null on a firmware without AT+GET (before 1.5.0). */
+async function readUnitIdentity(link, { signal } = {}) {
+  const out = {};
+  for (const k of IDENTITY_KEYS) {
+    try { out[k] = await atCmd(link, `AT+GET=${k}`, { expect: `+GET=${k},`, signal }); }
+    catch (e) { if (e instanceof CancelledError) throw e; if (e.code === '1203' || e.code === '1200') return null; throw e; }
+  }
+  return out;
+}
+/** AT+SET=<key>,<value> for every key given (an empty value clears it), then a read-back.
+ *  -> { ok, values (as read back; null on a firmware without the commands), mismatches, written } */
+async function writeUnitIdentity(link, ident, { signal } = {}) {
+  const v = validateIdentity(ident);
+  if (!v.ok) throw new ProtocolError('Identity not written: ' + Object.entries(v.errors).map(([k, e]) => `${k}: ${e}`).join('; '));
+  for (const k of IDENTITY_KEYS) if (v.values[k] != null) await atCmd(link, `AT+SET=${k},${v.values[k]}`, { expect: `+SET=${k},`, signal });
+  const back = await readUnitIdentity(link, { signal });
+  const mismatches = IDENTITY_KEYS.filter(k => v.values[k] != null && (!back || back[k] !== v.values[k]));
+  return { ok: !!back && !mismatches.length, values: back, mismatches, written: v.values };
+}
+/** "label · vessel · organisation", the empty ones left out. */
+function identityText(id) { return id ? IDENTITY_KEYS.map(k => id[k]).filter(Boolean).join(' · ') : ''; }
 
 /** AT+RESET=. Handles +RESET=PENDING (TX in progress, up to 4 min). Optionally waits for the app. */
 async function resetApp(link, { signal, onPending, waitBack = true, bauds } = {}) {
@@ -2249,7 +2300,7 @@ const KIM2_WIZARD_STEPS = [
   ['connect', 'Check the unit'],
   ['flash', 'Flash firmware'],
   ['st1', 'Sensor self-test (GPS, WS85, ENV, ADC)'],
-  ['papers', "Read the KIM2's factory credentials"],
+  ['papers', "Read the KIM2's factory credentials; the unit's identity"],
   ['st2', 'TX self-test (one frame to the satellites)'],
   ['comm', 'Read the install burst state'],
   ['report', 'Report'],
@@ -2265,7 +2316,7 @@ async function commissionKim2Unit(link, plan, hooks = {}) {
   const { signal } = plan;
   const onStep = hooks.onStep || (() => {});
   const required = plan.required || ['GPS', 'ENV', 'ADC', 'TX'];
-  const res = { ok: false, fwBefore: null, state: null, flash: null, st1: null, papers: null, st2: null, selftest: null, verdict: null, commission: null, error: null, step: null };
+  const res = { ok: false, fwBefore: null, state: null, flash: null, st1: null, papers: null, identity: null, st2: null, selftest: null, verdict: null, commission: null, error: null, step: null };
   let mode = plan.mode;
   const stateNow = async () => { try { return await getState(link, { signal }); } catch (e) { if (e instanceof CancelledError) throw e; return null; } };
   const run = async (key, fn) => {
@@ -2311,7 +2362,14 @@ async function commissionKim2Unit(link, plan, hooks = {}) {
   await run('papers', async () => {
     res.papers = await readKim2Papers(link, { signal });
     if (!res.papers.ok) throw new ProtocolError(`The KIM2's credentials are not usable: ${res.papers.problems.join('; ')}`);
-    return { detail: `ID ${res.papers.id}, ADDR ${res.papers.addr}, unit ${res.papers.sn}` };
+    // the unit's own identity: written when the plan carries one, read otherwise (null on a firmware without AT+SET/GET)
+    if (plan.identity) {
+      res.identity = await writeUnitIdentity(link, plan.identity, { signal });
+      if (!res.identity.ok) throw new ProtocolError(res.identity.values ? `The unit reads back a different identity (${res.identity.mismatches.join(', ')})` : 'This firmware has no AT+SET: update it to 1.5.0 or later');
+    } else res.identity = { ok: true, values: await readUnitIdentity(link, { signal }), mismatches: [] };
+    res.papers.identity = res.identity.values;
+    const id = identityText(res.identity.values);
+    return { detail: `ID ${res.papers.id}, ADDR ${res.papers.addr}, unit ${res.papers.sn}${id ? ` · ${id}` : ''}` };
   });
   await run('st2', async () => {
     if (!required.includes('TX')) { res.selftest = res.st1; return { skip: true, detail: 'TX not required' }; }
@@ -2335,7 +2393,7 @@ async function commissionKim2Unit(link, plan, hooks = {}) {
 /* ---------- report ---------- */
 
 const CSV_COLUMNS = ['timestamp', 'operator', 'verdict', 'fw', 'id', 'addr', 'sn', 'seckey_crc', 'rconf', 'provisioned', 'bat_mv', 'bat_tier', 'awake_duty', 'clock_offset_s', 'selftest', 'selftest_summary',
-  'st_gps', 'st_ws85', 'st_env', 'st_adc', 'st_tx', 'commission', 'flash', 'credentials', 'notes'];
+  'st_gps', 'st_ws85', 'st_env', 'st_adc', 'st_tx', 'commission', 'flash', 'credentials', 'notes', 'label', 'vessel', 'organisation'];
 
 function plainVal(v) { return v == null || (typeof v === 'object') ? null : String(v); }
 
@@ -2384,6 +2442,7 @@ function buildReport(s) {
     credentials: creds && creds.kim2 ? {        // KIM2: factory-set, read off the module (nothing written)
       source: 'kim2', ok: !!creds.kim2.ok, at: creds.at, error: creds.kim2.ok ? null : creds.kim2.problems.join('; '), warnings: [], checks: [],
       id: creds.kim2.id, addr: creds.kim2.addr, sn: creds.kim2.sn, rconf: creds.kim2.rconf, problems: creds.kim2.problems.slice(),
+      identity: creds.kim2.identity ? { label: creds.kim2.identity.label || '', vessel: creds.kim2.identity.vessel || '', organisation: creds.kim2.identity.organisation || '' } : null,
       recorded: creds.recorded ? { at: creds.recorded.at, added: creds.recorded.added == null ? null : !!creds.recorded.added, queued: !!creds.recorded.queued, by: creds.recorded.by || null } : null,
     } : creds ? {
       ok: !!creds.ok, at: creds.at, error: creds.error || null, warnings: creds.warnings || [],
@@ -2423,6 +2482,8 @@ function reportToCsvRow(r) {
     commission: r.commissioning ? strip(r.commissioning.raw) : '', flash, credentials: cred,
     notes: [r.notes, r.run && !r.run.ok ? `guided run stopped at ${r.run.step}: ${r.run.error}` : ''].filter(Boolean).join(' | '),
   };
+  const idn = r.credentials && r.credentials.source === 'kim2' ? r.credentials.identity : null;   // KIM2 units: the unit's own name
+  for (const k of IDENTITY_KEYS) vals[k] = idn ? idn[k] || '' : '';
   return CSV_COLUMNS.map(c => (vals[c] == null ? '' : String(vals[c])));
 }
 /** Rows are arrays in CSV_COLUMNS order, or objects keyed by column (how the UI stores them), so rows saved
@@ -2743,6 +2804,7 @@ function buildReportPdf(rep) {
     kv('Radio configuration', c.rconf ? `${rconfText(c.rconf)}${c.rconf === KIM2_RCONF_DECODED ? " (CounterCurrent's)" : " (not CounterCurrent's build default)"}` : null);
     kv('Credentials', c.ok ? "The KIM2's factory identity, read back from the module." : `Not usable: ${c.error || 'unknown problem'}.`);
     kv('Team vault', c.recorded ? (c.recorded.queued ? 'Waiting in the station browser for the next sign-in.' : `Recorded${c.recorded.by ? ` by ${c.recorded.by}` : ''}, in use on this unit.`) : 'Not recorded in this session.');
+    kv('Unit identity', c.identity == null ? null : identityText(c.identity) || 'Not set.', 'Label (the unit\'s name in the phone app), vessel and organisation, as the unit stores them.');
   } else if (rep.credentials) {
     table([{ title: 'FIELD', w: W * 0.2 }, { title: 'EXPECTED', w: W * 0.31 }, { title: 'READ BACK', w: W * 0.36 }, { title: 'CHECK', w: W * 0.13 }],
       rep.credentials.checks.map(c => {
@@ -3570,6 +3632,22 @@ class Kim2Simulator extends NaiadSimulator {
     this.nvm.sn = this.o.sn || `CC-${hex8(Math.floor(r() * 0xFFFFFFFF))}${hex8(Math.floor(r() * 0xFFFFFFFF))}`;
     this.nvm.rconfSaved = '';                 // '' = the build's KIM2_RCONF
     this.scapSeen = 0;
+    this.settings = { label: '', vessel: '', organisation: '' };   // AtConsole.h AT+SET / AT+GET (the identity keys)
+  }
+
+  /* -- settings over the console (AT+SET=<key>,<value> / AT+GET=<key>|?): the unit's label, vessel, organisation -- */
+  _cmd_SET({ hasEq, arg }) {
+    const i = hasEq ? arg.indexOf(',') : -1;
+    if (i < 0) return this._err('1200');
+    const key = arg.slice(0, i), value = arg.slice(i + 1).slice(0, 23);
+    if (!(key in this.settings)) return this._err('1200');
+    this.settings[key] = value;
+    this._ok([`+SET=${key},${value}`]);
+  }
+  _cmd_GET({ q, hasEq, arg }) {
+    if (q) return this._ok(Object.entries(this.settings).map(([k, v]) => `+GET=${k},${v}`));
+    if (!hasEq || !arg || !(arg in this.settings)) return this._err('1200');
+    this._ok([`+GET=${arg},${this.settings[arg]}`]);
   }
 
   /* -- USB CDC: any baud, no wake-up loss; the 1200-baud touch -- */
@@ -5407,7 +5485,7 @@ function nrfFindFirmwareId(bin) {
 }
 /**
  * A XIAO application image from what the user (or a release) provides: the Arduino build's DFU package
- * (WS85-Tracker.ino.zip: manifest.json + .dat + .bin), its .hex, or a raw .bin linked at 0x27000 (both get the
+ * (naiad-<version>.zip, PlatformIO's firmware.zip: manifest.json + .dat + .bin), its .hex, or a raw .bin linked at 0x27000 (both get the
  * init packet built here, the way `dfu genpkg` would). Checks the vector table, the size, the init packet's
  * device type, SoftDevice and CRC. -> { ok, errors, warnings, bin, dat, init, fw, size, source, name }
  */
@@ -5576,6 +5654,7 @@ const NaiadProtocol = {
   buildReportPdf, PdfDoc, PDF_WIDTHS, pdfCodes, pdfStr, pdfTextWidth, pdfWrap, rconfText, stReading, verdictReasons, realId, isTestIdentity,
   NaiadSimulator, SimTransport, makeSimImage, mulberry32,
   PRODUCTS, fwProduct, readKim2Papers, Kim2Simulator, KIM2_RCONF, KIM2_RCONF_DECODED, KIM2_SIM_FW,
+  IDENTITY_KEYS, IDENTITY_MAX, validateIdentity, readUnitIdentity, writeUnitIdentity, identityText,
   NRF, crc16Ccitt, nrfInitPacket, parseNrfInitPacket, slipEncode, SlipDecoder, hciFrame, hciParse, hciAck, nrfFindFirmwareId,
   nrfImage, nrfDfuFlash, kim2FlashFirmware,
   VAULT_STATUSES, VAULT_KDF_ITER, parseDelimited, unzipEntries, xlsxRows, credentialRowsToRecords, readCredentialFile,
@@ -6749,9 +6828,14 @@ async function doCredRead() {
 /* -- KIM2 mode: the module's factory credentials, read off the board and recorded in the team vault -- */
 async function doKimRead() {
   setMsg('#kimMsg', '');
-  const r = await runOp('Reading the KIM2', signal => readKim2Papers(ui.link, { signal }));
+  const r = await runOp('Reading the KIM2', async signal => {
+    const pp = await readKim2Papers(ui.link, { signal });
+    pp.identity = await readUnitIdentity(ui.link, { signal });    // the unit's own label, vessel, organisation
+    return pp;
+  });
   if (!r.ok) { setMsg('#kimMsg', r.error ? r.error.message : 'Cancelled', 'err'); return null; }
   const pp = r.value;
+  if (pp.identity) identToInputs(pp.identity);
   ui.creds = { kim2: pp, at: new Date().toISOString(), recorded: null };
   for (const k of ['id', 'addr', 'sn', 'rconf']) if (pp[k] != null) ui.unit[k] = pp[k];
   if (pp.fw) ui.unit.fw = pp.fw;
@@ -6759,9 +6843,41 @@ async function doKimRead() {
   renderKimPapers(); renderUnit(); renderReport(); updateControls();
   return pp;
 }
-/** Record (or re-record) the papers; signed out, the event waits in this browser like provisioning tracking. */
+/* -- the unit's own identity (label, vessel, organisation), over the console: the three fields of the credentials card -- */
+const IDENT_INPUTS = { label: '#identLabel', vessel: '#identVessel', organisation: '#identOrg' };
+function identFromInputs() { const v = {}; for (const [k, sel] of Object.entries(IDENT_INPUTS)) v[k] = $(sel).value.trim(); return v; }
+function identToInputs(v) { for (const [k, sel] of Object.entries(IDENT_INPUTS)) $(sel).value = v && v[k] != null ? v[k] : ''; }
+/** The guided run's identity: the fields as typed when any is filled (written to the unit), else null (read only). */
+function identPlan() { const v = identFromInputs(); return Object.values(v).some(Boolean) ? v : null; }
+function noteIdentity(values) {
+  if (ui.creds && ui.creds.kim2) { ui.creds.kim2.identity = values; renderKimPapers(); renderReport(); }
+}
+async function doIdentRead() {
+  setMsg('#identMsg', '');
+  const r = await runOp('Reading the unit identity', signal => readUnitIdentity(ui.link, { signal }));
+  if (!r.ok) { setMsg('#identMsg', r.error ? r.error.message : 'Cancelled', 'err'); return null; }
+  if (!r.value) { setMsg('#identMsg', 'This firmware has no AT+GET: update it to 1.5.0 or later, or set the identity from the phone app.', 'warn'); return null; }
+  identToInputs(r.value);
+  noteIdentity(r.value);
+  setMsg('#identMsg', identityText(r.value) ? `Unit: ${identityText(r.value)}` : 'No identity set on the unit yet.', 'ok');
+  return r.value;
+}
+async function doIdentWrite() {
+  setMsg('#identMsg', '');
+  const v = validateIdentity(identFromInputs());
+  if (!v.ok) { setMsg('#identMsg', Object.entries(v.errors).map(([k, e]) => `${k}: ${e}`).join('; '), 'err'); return null; }
+  const r = await runOp('Writing the unit identity', signal => writeUnitIdentity(ui.link, v.values, { signal }));
+  if (!r.ok) { setMsg('#identMsg', r.error ? (r.error.code === '1203' ? 'This firmware has no AT+SET: update it to 1.5.0 or later.' : r.error.message) : 'Cancelled', 'err'); return null; }
+  const w = r.value;
+  if (w.values) { identToInputs(w.values); noteIdentity(w.values); }
+  setMsg('#identMsg', w.ok ? `Written and read back: ${identityText(w.values) || 'cleared'}.` : w.values ? `Read back differs: ${w.mismatches.join(', ')}.` : 'This firmware has no AT+GET to read it back.', w.ok ? 'ok' : 'err');
+  return w;
+}
+
+/** Record (or re-record) the papers; signed out, the event waits in this browser like provisioning tracking.
+ *  The unit's identity, when known, goes into the record's note. */
 async function teamRecordKim2(pp) {
-  const ev = { kind: 'kim2', id: pp.id, addr: pp.addr, sn: pp.sn, fw: pp.fw || '', t: new Date().toISOString() };
+  const ev = { kind: 'kim2', id: pp.id, addr: pp.addr, sn: pp.sn, fw: pp.fw || '', note: identityText(pp.identity), t: new Date().toISOString() };
   if (team.state === 'offline' || team.state === 'unconfigured') return { error: team.msg || 'the team vault cannot be reached from here' };
   if (team.state === 'in') {
     try {
@@ -6798,6 +6914,7 @@ function renderKimPapers() {
   add('Unit SN', valText(pp.sn), 'mono');
   add('Firmware', valText(pp.fw));
   add('Radio config', pp.rconf == null ? '—' : pp.rconf === KIM2_RCONF_DECODED ? `${rconfText(pp.rconf)} (CounterCurrent's)` : `${rconfText(pp.rconf)} (not CounterCurrent's build default)`, pp.rconf && pp.rconf !== KIM2_RCONF_DECODED ? 'msg warn' : '');
+  add('Unit identity', pp.identity == null ? 'not available (firmware before 1.5.0)' : identityText(pp.identity) || 'not set', pp.identity && identityText(pp.identity) ? '' : 'muted');
   const v = team.state === 'in' && pp.id ? team.records.find(x => x.id === pp.id) : null;
   const rec = ui.creds.recorded;
   add('Team vault', rec && rec.queued ? 'waiting in this browser for the next sign-in'
@@ -7862,8 +7979,13 @@ function kim2FlashOpts(signal, { expectFw = '', onPhase, onProgress } = {}) {
   };
 }
 async function doWizardKim2() {
-  const plan = { mode: ui.mode, required: requiredItems() };
+  const plan = { mode: ui.mode, required: requiredItems(), identity: identPlan() };
   const lines = [], img = ui.image;
+  if (plan.identity) {
+    const v = validateIdentity(plan.identity);
+    if (!v.ok) { setMsg('#wizMsg', 'Unit identity: ' + Object.entries(v.errors).map(([k, e]) => `${k}: ${e}`).join('; '), 'err'); return; }
+    lines.push(`Unit identity: write "${identityText(plan.identity)}"`);
+  } else lines.push('Unit identity: read only (the fields in the credentials card are empty)');
   if ($('#wizFlash').checked && img && img.analysis.ok) {
     plan.image = img.analysis; plan.expectFw = $('#expectFw').value.trim();
     lines.push(`Flash ${img.name}${plan.expectFw ? ` (skipped if the unit already runs "${plan.expectFw}")` : ''}`);
@@ -7898,6 +8020,7 @@ async function doWizardKim2() {
     if (w.papers) {
       ui.creds = { kim2: w.papers, at: new Date().toISOString(), recorded: null };
       for (const k of ['id', 'addr', 'sn', 'rconf']) if (w.papers[k] != null) ui.unit[k] = w.papers[k];
+      if (w.papers.identity) identToInputs(w.papers.identity);
     }
     if (w.selftest || w.st1) ui.selftest = w.selftest || w.st1;
     if (w.commission) { ui.commission = w.commission; ui.commUpdated = new Date(); }
@@ -8198,7 +8321,7 @@ function updateControls() {
   en('#btnFlash', (app || bl || (conn && isKim2() && !ui.mode)) && !busy && imgOk);   // KIM2: a console-less build is reached by the 1200-baud touch
   en('#btnBlCheck', (app || bl) && !busy);
   $('#btnBlExit').hidden = !bl; en('#btnBlExit', bl && !busy);
-  for (const id of ['#btnStRun', '#btnStRead', '#btnStWait', '#btnProvision', '#btnCredRead', '#btnCredErase', '#btnCommRefresh', '#btnCommStart', '#btnCommSkip', '#btnCommArm', '#btnKimRead']) en(id, app && !busy);
+  for (const id of ['#btnStRun', '#btnStRead', '#btnStWait', '#btnProvision', '#btnCredRead', '#btnCredErase', '#btnCommRefresh', '#btnCommStart', '#btnCommSkip', '#btnCommArm', '#btnKimRead', '#btnIdentWrite', '#btnIdentRead']) en(id, app && !busy);
   en('#btnKimRecord', !busy && !!(ui.creds && ui.creds.kim2 && ui.creds.kim2.ok));
   en('#btnWiz', (app || bl) && !busy);
   for (const b of $$('[data-cancel]')) b.disabled = !(busy && ui.op.cancellable);
@@ -9223,6 +9346,20 @@ const VVIEWS_KIM2 = {
     }
     const v = team.state === 'in' ? team.records.find(x => x.id === pp.id) : null;
     out.push(vState(rec ? 'ok' : 'info', `Argos ID ${pp.id} · ADDR ${pp.addr}`, `Unit ${pp.sn}. The key stays inside the KIM2.`));
+    // the unit's own name: label (what the phone app shows), vessel, organisation
+    const idn = pp.identity;
+    if (idn == null) out.push(vState('info', 'Unit identity', 'This firmware has no identity fields (before 1.5.0): set the name, vessel and organisation from the phone app.'));
+    else {
+      out.push(vState(identityText(idn) ? 'ok' : 'info', 'Unit identity', identityText(idn) || 'Not set yet. Give the unit its name, vessel and organisation here, or later from the phone app. Plain letters and digits, up to 23 characters each.'));
+      const field = (id, lbl, k) => el('label', { class: 'field' }, el('span', { class: 'lbl', text: lbl }), el('input', { type: 'text', id, maxlength: '23', value: $(IDENT_INPUTS[k]).value || idn[k] || '', autocomplete: 'off', spellcheck: 'false' }));
+      out.push(el('div', { class: 'grid2' }, field('vLabel', 'Label', 'label'), field('vVessel', 'Vessel', 'vessel'), field('vOrg', 'Organisation', 'organisation')));
+      out.push(el('div', { class: 'vactions' }, vBtn('Write the identity to the unit', () => vDo('Writing the identity', async () => {
+        $('#identLabel').value = $('#vLabel').value; $('#identVessel').value = $('#vVessel').value; $('#identOrg').value = $('#vOrg').value;
+        voy.err.papers = null;
+        const w = await doIdentWrite();
+        if (!w || !w.ok) voy.err.papers = { title: 'The identity was not written', text: $('#identMsg').textContent };
+      }))));
+    }
     if (rec && rec.queued) out.push(vState('warn', 'Kept in this browser', 'Sent to the team vault at the next sign-in.'));
     else if (rec) out.push(vState('ok', 'Recorded in the team vault', v ? `${v.status}${v.sn ? ` on ${v.sn}` : ''}` : 'In use on this unit.'));
     else if (team.state === 'out' || team.state === 'error' || team.state === 'unknown') {
@@ -9821,6 +9958,8 @@ function init() {
   $('#btnReset').addEventListener('click', doReset);
   $('#btnKimRead').addEventListener('click', () => void doKimRead());
   $('#btnKimRecord').addEventListener('click', () => void doKimRecord());
+  $('#btnIdentWrite').addEventListener('click', () => void doIdentWrite());
+  $('#btnIdentRead').addEventListener('click', () => void doIdentRead());
 
   $('#btnChooseBin').addEventListener('click', () => $('#fwFile').click());
   $('#fwFile').addEventListener('change', e => loadImageFile(e.target.files[0]));

@@ -459,8 +459,10 @@ async function vault(request, env, url) {
 	if (path === 'kim2' && method === 'POST') {
 		const b = await body(request);
 		const today = new Date().toISOString().slice(0, 10);
+		// b.note: the unit's own identity (label · vessel · organisation) as the tool read it, when known
+		const ident = String(b.note || '').trim().slice(0, 120);
 		const { rec, errors } = normalize({ id: b.id, addr: b.addr, source: 'kim2', status: 'in use', sn: b.sn, fw: b.fw, assigned: today,
-			note: 'KIM2 factory credentials: the key stays inside the module' });
+			note: ident ? `KIM2 factory credentials; unit: ${ident}` : 'KIM2 factory credentials: the key stays inside the module' });
 		const bad = ['id', 'addr'].filter(f => errors[f]);
 		if (bad.length) throw new HttpError(400, bad.map(f => `${f.toUpperCase()}: ${errors[f]}`).join('; '));
 		if (!rec.sn) throw new HttpError(400, "SN: the unit's serial number is needed");
@@ -472,8 +474,8 @@ async function vault(request, env, url) {
 			if (cur.addr !== rec.addr) throw new HttpError(409, `ID ${rec.id} is in the vault with ADDR ${cur.addr}, but the module reports ${rec.addr}`);
 			const moved = cur.sn && cur.sn !== rec.sn ? ` (was on ${cur.sn})` : '';
 			await env.DB.batch([
-				env.DB.prepare("UPDATE creds SET status = 'in use', sn = ?, fw = ?, assigned = ?, updated = ?, updated_by = ?, version = version + 1 WHERE id = ?")
-					.bind(rec.sn, rec.fw, today, now, email, rec.id),
+				env.DB.prepare("UPDATE creds SET status = 'in use', sn = ?, fw = ?, assigned = ?, note = ?, updated = ?, updated_by = ?, version = version + 1 WHERE id = ?")
+					.bind(rec.sn, rec.fw, today, ident ? rec.note : cur.note, now, email, rec.id),
 				hist(env, rec.id, 'recorded from KIM2', email, `${rec.sn}${moved}`),
 			]);
 			return json({ record: await getRec(env, rec.id), added: false });

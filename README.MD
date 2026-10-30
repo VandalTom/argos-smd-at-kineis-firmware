@@ -334,7 +334,7 @@ see its README). In KIM2 mode:
   Sense variant, which CounterCurrent's are): no adapter, no baud choice, no
   wake preamble.
 - *Firmware*: the CounterCurrent releases (`/api/releases?product=kim2`), or the
-  Arduino build's DFU package (`WS85-Tracker.ino.zip`), `.hex` or `.bin`. The tool
+  release package (`naiad-<version>.zip`, PlatformIO's `firmware.zip`), its `.hex` or a `.bin`. The tool
   restarts the XIAO into its Adafruit bootloader (`AT+BOOT=`, or the 1200-baud touch
   for a build without the console), opens the bootloader's own USB port (2886:0044 or 0045,
   picked once per XIAO) and sends the image with adafruit-nrfutil's serial DFU
@@ -347,7 +347,11 @@ see its README). In KIM2 mode:
   number; the same module seen on another XIAO is re-recorded). Only the sign-in
   is needed, not the passphrase, and a record made while signed out waits in the
   browser like provisioning tracking. Key-less sets are never handed out, shown,
-  exported as keys or re-sealed.
+  exported as keys or re-sealed. The *unit identity* fields of the same card
+  (label, vessel, organisation: the unit's settings, `AT+SET=`/`AT+GET=`, firmware
+  1.5.0 or later) are written to the unit from the card, the papers sea or the
+  guided run, read back, shown in the report and the CSV, and put in the vault
+  record's note.
 - *Commissioning* is the install burst: `ARMED` until a cycle reads the supercap at
   4.0 V, then one frame a minute for 30 minutes. Arming starts a cycle at once.
 - The *guided run* and the *Voyage* follow the KIM2 order: flash, sensor self-test,

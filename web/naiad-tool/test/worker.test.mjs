@@ -420,10 +420,14 @@ await test("KIM2: a module's factory set recorded without a key; seen again on a
 	const rec = b => call(env, 'POST', '/api/vault/kim2', { body: b });
 	let r = await rec({ id: '2345678', addr: 'c0ffee01', sn: 'CC-0011223344556677', fw: 'CounterCurrent v1.0.0 (abc1234)' });
 	eq([r.status, r.data.added, r.data.record.status, r.data.record.source, r.data.record.addr, r.data.record.key_crc], [200, true, 'in use', 'kim2', 'C0FFEE01', ''], 'added in use, no key');
-	r = await rec({ id: '2345678', addr: 'C0FFEE01', sn: 'CC-8899AABBCCDDEEFF', fw: 'CounterCurrent v1.0.1 (def5678)' });
+	ok(/key stays inside/.test(r.data.record.note), 'default note without an identity');
+	r = await rec({ id: '2345678', addr: 'C0FFEE01', sn: 'CC-8899AABBCCDDEEFF', fw: 'CounterCurrent v1.0.1 (def5678)', note: 'Buoy 7 north · MV Silicon' });
 	eq([r.data.added, r.data.record.sn, r.data.record.fw, r.data.record.version], [false, 'CC-8899AABBCCDDEEFF', 'CounterCurrent v1.0.1 (def5678)', 2], 're-recorded on another unit');
+	eq(r.data.record.note, 'KIM2 factory credentials; unit: Buoy 7 north · MV Silicon', "the unit's identity in the note");
 	const h = await call(env, 'GET', '/api/vault/creds/2345678/history');
 	eq(h.data.history.map(x => `${x.ev}: ${x.note}`), ['recorded from KIM2: CC-0011223344556677', 'recorded from KIM2: CC-8899AABBCCDDEEFF (was on CC-0011223344556677)'], 'history');
+	r = await rec({ id: '2345678', addr: 'C0FFEE01', sn: 'CC-8899AABBCCDDEEFF', fw: 'CounterCurrent v1.0.1 (def5678)' });
+	eq(r.data.record.note, 'KIM2 factory credentials; unit: Buoy 7 north · MV Silicon', 'a record without an identity keeps the note');
 	eq((await rec({ id: '2345678', addr: 'C0FFEE02', sn: 'CC-1' })).status, 409, 'same ID, another ADDR');
 	eq((await rec({ id: '100001', addr: '0A1B2C3D', sn: 'CC-1' })).status, 409, 'the ID of a CLS set');
 	eq((await rec({ id: '2345679', addr: '0A1B2C3E', sn: 'CC-1' })).status, 409, 'an ADDR of another set');
