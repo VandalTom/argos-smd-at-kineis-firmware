@@ -104,6 +104,14 @@ const kim2AssetInfo = name => { const m = KIM2_ASSET.exec(name); return { varian
 const KIM2_REPO = env => env.KIM2_GITHUB_REPO || 'SiliconVandals/CounterCurrent';
 /** Per-release notes for CounterCurrent tags (same shape as RELEASE_NOTES). */
 const KIM2_RELEASE_NOTES = {
+	'v1.5.2': {
+		summary: 'The self-test no longer hangs after the ENV item: sensor-rail off-time, the ADC item reuses the ENV reading, an I2C guard.',
+		changes: [
+			'The sensor rail stays off at least 50 ms before it is re-enabled, so the BME280 and ADS1115 either stay up or truly reset instead of browning out between two I2C sessions.',
+			'The ADC self-test item reports the rail reading the ENV item just took instead of opening a second session.',
+			'An I2C guard ends a hung TWIM transfer after 500 ms with a failed item, instead of the 10-minute watchdog reset.',
+		],
+	},
 	'v1.5.1': {
 		summary: 'The KIM2 exchanges retry, and the radio configuration is set at boot so AT+RCONF=? answers.',
 		changes: [
