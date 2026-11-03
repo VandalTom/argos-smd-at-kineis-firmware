@@ -891,7 +891,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.8.1';
+const TOOL_VERSION = '1.8.2';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -2361,7 +2361,15 @@ async function commissionKim2Unit(link, plan, hooks = {}) {
     return { detail: `${res.flash.oldFw || '?'} → ${res.flash.newFw}` };
   });
   await run('st1', async () => {
-    res.st1 = await runSelftest(link, ['GPS', 'WS85', 'ENV', 'ADC'], { signal, onUpdate: hooks.onSelftest });
+    // The first cycle after boot checks every sensor (firmware 1.6.0): a start-up check still running is
+    // collected, one finished within the last 15 minutes is taken, otherwise the checks run again now.
+    const items = ['GPS', 'WS85', 'ENV', 'ADC'];
+    const st = await stateNow(), upS = st ? Number(st.up) || 0 : 0;
+    let q = null;
+    try { q = await querySelftest(link, { signal }); } catch (e) { if (e instanceof CancelledError) throw e; }
+    if (q && (q.status === 'RUNNING' || q.status === 'PENDING')) { res.st1 = await pollBootSelftest(link, { signal, onUpdate: hooks.onSelftest }); res.st1.source = 'boot'; }
+    else if (q && (q.status === 'PASS' || q.status === 'FAIL') && upS < 900 && items.every(i => q.items[i])) { res.st1 = { ...q, source: 'boot' }; if (hooks.onSelftest) hooks.onSelftest(res.st1); }
+    else res.st1 = await runSelftest(link, items, { signal, onUpdate: hooks.onSelftest });
     res.state = (await stateNow()) || res.state;
     const ev = evaluateSelftest(res.st1.items, required.filter(i => i !== 'TX'));
     if (ev.verdict === 'FAIL') throw new ProtocolError(`Sensor self-test failed: ${ev.reasons.join('; ')}`);
@@ -6003,6 +6011,22 @@ function prod() { return PRODUCTS[ui.product] || PRODUCTS.arribada; }
 function isKim2() { return ui.product === 'kim2'; }
 /** KIM2 on a real USB port (not the simulator): resets and updates drop the port. */
 function kimUsb() { return isKim2() && !!ui.transport && ui.transport.kind !== 'sim'; }
+/** KIM2: a unit that has just booted answers its console before its KIM2 check has run (prov=0, no papers;
+ *  firmware before 1.6.0 opened its boot console window first). Wait it out, polling the state, rather than
+ *  call the KIM2 silent. */
+async function kim2SettleBoot() {
+  let waited = false;
+  for (let i = 0; i < 12; i++) {
+    const s = ui.unit.state;
+    if (!s || typeof s !== 'object' || s.state !== 'BOOT' || s.prov === '1' || Number(s.up) > 40) break;
+    waited = true;
+    setMsg('#connMsg', `The unit is starting up (${s.up || 0} s): waiting for its KIM2 check…`);
+    await sleep(2000);
+    if (!(ui.link && ui.link.isOpen)) return;
+    await refreshUnit();
+  }
+  if (waited) setMsg('#connMsg', 'The XIAO answered on USB.', 'ok');
+}
 /** KIM2 mode, port open on a XIAO's app USB ID (or the simulator), no console answer: a blank board or a build
  *  from before the console. Not a fault: the firmware step installs CounterCurrent with the 1200-baud touch. */
 function kim2Silent() {
@@ -6184,6 +6208,7 @@ async function connect({ reconnect = false } = {}) {
     if (d.fw) ui.unit.fw = d.fw;
     renderConn();
     await refreshUnit();
+    if (isKim2()) await kim2SettleBoot();
     await readSelftestQuiet();
   } else if (d.mode === 'bl') {
     ui.mode = 'bl';
@@ -9060,15 +9085,23 @@ async function vSelftest(items, label) {
   const q = await runOp('Reading self-test status', signal => querySelftest(ui.link, { signal }));
   const prev = ui.selftest;
   // only the items this sea asked for are taken over: a later check never undoes an earlier sea
-  const show = run => {
-    const part = { ...run, source: 'run', items: Object.fromEntries(Object.entries(run.items || {}).filter(([k]) => items.includes(k))) };
+  const show = (run, source = 'run') => {
+    const part = { ...run, source, items: Object.fromEntries(Object.entries(run.items || {}).filter(([k]) => items.includes(k))) };
     ui.selftest = vMergeRun(prev, part); renderSelftest(); vSchedule();
   };
+  const bootSrc = isKim2() ? 'boot' : 'run';
   if (q.ok && (q.value.status === 'RUNNING' || q.value.status === 'PENDING')) {
-    vSetProg('The module is running its own start-up check: collecting it…');
-    const r = await runOp('Waiting for the boot self-test', signal => pollBootSelftest(ui.link, { signal, onUpdate: show }));
-    if (r.ok) show(r.value);
+    vSetProg(isKim2() ? 'The unit is running its start-up checks: collecting them…' : 'The module is running its own start-up check: collecting it…');
+    const r = await runOp('Waiting for the boot self-test', signal => pollBootSelftest(ui.link, { signal, onUpdate: run => show(run, bootSrc) }));
+    if (r.ok) show(r.value, bootSrc);
     if (r.ok && items.every(i => r.value.items[i])) { renderReport(); return r; }
+  }
+  // KIM2: the first cycle after boot checks every sensor (firmware 1.6.0). A finished start-up check from this
+  // boot (the unit up less than 15 min) that covers the items asked for is taken; "Check again" runs them anew.
+  const upS = ui.unit.state && typeof ui.unit.state === 'object' ? Number(ui.unit.state.up) || 0 : 0;
+  if (isKim2() && q.ok && (q.value.status === 'PASS' || q.value.status === 'FAIL') && !prev && upS < 900 && items.every(i => q.value.items[i])) {
+    show(q.value, 'boot'); renderReport();
+    return { ok: true, value: { ...q.value, source: 'boot' } };
   }
   vSetProg(label);
   const r = await runOp('Self-test', signal => runSelftest(ui.link, items, { signal, onUpdate: show }));
@@ -9224,8 +9257,12 @@ const VVIEWS = {
 
   sensors() {
     const out = [], run = ui.selftest, req = requiredItems();
-    out.push(vLead(isKim2() ? 'The unit checks its own lookouts: GPS receiver, WS85 wind sensor, air sensors and the supply voltages. It runs between the unit\u2019s cycles and takes up to a minute (the wind sensor broadcasts every few seconds).'
+    out.push(vLead(isKim2() ? 'The unit checks its own lookouts as it starts: GPS receiver, WS85 wind sensor, air sensors and the supply voltages. The tool collects that start-up check (firmware 1.6.0 or later); Check again runs the checks once more, between the unit\u2019s cycles, up to a minute.'
       : 'The module checks its own lookouts: GPS receiver, WS85 wind sensor, BME280 air sensor and battery voltage. It takes up to a minute (the wind sensor sends a reading every few seconds).'));
+    if (isKim2() && !run && !voy.busy && !voy.autoSensors && vConn() && ui.mode === 'app') {   // the start-up check, once per unit
+      voy.autoSensors = true;
+      setTimeout(() => void vDo('Collecting the unit\u2019s start-up check', async () => { await vSelftest(SENSOR_ITEMS, 'Checking the sensors (up to a minute)…'); }), 0);
+    }
     out.push(el('ul', { class: 'vlist' }, SENSOR_ITEMS.map(it => {
       const r = run && run.items && run.items[it];
       const waiting = voy.busy && run && run.requested && run.requested.includes(it) && !r;
@@ -9404,7 +9441,9 @@ const VVIEWS_KIM2 = {
       const id = realId(u);
       const facts = [u.sn ? `unit ${u.sn}` : null, typeof u.fw === 'string' ? `firmware ${u.fw}` : null, id ? `Argos ID ${id}` : 'the KIM2 has not reported its ID'].filter(Boolean).join(' · ');
       out.push(vState('ok', sim ? 'The simulated unit answered' : 'The unit answered', facts));
-      if (vProv() === false) out.push(vState('warn', 'The KIM2 does not answer the XIAO', 'Check the radio module is fitted and powered. The firmware still updates, but the papers and the radio test need it.'));
+      const booting = u.state && typeof u.state === 'object' && u.state.state === 'BOOT' && Number(u.state.up) <= 40;
+      if (vProv() === false && booting) out.push(vState('info', 'The unit is starting up', 'Its KIM2 check runs a few seconds after boot: hail it again if the Argos ID is still missing.'));
+      else if (vProv() === false) out.push(vState('warn', 'The KIM2 does not answer the XIAO', 'Check the radio module is fitted and powered, then read the papers: the unit asks its module again whenever they are missing. The firmware still updates, but the papers and the radio test need it.'));
     } else if (ui.mode === 'bl') {
       out.push(vState('warn', 'The XIAO is waiting in its bootloader', 'A firmware update did not finish, or the reset button was double-tapped. The next sea installs the firmware.'));
     } else {
@@ -9494,7 +9533,7 @@ const VVIEWS_KIM2 = {
 
 /* ---- actions ---- */
 async function vConnect() {
-  voy.err.connect = null;
+  voy.err.connect = null; voy.autoSensors = false;
   if (!voy.sang) { voy.sang = true; void playVoyageMusic(); }     // once per voyage, inside the click
   const chosen = voy.src || ('serial' in navigator ? 'serial' : 'sim');
   const src = chosen === 'probe' ? (vPracticeProbe() ? 'sim' : 'serial') : chosen;   // after the probe, the console is on the serial link
@@ -9673,6 +9712,7 @@ function vLogIt() {
   renderReport(); vRender();
 }
 async function vNextUnit() {
+  voy.autoSensors = false;
   const sim = ui.transport && ui.transport.kind === 'sim';
   await disconnect(false);
   if (sim) ensureSim(true);

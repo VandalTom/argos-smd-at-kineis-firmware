@@ -104,6 +104,14 @@ const kim2AssetInfo = name => { const m = KIM2_ASSET.exec(name); return { varian
 const KIM2_REPO = env => env.KIM2_GITHUB_REPO || 'SiliconVandals/CounterCurrent';
 /** Per-release notes for CounterCurrent tags (same shape as RELEASE_NOTES). */
 const KIM2_RELEASE_NOTES = {
+	'v1.6.0': {
+		summary: 'The KIM2 is asked again whenever its papers are missing; the first cycle after boot reports as a boot self-test.',
+		changes: [
+			'A missing Argos ID, address or radio configuration is asked of the module again before NO_KIM2 is answered, and every transmit session re-reads missing papers: one lost boot exchange no longer sticks until the next reboot.',
+			'The boot console window comes after the KIM2 check, so a tool connecting right after a reset sees the papers at once.',
+			'The first cycle after boot reports its GPS, WS85, ENV and ADC checks as a boot self-test that the tool collects instead of running them again.',
+		],
+	},
 	'v1.5.2': {
 		summary: 'The self-test no longer hangs after the ENV item: sensor-rail off-time, the ADC item reuses the ENV reading, an I2C guard.',
 		changes: [
