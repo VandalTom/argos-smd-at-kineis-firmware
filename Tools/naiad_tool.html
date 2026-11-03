@@ -891,7 +891,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.8.0';
+const TOOL_VERSION = '1.8.1';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -1354,12 +1354,13 @@ async function readUnitInfo(link, { signal } = {}) {
  * unit could not answer (+ERROR=NO_KIM2: the module is silent), an erased or zero ID/ADDR, the test identity.
  */
 async function readKim2Papers(link, { signal } = {}) {
-  const out = { id: null, addr: null, sn: null, fw: null, rconf: null, problems: [], ok: false };
-  const q = async (key, cmd, expect, conv) => {
+  const out = { id: null, addr: null, sn: null, fw: null, rconf: null, rconfNote: null, problems: [], ok: false };
+  const q = async (key, cmd, expect, conv, { soft = false } = {}) => {
     try { out[key] = conv(await atCmd(link, cmd, { expect, signal })); }
     catch (e) {
       if (e instanceof CancelledError) throw e;
-      out.problems.push(e.code === 'NO_KIM2' ? `${cmd}: the KIM2 did not answer the XIAO` : `${cmd}: ${e.message}`);
+      const why = e.code === 'NO_KIM2' ? `${cmd}: the KIM2 did not answer the XIAO` : `${cmd}: ${e.message}`;
+      if (soft) out[key + 'Note'] = why; else out.problems.push(why);
     }
   };
   const trim = v => String(v).trim();
@@ -1367,7 +1368,10 @@ async function readKim2Papers(link, { signal } = {}) {
   await q('sn', 'AT+SN=?', '+SN=', trim);
   await q('id', 'AT+ID=?', '+ID=', normalizeIdReadback);
   await q('addr', 'AT+ADDR=?', '+ADDR=', v => trim(v).toUpperCase());
-  await q('rconf', 'AT+RCONF=?', '+RCONF=', trim);
+  // The radio configuration is a note, not part of the papers: the firmware sets it before every transmit
+  // (nothing persists in the module), and before 1.5.1 the boot check asked the cold module for it before
+  // setting it, so it answered NO_KIM2 while ID and ADDR were fine.
+  await q('rconf', 'AT+RCONF=?', '+RCONF=', trim, { soft: true });
   if (out.id != null && (!/^\d+$/.test(out.id) || out.id === '0' || out.id === '4294967295')) out.problems.push(`ID ${out.id} is not a factory Argos ID`);
   if (out.addr != null && (!isHex(out.addr, 8) || out.addr === 'FFFFFFFF' || out.addr === '00000000')) out.problems.push(`ADDR ${out.addr} is not a factory Argos address`);
   if (isTestIdentity(out)) out.problems.push('the module carries the Kinéis test identity, not its own');
@@ -6980,7 +6984,7 @@ function renderKimPapers() {
   add('Key', 'inside the KIM2 (never read out)');
   add('Unit SN', valText(pp.sn), 'mono');
   add('Firmware', valText(pp.fw));
-  add('Radio config', pp.rconf == null ? '—' : pp.rconf === KIM2_RCONF_DECODED ? `${rconfText(pp.rconf)} (CounterCurrent's)` : `${rconfText(pp.rconf)} (not CounterCurrent's build default)`, pp.rconf && pp.rconf !== KIM2_RCONF_DECODED ? 'msg warn' : '');
+  add('Radio config', pp.rconf == null ? (pp.rconfNote ? `not read (${pp.rconfNote}): it is set before every transmit; firmware 1.5.1 reports it` : '—') : pp.rconf === KIM2_RCONF_DECODED ? `${rconfText(pp.rconf)} (CounterCurrent's)` : `${rconfText(pp.rconf)} (not CounterCurrent's build default)`, pp.rconf && pp.rconf !== KIM2_RCONF_DECODED ? 'msg warn' : '');
   add('Unit identity', pp.identity == null ? 'not available (firmware before 1.5.0)' : identityText(pp.identity) || 'not set', pp.identity && identityText(pp.identity) ? '' : 'muted');
   const eco = pp.ecowitt || kim2Ecowitt();
   add('Ecowitt Label ID', eco || "not entered: type it from the WS85 sensor's label (needed to record the papers)", eco ? 'mono' : 'msg err');

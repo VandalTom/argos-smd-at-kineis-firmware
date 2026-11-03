@@ -104,6 +104,13 @@ const kim2AssetInfo = name => { const m = KIM2_ASSET.exec(name); return { varian
 const KIM2_REPO = env => env.KIM2_GITHUB_REPO || 'SiliconVandals/CounterCurrent';
 /** Per-release notes for CounterCurrent tags (same shape as RELEASE_NOTES). */
 const KIM2_RELEASE_NOTES = {
+	'v1.5.1': {
+		summary: 'The KIM2 exchanges retry, and the radio configuration is set at boot so AT+RCONF=? answers.',
+		changes: [
+			'Every KIM2 exchange at boot and in the per-transmit configure (ping, ID, ADDR, RCONF, MAC, date) gets three attempts: a just-powered module can miss its first command.',
+			'The boot check sets the radio configuration before reading it back, so AT+RCONF=? reports it instead of NO_KIM2 (the module is configured from scratch before every transmit; nothing persists in it).',
+		],
+	},
 	'v1.5.0': {
 		summary: 'The USB console speaks this tool\'s command set: the first release the tool can commission.',
 		changes: [
