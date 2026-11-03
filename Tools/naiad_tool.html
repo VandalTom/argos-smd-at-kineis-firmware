@@ -403,6 +403,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
       <ul>
         <li><b>Browser:</b> Chrome or Edge on a desktop computer (Web Serial), at <a href="https://arribada.siliconvandals.com">arribada.siliconvandals.com</a>. Offline, open this file directly (file://) or serve it with <code>python -m http.server</code> and use http://localhost. Firefox and Safari don't support Web Serial.</li>
         <li data-only="kim2"><b>Cable:</b> a USB-C data cable to the XIAO's own USB port: no adapter, no wiring. The XIAO shows up as a serial port (Seeed XIAO, USB ID 2886:8044, or 2886:8045 for a board built as the Sense variant, which CounterCurrent's are) and is powered from USB while connected. Its console answers at any time (no sleep wake-up), in every CounterCurrent build.</li>
+        <li data-only="kim2"><b>Blank XIAO:</b> straight from the reel it sits in its bootloader (port "Seeed XIAO bootloader", 2886:0044 or 2886:0045) or runs Seeed's factory sketch (2886:8044 or 8045). Connect to whichever port it shows and flash: no console is needed, and a XIAO port switches the tool to KIM2 mode by itself.</li>
         <li data-only="kim2"><b>Firmware update:</b> over the same cable. The tool restarts the XIAO into its bootloader (AT+BOOT=, or the 1200-baud touch for a build without the console). The bootloader is a different USB device (2886:0044 or 2886:0045): the first time, the browser asks you to pick it.</li>
         <li data-only="kim2"><b>Stuck XIAO:</b> double-tap its reset button: the LED pulses and the bootloader waits for an update. Connect to that port and click Flash.</li>
         <li data-only="kim2"><b>Credentials:</b> a KIM2 carries its Argos ID, address and key from the factory. The tool reads the ID and address (the key never leaves the module) and records them in the team vault.</li>
@@ -887,7 +888,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.7.0';
+const TOOL_VERSION = '1.7.1';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -5991,6 +5992,12 @@ function prod() { return PRODUCTS[ui.product] || PRODUCTS.arribada; }
 function isKim2() { return ui.product === 'kim2'; }
 /** KIM2 on a real USB port (not the simulator): resets and updates drop the port. */
 function kimUsb() { return isKim2() && !!ui.transport && ui.transport.kind !== 'sim'; }
+/** KIM2 mode, port open on a XIAO's app USB ID (or the simulator), no console answer: a blank board or a build
+ *  from before the console. Not a fault: the firmware step installs CounterCurrent with the 1200-baud touch. */
+function kim2Silent() {
+  return isKim2() && !!(ui.link && ui.link.isOpen) && ui.mode === null && !!ui.transport
+    && (ui.transport.kind === 'sim' || isXiaoPort(ui.port, NRF.PID_APP));
+}
 function setProduct(key, { why = '' } = {}) {
   if (!PRODUCTS[key]) key = 'arribada';
   const changed = ui.product !== key;
@@ -6123,6 +6130,10 @@ async function connect({ reconnect = false } = {}) {
     if ((!ui.port || (ui.portFailed && !reconnect)) && !(await choosePort())) return;
     transport = new WebSerialTransport(ui.port);
     Clock.scale = 1;
+    // A Seeed XIAO (app 2886:8044/8045, bootloader 0044/0045) is a CounterCurrent unit whatever mode the tool
+    // was left in: switch before the first byte, so a blank XIAO (bootloader only, or the factory sketch) is
+    // flashed instead of being called a silent Naiad at 115200 and 9600 baud.
+    if (!isKim2() && isXiaoPort(ui.port, [...NRF.PID_APP, ...NRF.PID_BL])) setProduct('kim2', { why: `${portLabel(ui.port).text}: switched to KIM2 mode.` });
   } else {
     transport = new SimTransport(ensureSim(false));
     Clock.scale = simScale();
@@ -6169,7 +6180,9 @@ async function connect({ reconnect = false } = {}) {
   } else {
     ui.mode = null;
     if (isKim2()) {
-      setMsg('#connMsg', 'No console answer on this port. If it is the XIAO with an Arduino build from before the console, flash CounterCurrent firmware: the tool reaches its bootloader with the 1200-baud touch. Otherwise check the cable is a data cable and that this is the XIAO\'s port.', 'err');
+      setMsg('#connMsg', kim2Silent()
+        ? 'The XIAO is on USB but does not answer its console: a blank board (the factory sketch) or a build from before the console. Load CounterCurrent firmware and flash it: the tool restarts the XIAO into its bootloader with the 1200-baud touch. If that fails, double-tap the reset button and connect to the "Seeed XIAO bootloader" port.'
+        : 'No console answer on this port. Check the cable is a data cable and that this is the XIAO\'s port (Seeed XIAO, USB 2886:8044 or 8045; its bootloader 2886:0044 or 0045). A XIAO with a build from before the console can still be flashed: the tool reaches its bootloader with the 1200-baud touch.', kim2Silent() ? 'warn' : 'err');
     } else {
       if (transport.kind !== 'sim' && !reconnect) portFailed();
       setMsg('#connMsg', `No reply at ${bauds.join(' or ')} baud. Check the wiring (adapter TX → P4/PA3, RX ← P5/PA2, GND) and power, or that this is the right port. The port stays open for manual commands; after Disconnect, Connect asks which port to use.`, 'err');
@@ -8323,7 +8336,7 @@ function updateControls() {
   $('#btnBlExit').hidden = !bl; en('#btnBlExit', bl && !busy);
   for (const id of ['#btnStRun', '#btnStRead', '#btnStWait', '#btnProvision', '#btnCredRead', '#btnCredErase', '#btnCommRefresh', '#btnCommStart', '#btnCommSkip', '#btnCommArm', '#btnKimRead', '#btnIdentWrite', '#btnIdentRead']) en(id, app && !busy);
   en('#btnKimRecord', !busy && !!(ui.creds && ui.creds.kim2 && ui.creds.kim2.ok));
-  en('#btnWiz', (app || bl) && !busy);
+  en('#btnWiz', (app || bl || kim2Silent()) && !busy);   // KIM2: a silent XIAO is flashed first (1200-baud touch)
   for (const b of $$('[data-cancel]')) b.disabled = !(busy && ui.op.cancellable);
   en('#btnConSend', conn && !busy); $('#conInput').disabled = !conn;
   for (const r of $$('input[name=src]')) r.disabled = conn;
@@ -8827,6 +8840,7 @@ function vStatus(key) {
       if (ui.mode === 'app') return ui.mon.rescue ? 'warn' : 'done';
       if (ui.mode === 'bl') return 'warn';
       if (voy.hailed && (ui.op || voy.busy)) return 'done';      // rebooting during a flash or a credentials reset
+      if (!ui.op && kim2Silent()) return 'warn';                 // a blank XIAO: the next sea installs the firmware
       return ui.op ? 'todo' : 'storm';
     case 'firmware': {
       if (voy.err.firmware) return 'storm';
@@ -9081,6 +9095,9 @@ const VVIEWS = {
       if (s && s.tier === 'CRIT') out.push(vState('warn', 'Battery critical', 'Below 2.10 V the module skips GPS and radio tests. Charge the pack above 2.15 V before the radio test.'));
     } else if (ui.mode === 'bl') {
       out.push(vState('warn', 'The module is waiting in its bootloader', 'A firmware update did not finish. Nothing is lost: the next sea installs the firmware.'));
+    } else if (kim2Silent()) {
+      out.push(vState('warn', 'The XIAO is on USB but not on its console', 'A blank board (Seeed\u2019s factory sketch) or firmware from before the console. Nothing to fix here: the next sea installs CounterCurrent firmware, restarting the XIAO into its bootloader with the 1200-baud touch.'));
+      out.push(vFixes(['If the install cannot reach the bootloader, double-tap the XIAO\u2019s reset button, then hail the "Seeed XIAO bootloader" port (USB 2886:0044 or 0045).']));
     } else {
       out.push(vState('storm', 'No answer from the module', 'The port is open but the module stays silent.'));
       out.push(vFixes([

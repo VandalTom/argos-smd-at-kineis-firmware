@@ -332,7 +332,11 @@ repo, `firmware/WS85-Tracker`, whose USB console speaks this tool's command set,
 see its README). In KIM2 mode:
 - *Connect* over the XIAO's own USB (2886:8044, or 8045 for a board built as the
   Sense variant, which CounterCurrent's are): no adapter, no baud choice, no
-  wake preamble.
+  wake preamble. A XIAO port switches the tool to KIM2 mode by itself. A blank
+  XIAO needs no console: straight from the reel it sits in its bootloader
+  (2886:0044 or 0045) or runs Seeed's factory sketch, and either way the
+  firmware step installs CounterCurrent (serial DFU, or the 1200-baud touch
+  first).
 - *Firmware*: the CounterCurrent releases (`/api/releases?product=kim2`), or the
   release package (`naiad-<version>.zip`, PlatformIO's `firmware.zip`), its `.hex` or a `.bin`. The tool
   restarts the XIAO into its Adafruit bootloader (`AT+BOOT=`, or the 1200-baud touch
