@@ -346,7 +346,11 @@ see its README). In KIM2 mode:
   app's port to come back and checks the firmware ID. No SWD.
 - *Credentials*: the KIM2's Argos ID, address and key are set at the factory.
   "Read from the KIM2" reads ID and ADDR (`AT+ID=?`, `AT+ADDR=?`; the key never
-  leaves the module). "Record in the team vault" adds the set to the team vault
+  leaves the module). The operator types the **Ecowitt Label ID** (the ID on the
+  WS85 sensor's label; the unit has no field for it): the papers are not recorded
+  and the guided run does not start without it, and it goes into the vault
+  record's note, the report (`credentials.ecowitt`, CSV column
+  `ecowitt_label_id`) and the production log. "Record in the team vault" adds the set to the team vault
   with no key (`POST /api/vault/kim2`, source `kim2`, in use on the unit's serial
   number; the same module seen on another XIAO is re-recorded). Only the sign-in
   is needed, not the passphrase, and a record made while signed out waits in the
@@ -481,7 +485,15 @@ be reached; it opens with the team passphrase.
 
 Hosting: Cloudflare Workers (`web/naiad-tool/`): the page as static assets
 plus `src/worker.js` (release list and image proxy, vault API on D1, Access
-JWT check). Workers Builds deploys every push to `naiad` (root
+JWT check). **Production log and test audit trail**: every report added to the
+production CSV (the Report card, the guided run with its CSV option, the
+Voyage's logbook) is also sent to `POST /api/vault/reports` with its CSV line
+and its whole JSON, any verdict, a stopped guided run included; signed out it
+waits in the browser like a vault event. The table is append-only (no route
+edits or deletes a report); `GET /api/vault/reports?product=kim2` lists the
+rows (the page builds "Download team production CSV" from them, with who
+logged each row, when, and its seq) and `GET /api/vault/reports/<seq>` returns
+one report in full. Workers Builds deploys every push to `naiad` (root
 `web/naiad-tool`, build `npm run build`, deploy `npx wrangler deploy`);
 `npm test` there runs the Worker against mocked GitHub/Access and SQLite.
 The page's CSP allows network requests to its own origin only.

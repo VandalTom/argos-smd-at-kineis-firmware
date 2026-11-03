@@ -448,6 +448,35 @@ await test("KIM2: a module's factory set recorded without a key; seen again on a
 	eq(env.DB.db.prepare("SELECT key_enc FROM creds WHERE id = '2345678'").get().key_enc, '', 'the KIM2 set stays key-less');
 });
 
+await test('Reports: the production log and test audit trail, one row per report, append-only, behind the login', async () => {
+	const env = await seeded();
+	const rep = { schema: 'naiad-commissioning-report/1', tool: 'naiad_tool 1.8.0', product: 'kim2', verdict: 'PASS', operator: 'Tom',
+		unit: { id: '2345678', addr: 'C0FFEE01', sn: 'CC-0011223344556677', fw: 'CounterCurrent v1.5.0 (60d19a7)' }, credentials: { source: 'kim2', ecowitt: 'WS85-A1B2C3' } };
+	const row = { timestamp: '2026-11-03T04:00:00Z', operator: 'Tom', verdict: 'PASS', sn: 'CC-0011223344556677', ecowitt_label_id: 'WS85-A1B2C3', 'bad key!': 'x' };
+	eq((await call(env, 'POST', '/api/vault/reports', { body: { row, report: rep }, token: null })).status, 401, 'login needed');
+	eq((await call(env, 'POST', '/api/vault/reports', { body: { row } })).status, 400, 'report needed');
+	eq((await call(env, 'POST', '/api/vault/reports', { body: { report: rep } })).status, 400, 'row needed');
+	eq((await call(env, 'POST', '/api/vault/reports', { body: { row, report: { ...rep, verdict: '' } } })).status, 400, 'verdict needed');
+	let r = await call(env, 'POST', '/api/vault/reports', { body: { row, report: rep } });
+	eq([r.status, r.data.seq, r.data.by, r.data.count], [200, 1, 'tom@siliconvandals.com', 1], 'added');
+	await call(env, 'POST', '/api/vault/kim2', { body: { id: '2345678', addr: 'C0FFEE01', sn: 'CC-0011223344556677', fw: 'x' } });
+	r = await call(env, 'POST', '/api/vault/reports', { body: { row: { ...row, verdict: 'FAIL' }, report: { ...rep, verdict: 'FAIL' } } });
+	eq([r.data.seq, r.data.count], [2, 2], 'a failed run is kept too');
+	eq((await call(env, 'POST', '/api/vault/reports', { body: { row, report: { ...rep, product: 'arribada', unit: { sn: 'N-1' }, credentials: null } } })).data.count, 1, 'the other product counted apart');
+	const list = (await call(env, 'GET', '/api/vault/reports?product=kim2')).data.reports;
+	eq(list.map(x => [x.seq, x.verdict, x.ecowitt, x.sn]), [[2, 'FAIL', 'WS85-A1B2C3', 'CC-0011223344556677'], [1, 'PASS', 'WS85-A1B2C3', 'CC-0011223344556677']], 'newest first, per product');
+	eq(Object.keys(list[1].row).sort(), ['ecowitt_label_id', 'operator', 'sn', 'timestamp', 'verdict'], 'row cells kept, odd keys dropped');
+	eq((await call(env, 'GET', '/api/vault/reports')).data.reports.length, 3, 'every product without the filter');
+	eq((await call(env, 'GET', '/api/vault/reports?limit=1')).data.reports.map(x => x.seq), [3], 'limit');
+	const one = await call(env, 'GET', '/api/vault/reports/1');
+	eq([one.status, one.data.report.unit.fw, one.data.by, one.data.product], [200, 'CounterCurrent v1.5.0 (60d19a7)', 'tom@siliconvandals.com', 'kim2'], 'the full report by seq');
+	eq((await call(env, 'GET', '/api/vault/reports/99')).status, 404, 'unknown seq');
+	eq((await call(env, 'DELETE', '/api/vault/reports/1')).status, 404, 'append-only: nothing deletes a report');
+	const h = await call(env, 'GET', '/api/vault/creds/2345678/history');
+	eq(h.data.history.filter(x => x.ev === 'report added').map(x => x.note), ['FAIL on CC-0011223344556677'], "a known ID's history shows its later runs");
+	eq((await call(env, 'GET', '/api/vault/reports', { token: null })).status, 401, 'listing needs the login too');
+});
+
 const failed = results.filter(r => !r[1]).length;
 console.log(`\n${results.length - failed}/${results.length} passed`);
 process.exit(failed ? 1 : 0);

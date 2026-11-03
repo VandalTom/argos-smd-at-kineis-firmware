@@ -5,6 +5,9 @@
  *   GET  /api/releases?product=kim2       CounterCurrent (XIAO + KIM2) releases: a private repo, so
  *                                         KIM2_GITHUB_TOKEN (read access) must be set (cached 5 min)
  *   GET  /api/firmware/<tag>/<file>       one release image of either, proxied same-origin (cached 1 hour)
+ *   POST /api/vault/reports                the production log and test audit trail: one commissioning report
+ *                                         (its production-CSV line and the full JSON), append-only, signed in
+ *   GET  /api/vault/reports[?product=]     the log's rows, newest first; GET /api/vault/reports/<seq> one report
  *   /api/vault/...                        the team's shared credentials vault (D1)
  *
  * The vault takes two keys. Cloudflare Access (Google, @siliconvandals.com) decides who reaches
@@ -360,6 +363,16 @@ const SCHEMA = [
 		seq INTEGER PRIMARY KEY AUTOINCREMENT, cred_id TEXT NOT NULL, t TEXT NOT NULL, ev TEXT NOT NULL,
 		by TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '')`,
 	`CREATE INDEX IF NOT EXISTS history_cred ON history(cred_id, seq)`,
+	// The production log and test audit trail: every commissioning report a station adds, as the page built
+	// it (the production-CSV line in `row`, the whole JSON report in `report`), with who added it and when.
+	// Append-only: there is no route that changes or deletes a report.
+	`CREATE TABLE IF NOT EXISTS reports (
+		seq INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, by TEXT NOT NULL, product TEXT NOT NULL,
+		verdict TEXT NOT NULL, id TEXT NOT NULL DEFAULT '', addr TEXT NOT NULL DEFAULT '', sn TEXT NOT NULL DEFAULT '',
+		fw TEXT NOT NULL DEFAULT '', ecowitt TEXT NOT NULL DEFAULT '', operator TEXT NOT NULL DEFAULT '',
+		tool TEXT NOT NULL DEFAULT '', row TEXT NOT NULL, report TEXT NOT NULL)`,
+	`CREATE INDEX IF NOT EXISTS reports_product ON reports(product, seq)`,
+	`CREATE INDEX IF NOT EXISTS reports_unit ON reports(sn, seq)`,
 ];
 const schemaReady = new WeakMap();
 function schema(env) {
@@ -411,6 +424,49 @@ async function vault(request, env, url) {
 		]);
 		if (!ins.meta || ins.meta.changes === 0) throw new HttpError(409, 'The team vault already exists: unlock it with the team passphrase', { kdf: await getKdf(env) });
 		return json({ kdf: await getKdf(env) });
+	}
+
+	// The production log and test audit trail. No passphrase involved (reports carry no key), so these routes
+	// sit before the vault's kdf guard. The page builds the CSV from the rows it lists here.
+	if (path === 'reports' && method === 'POST') {
+		const b = await body(request);
+		const rep = b.report, row = b.row;
+		if (!rep || typeof rep !== 'object' || Array.isArray(rep)) throw new HttpError(400, 'report: the JSON report is needed');
+		if (!row || typeof row !== 'object' || Array.isArray(row)) throw new HttpError(400, 'row: the production-CSV line is needed');
+		const product = rep.product === 'kim2' ? 'kim2' : 'arribada';
+		const verdict = String(rep.verdict || '').trim().slice(0, 16);
+		if (!verdict) throw new HttpError(400, 'report.verdict is needed');
+		const cells = Object.fromEntries(Object.entries(row).filter(([k]) => /^[a-z0-9_]{1,40}$/.test(k)).map(([k, v]) => [k, String(v == null ? '' : v).slice(0, 2000)]));
+		const rowJson = JSON.stringify(cells), repJson = JSON.stringify(rep);
+		if (rowJson.length > 32768) throw new HttpError(400, 'row: too large');
+		if (repJson.length > 262144) throw new HttpError(400, 'report: too large (256 KB at most)');
+		const u = rep.unit && typeof rep.unit === 'object' ? rep.unit : {};
+		const s = v => String(v == null ? '' : v).trim().slice(0, 96);
+		const ecowitt = s(cells.ecowitt_label_id || (rep.credentials && rep.credentials.ecowitt));
+		const now = new Date().toISOString();
+		const stmts = [env.DB.prepare(`INSERT INTO reports (t, by, product, verdict, id, addr, sn, fw, ecowitt, operator, tool, row, report)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(now, email, product, verdict, s(u.id), s(u.addr), s(u.sn), s(u.fw), ecowitt, s(rep.operator), s(rep.tool), rowJson, repJson)];
+		if (s(u.id) && await getRec(env, s(u.id))) stmts.push(hist(env, s(u.id), 'report added', email, `${verdict} on ${s(u.sn) || 'unit'}`));   // the ID's own history shows its runs
+		await env.DB.batch(stmts);
+		const last = await env.DB.prepare('SELECT seq, t FROM reports WHERE by = ? AND t = ? ORDER BY seq DESC LIMIT 1').bind(email, now).first();
+		const cnt = await env.DB.prepare('SELECT COUNT(*) AS n FROM reports WHERE product = ?').bind(product).first();
+		return json({ seq: last.seq, t: last.t, by: email, count: cnt.n });
+	}
+	if (path === 'reports' && method === 'GET') {
+		const want = url.searchParams.get('product');
+		const product = want === 'kim2' || want === 'arribada' ? want : null;
+		const limit = Math.min(5000, Math.max(1, Number(url.searchParams.get('limit')) || 2000));
+		const q = product
+			? env.DB.prepare('SELECT seq, t, by, product, verdict, id, sn, ecowitt, row FROM reports WHERE product = ? ORDER BY seq DESC LIMIT ?').bind(product, limit)
+			: env.DB.prepare('SELECT seq, t, by, product, verdict, id, sn, ecowitt, row FROM reports ORDER BY seq DESC LIMIT ?').bind(limit);
+		const { results } = await q.all();
+		return json({ email, reports: results.map(r => ({ ...r, row: JSON.parse(r.row) })) });
+	}
+	const oneReport = path.match(/^reports\/(\d+)$/);
+	if (oneReport && method === 'GET') {
+		const r = await env.DB.prepare('SELECT seq, t, by, product, verdict, report FROM reports WHERE seq = ?').bind(Number(oneReport[1])).first();
+		if (!r) throw new HttpError(404, 'No such report');
+		return json({ ...r, report: JSON.parse(r.report) });
 	}
 
 	const kdf = await getKdf(env);

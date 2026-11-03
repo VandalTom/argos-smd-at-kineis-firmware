@@ -404,6 +404,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
         <li><b>Browser:</b> Chrome or Edge on a desktop computer (Web Serial), at <a href="https://arribada.siliconvandals.com">arribada.siliconvandals.com</a>. Offline, open this file directly (file://) or serve it with <code>python -m http.server</code> and use http://localhost. Firefox and Safari don't support Web Serial.</li>
         <li data-only="kim2"><b>Cable:</b> a USB-C data cable to the XIAO's own USB port: no adapter, no wiring. The XIAO shows up as a serial port (Seeed XIAO, USB ID 2886:8044, or 2886:8045 for a board built as the Sense variant, which CounterCurrent's are) and is powered from USB while connected. Its console answers at any time (no sleep wake-up), in every CounterCurrent build.</li>
         <li data-only="kim2"><b>Blank XIAO:</b> straight from the reel it sits in its bootloader (port "Seeed XIAO bootloader", 2886:0044 or 2886:0045) or runs Seeed's factory sketch (2886:8044 or 8045). Connect to whichever port it shows and flash: no console is needed, and a XIAO port switches the tool to KIM2 mode by itself.</li>
+        <li data-only="kim2"><b>Papers:</b> the KIM2's Argos ID and address are read off the module; you type the <b>Ecowitt Label ID</b> from the WS85 sensor's label. Both go into the team vault record and the report. Every report added to the production CSV is also kept in the team production log (sign in), failed runs included, with its full JSON.</li>
         <li data-only="kim2"><b>Firmware update:</b> over the same cable. The tool restarts the XIAO into its bootloader (AT+BOOT=, or the 1200-baud touch for a build without the console). The bootloader is a different USB device (2886:0044 or 2886:0045): the first time, the browser asks you to pick it.</li>
         <li data-only="kim2"><b>Stuck XIAO:</b> double-tap its reset button: the LED pulses and the bootloader waits for an update. Connect to that port and click Flash.</li>
         <li data-only="kim2"><b>Credentials:</b> a KIM2 carries its Argos ID, address and key from the factory. The tool reads the ID and address (the key never leaves the module) and records them in the team vault.</li>
@@ -434,7 +435,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
       <label class="chk"><input type="checkbox" id="wizFlash" checked> Flash the loaded image if needed</label>
       <label class="chk" data-only="arribada"><input type="checkbox" id="wizCreds" checked> Write the entered credentials</label>
       <label class="chk" data-only="kim2"><input type="checkbox" id="wizRecord" checked> Record the KIM2's credentials in the team vault</label>
-      <label class="chk"><input type="checkbox" id="wizCsv" checked> Add a passing report to the production CSV</label>
+      <label class="chk"><input type="checkbox" id="wizCsv" checked> Add the report to the production CSV (passing) and the team production log (every run)</label>
       <label class="chk"><input type="checkbox" id="wizPdf" checked> Download the PDF report</label>
       <label class="chk"><input type="checkbox" id="wizJson"> Download the JSON report</label>
     </div>
@@ -604,6 +605,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
           <label class="field"><span class="lbl">Label</span><input type="text" id="identLabel" maxlength="23" autocomplete="off" spellcheck="false" placeholder="e.g. Buoy 7 north"></label>
           <label class="field"><span class="lbl">Vessel</span><input type="text" id="identVessel" maxlength="23" autocomplete="off" spellcheck="false"></label>
           <label class="field"><span class="lbl">Organisation</span><input type="text" id="identOrg" maxlength="23" autocomplete="off" spellcheck="false"></label>
+          <label class="field" title="The ID printed on the WS85 sensor's label. Part of the papers: it goes into the team vault record, the report and the production log. The unit has no field for it."><span class="lbl">Ecowitt Label ID (required)</span><input type="text" id="identEcowitt" class="mono" maxlength="32" autocomplete="off" spellcheck="false" placeholder="from the WS85 sensor's label"></label>
         </div>
         <div class="row">
           <button id="btnIdentWrite" class="btn primary" disabled title="AT+SET= each field, then read them back">Write to the unit</button>
@@ -807,6 +809,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
       <button id="btnRepJson" class="btn">Download JSON</button>
       <button id="btnRepAdd" class="btn primary">Add to production CSV</button>
       <button id="btnRepCsv" class="btn">Download production CSV (<span id="repCount">0</span>)</button>
+      <button id="btnRepTeamCsv" class="btn" title="Every report the team's stations added, from the team vault (sign in first)">Download team production CSV</button>
       <button id="btnRepClear" class="btn">Clear stored rows…</button>
       <span id="repMsg" class="msg small"></span>
     </div>
@@ -888,7 +891,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.7.1';
+const TOOL_VERSION = '1.8.0';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -2394,7 +2397,7 @@ async function commissionKim2Unit(link, plan, hooks = {}) {
 /* ---------- report ---------- */
 
 const CSV_COLUMNS = ['timestamp', 'operator', 'verdict', 'fw', 'id', 'addr', 'sn', 'seckey_crc', 'rconf', 'provisioned', 'bat_mv', 'bat_tier', 'awake_duty', 'clock_offset_s', 'selftest', 'selftest_summary',
-  'st_gps', 'st_ws85', 'st_env', 'st_adc', 'st_tx', 'commission', 'flash', 'credentials', 'notes', 'label', 'vessel', 'organisation'];
+  'st_gps', 'st_ws85', 'st_env', 'st_adc', 'st_tx', 'commission', 'flash', 'credentials', 'notes', 'label', 'vessel', 'organisation', 'ecowitt_label_id'];
 
 function plainVal(v) { return v == null || (typeof v === 'object') ? null : String(v); }
 
@@ -2444,6 +2447,7 @@ function buildReport(s) {
       source: 'kim2', ok: !!creds.kim2.ok, at: creds.at, error: creds.kim2.ok ? null : creds.kim2.problems.join('; '), warnings: [], checks: [],
       id: creds.kim2.id, addr: creds.kim2.addr, sn: creds.kim2.sn, rconf: creds.kim2.rconf, problems: creds.kim2.problems.slice(),
       identity: creds.kim2.identity ? { label: creds.kim2.identity.label || '', vessel: creds.kim2.identity.vessel || '', organisation: creds.kim2.identity.organisation || '' } : null,
+      ecowitt: creds.kim2.ecowitt || '',          // the WS85 sensor's label ID, typed at commissioning (the unit has no field for it)
       recorded: creds.recorded ? { at: creds.recorded.at, added: creds.recorded.added == null ? null : !!creds.recorded.added, queued: !!creds.recorded.queued, by: creds.recorded.by || null } : null,
     } : creds ? {
       ok: !!creds.ok, at: creds.at, error: creds.error || null, warnings: creds.warnings || [],
@@ -2485,14 +2489,16 @@ function reportToCsvRow(r) {
   };
   const idn = r.credentials && r.credentials.source === 'kim2' ? r.credentials.identity : null;   // KIM2 units: the unit's own name
   for (const k of IDENTITY_KEYS) vals[k] = idn ? idn[k] || '' : '';
+  vals.ecowitt_label_id = r.credentials && r.credentials.source === 'kim2' ? r.credentials.ecowitt || '' : '';
   return CSV_COLUMNS.map(c => (vals[c] == null ? '' : String(vals[c])));
 }
 /** Rows are arrays in CSV_COLUMNS order, or objects keyed by column (how the UI stores them), so rows saved
  *  by an older tool version with fewer columns still line up under the current header. */
 function csvRecord(row) { return Object.fromEntries(CSV_COLUMNS.map((c, i) => [c, row[i]])); }
-function buildCsv(rows) {
-  const cells = r => (Array.isArray(r) ? r : CSV_COLUMNS.map(c => (r[c] == null ? '' : r[c])));
-  return [CSV_COLUMNS.join(','), ...rows.map(r => cells(r).map(csvEscape).join(','))].join('\r\n') + '\r\n';
+function buildCsv(rows, extra = []) {
+  const cols = CSV_COLUMNS.concat(extra);           // extra: columns the team log adds (who logged it, when, its seq)
+  const cells = r => (Array.isArray(r) ? r.concat(extra.map(() => '')) : cols.map(c => (r[c] == null ? '' : r[c])));
+  return [cols.join(','), ...rows.map(r => cells(r).map(csvEscape).join(','))].join('\r\n') + '\r\n';
 }
 
 /* ---------- PDF report: the unit's record on one A4 page, for people ----------
@@ -2806,6 +2812,7 @@ function buildReportPdf(rep) {
     kv('Credentials', c.ok ? "The KIM2's factory identity, read back from the module." : `Not usable: ${c.error || 'unknown problem'}.`);
     kv('Team vault', c.recorded ? (c.recorded.queued ? 'Waiting in the station browser for the next sign-in.' : `Recorded${c.recorded.by ? ` by ${c.recorded.by}` : ''}, in use on this unit.`) : 'Not recorded in this session.');
     kv('Unit identity', c.identity == null ? null : identityText(c.identity) || 'Not set.', 'Label (the unit\'s name in the phone app), vessel and organisation, as the unit stores them.');
+    kv('Ecowitt Label ID', c.ecowitt || null, 'The ID on the WS85 sensor\'s label, as entered at commissioning.');
   } else if (rep.credentials) {
     table([{ title: 'FIELD', w: W * 0.2 }, { title: 'EXPECTED', w: W * 0.31 }, { title: 'READ BACK', w: W * 0.36 }, { title: 'CHECK', w: W * 0.13 }],
       rep.credentials.checks.map(c => {
@@ -6150,7 +6157,7 @@ async function connect({ reconnect = false } = {}) {
     setMsg('#connMsg', `Could not open the port: ${e.message}${busy ? ' (close any other serial terminal that is using it, or choose another port)' : ''}. Connect asks which port to use next time.`, 'err');
     return;
   }
-  ui.link = link; ui.transport = transport; ui.mode = null; ui.unsupported.clear(); ui.unit = {}; ui.commission = null;
+  ui.link = link; ui.transport = transport; ui.mode = null; ui.unsupported.clear(); ui.unit = {}; ui.commission = null; ui.reportLog = null;
   ui.mon.reset(); renderBanners();
   note(`Opened ${transport.kind === 'sim' ? 'simulator' : 'serial port'}${transport.kind === 'sim' && Clock.scale !== 1 ? ` (timing x${+(1 / Clock.scale).toFixed(2)})` : ''}`);
   renderConn(); renderUnit(); updateControls();
@@ -6849,6 +6856,7 @@ async function doKimRead() {
   if (!r.ok) { setMsg('#kimMsg', r.error ? r.error.message : 'Cancelled', 'err'); return null; }
   const pp = r.value;
   if (pp.identity) identToInputs(pp.identity);
+  pp.ecowitt = kim2Ecowitt();
   ui.creds = { kim2: pp, at: new Date().toISOString(), recorded: null };
   for (const k of ['id', 'addr', 'sn', 'rconf']) if (pp[k] != null) ui.unit[k] = pp[k];
   if (pp.fw) ui.unit.fw = pp.fw;
@@ -6858,6 +6866,17 @@ async function doKimRead() {
 }
 /* -- the unit's own identity (label, vessel, organisation), over the console: the three fields of the credentials card -- */
 const IDENT_INPUTS = { label: '#identLabel', vessel: '#identVessel', organisation: '#identOrg' };
+/** The Ecowitt Label ID: the ID printed on the WS85 sensor's label, typed by the operator. Part of the papers
+ *  (the vault record's note, the report, the production log); the unit has no field for it, so nothing is
+ *  written to the XIAO. Required before the papers are recorded or the guided run starts. */
+const ECOWITT_INPUT = '#identEcowitt', ECOWITT_MAX = 32;
+function kim2Ecowitt() { const e = $(ECOWITT_INPUT); return e ? e.value.trim().slice(0, ECOWITT_MAX) : ''; }
+function ecowittProblem() {
+  const v = kim2Ecowitt();
+  return !v ? "Enter the Ecowitt Label ID (printed on the WS85 sensor's label)." : /[^\x20-\x7E]/.test(v) ? 'Ecowitt Label ID: plain letters, digits and punctuation only.' : '';
+}
+/** What the vault record's note says about the unit: its identity and the Ecowitt Label ID. */
+function papersNote(pp) { return [identityText(pp.identity), pp.ecowitt ? `Ecowitt ${pp.ecowitt}` : ''].filter(Boolean).join(' · '); }
 function identFromInputs() { const v = {}; for (const [k, sel] of Object.entries(IDENT_INPUTS)) v[k] = $(sel).value.trim(); return v; }
 function identToInputs(v) { for (const [k, sel] of Object.entries(IDENT_INPUTS)) $(sel).value = v && v[k] != null ? v[k] : ''; }
 /** The guided run's identity: the fields as typed when any is filled (written to the unit), else null (read only). */
@@ -6890,7 +6909,7 @@ async function doIdentWrite() {
 /** Record (or re-record) the papers; signed out, the event waits in this browser like provisioning tracking.
  *  The unit's identity, when known, goes into the record's note. */
 async function teamRecordKim2(pp) {
-  const ev = { kind: 'kim2', id: pp.id, addr: pp.addr, sn: pp.sn, fw: pp.fw || '', note: identityText(pp.identity), t: new Date().toISOString() };
+  const ev = { kind: 'kim2', id: pp.id, addr: pp.addr, sn: pp.sn, fw: pp.fw || '', note: papersNote(pp), ecowitt: pp.ecowitt || '', t: new Date().toISOString() };
   if (team.state === 'offline' || team.state === 'unconfigured') return { error: team.msg || 'the team vault cannot be reached from here' };
   if (team.state === 'in') {
     try {
@@ -6904,9 +6923,44 @@ async function teamRecordKim2(pp) {
   note(`Team vault: KIM2 ID ${pp.id} kept in this browser, sent at the next sign-in`, 'warn');
   return { queued: true };
 }
+/** The team production log and test audit trail: the report as added to the production CSV (its CSV line and
+ *  the whole JSON), kept in the team vault's database against the signed-in user. Any verdict. Signed out, the
+ *  report waits in this browser like a vault event and is sent at the next sign-in. */
+async function teamReport(rep) {
+  const ev = { kind: 'report', row: csvRecord(reportToCsvRow(rep)), report: rep, t: new Date().toISOString() };
+  const done = v => { ui.reportLog = v; renderReport(); return v; };
+  if (team.state === 'offline' || team.state === 'unconfigured') return done({ error: team.msg || 'the team vault cannot be reached from here' });
+  if (team.state === 'in') {
+    try {
+      const j = await teamApi('reports', { method: 'POST', body: ev });
+      note(`Team production log: report #${j.seq} added (${rep.verdict}, ${rep.unit.sn || 'unit'})`);
+      return done({ seq: j.seq, at: j.t, by: j.by, count: j.count });
+    } catch (e) { if (!(e instanceof TeamAuthError) && e.status) return done({ error: e.message }); }
+  }
+  teamQueue(ev);
+  note('Team production log: report kept in this browser, sent at the next sign-in', 'warn');
+  return done({ queued: true, at: ev.t });
+}
+function reportLogText(lg) {
+  return !lg ? 'not sent' : lg.queued ? 'kept in this browser for the next sign-in' : lg.error ? `not sent: ${lg.error}` : `report #${lg.seq}${lg.by ? ` by ${lg.by}` : ''}`;
+}
+/** The whole team's production log for this mode, as a CSV (the production columns plus who logged each row, when, and its seq). */
+async function teamCsvDownload() {
+  if (team.state !== 'in') { setMsg('#repMsg', 'Sign in to the team vault first (Team credentials card, or the papers sea).', 'warn'); return; }
+  try {
+    const j = await teamApi(`reports?product=${ui.product}`);
+    const rows = j.reports.slice().reverse().map(x => ({ ...x.row, logged_at: x.t, logged_by: x.by, report_seq: String(x.seq) }));
+    if (!rows.length) { setMsg('#repMsg', 'The team production log has no rows for this mode yet.', 'warn'); return; }
+    download(`${prod().filePrefix}_team_production_${stamp()}.csv`, buildCsv(rows, ['logged_at', 'logged_by', 'report_seq']), 'text/csv');
+    setMsg('#repMsg', `Team production log: ${rows.length} row${rows.length === 1 ? '' : 's'}.`, 'ok');
+  } catch (e) { setMsg('#repMsg', `Team production log: ${e.message}`, 'err'); }
+}
 async function doKimRecord() {
   const pp = ui.creds && ui.creds.kim2;
   if (!pp || !pp.ok) return;
+  const ep = ecowittProblem();
+  if (ep) { setMsg('#kimMsg', ep, 'err'); renderKimPapers(); const e = $(ECOWITT_INPUT); if (e) e.focus(); return; }
+  pp.ecowitt = kim2Ecowitt();
   setMsg('#kimMsg', 'Recording…');
   const r = await teamRecordKim2(pp);
   const at = new Date().toISOString();
@@ -6928,6 +6982,8 @@ function renderKimPapers() {
   add('Firmware', valText(pp.fw));
   add('Radio config', pp.rconf == null ? '—' : pp.rconf === KIM2_RCONF_DECODED ? `${rconfText(pp.rconf)} (CounterCurrent's)` : `${rconfText(pp.rconf)} (not CounterCurrent's build default)`, pp.rconf && pp.rconf !== KIM2_RCONF_DECODED ? 'msg warn' : '');
   add('Unit identity', pp.identity == null ? 'not available (firmware before 1.5.0)' : identityText(pp.identity) || 'not set', pp.identity && identityText(pp.identity) ? '' : 'muted');
+  const eco = pp.ecowitt || kim2Ecowitt();
+  add('Ecowitt Label ID', eco || "not entered: type it from the WS85 sensor's label (needed to record the papers)", eco ? 'mono' : 'msg err');
   const v = team.state === 'in' && pp.id ? team.records.find(x => x.id === pp.id) : null;
   const rec = ui.creds.recorded;
   add('Team vault', rec && rec.queued ? 'waiting in this browser for the next sign-in'
@@ -7480,7 +7536,7 @@ async function teamFlushPending() {
   if (!q.length) return;
   const left = [];
   for (const ev of q) {
-    try { await teamApi(ev.kind === 'kim2' ? 'kim2' : `creds/${ev.id}/track`, { method: 'POST', body: ev }); }
+    try { await teamApi(ev.kind === 'kim2' ? 'kim2' : ev.kind === 'report' ? 'reports' : `creds/${ev.id}/track`, { method: 'POST', body: ev }); }
     catch (e) { if (!(e.data && (e.data.code === 'unknown_id' || e.data.code === 'no_vault'))) left.push(ev); }
   }
   if (left.length) storeSet(TEAM_PENDING, JSON.stringify(left)); else storeDel(TEAM_PENDING);
@@ -7994,6 +8050,9 @@ function kim2FlashOpts(signal, { expectFw = '', onPhase, onProgress } = {}) {
 async function doWizardKim2() {
   const plan = { mode: ui.mode, required: requiredItems(), identity: identPlan() };
   const lines = [], img = ui.image;
+  const ep = ecowittProblem();
+  if (ep) { setMsg('#wizMsg', ep, 'err'); goTo('#cardCred', ECOWITT_INPUT); return; }
+  lines.push(`Ecowitt Label ID: ${kim2Ecowitt()} (into the vault record and the report)`);
   if (plan.identity) {
     const v = validateIdentity(plan.identity);
     if (!v.ok) { setMsg('#wizMsg', 'Unit identity: ' + Object.entries(v.errors).map(([k, e]) => `${k}: ${e}`).join('; '), 'err'); return; }
@@ -8034,6 +8093,7 @@ async function doWizardKim2() {
       ui.creds = { kim2: w.papers, at: new Date().toISOString(), recorded: null };
       for (const k of ['id', 'addr', 'sn', 'rconf']) if (w.papers[k] != null) ui.unit[k] = w.papers[k];
       if (w.papers.identity) identToInputs(w.papers.identity);
+      ui.creds.kim2.ecowitt = kim2Ecowitt();
     }
     if (w.selftest || w.st1) ui.selftest = w.selftest || w.st1;
     if (w.commission) { ui.commission = w.commission; ui.commUpdated = new Date(); }
@@ -8063,12 +8123,15 @@ async function wizardDone(r, states) {
       const rows = store.get(rowsKey(), []); rows.push(csvRecord(reportToCsvRow(rep)));
       done.push(store.set(rowsKey(), rows) ? 'added to the production CSV' : 'added to the CSV for this page only (storage unavailable)');
     }
+    if ($('#wizCsv').checked) done.push(`team log: ${reportLogText(await teamReport(rep))}`);
     if ($('#wizPdf').checked) { downloadReportPdf(rep); done.push('PDF downloaded'); }
     if ($('#wizJson').checked) { downloadReportJson(rep); done.push('JSON downloaded'); }
     states.report = { status: rep.verdict === 'PASS' ? 'ok' : 'fail', detail: `unit verdict ${rep.verdict}${done.length ? ' · ' + done.join(', ') : ''}` };
     setMsg('#wizMsg', rep.verdict === 'PASS' ? 'Unit commissioned: PASS.' : `Finished, but the unit verdict is ${rep.verdict}.`, rep.verdict === 'PASS' ? 'ok' : 'warn');
   } else {
-    states.report = { status: '', detail: 'not recorded automatically: use Add to production CSV to log the failure' };
+    // a stopped run is part of the audit trail: the report (verdict FAIL, the step it stopped at) goes to the team log
+    const lg = $('#wizCsv').checked && !(r.error instanceof CancelledError) ? await teamReport(rep) : null;
+    states.report = { status: '', detail: `${lg ? `team log: ${reportLogText(lg)} · ` : ''}not in the production CSV: use Add to production CSV to log the failure` };
     setMsg('#wizMsg', r.error ? `Stopped: ${r.error.message}` : 'Cancelled', 'err');
   }
   renderWizSteps(states);
@@ -8210,7 +8273,9 @@ function renderReport() {
     const c = r.credentials;
     add('Credentials', !c ? 'not read in this session' : !c.ok ? `NOT USABLE: ${c.error}`
       : `read off the KIM2 · ${c.recorded ? (c.recorded.queued ? 'waiting for the team vault (sign in)' : 'recorded in the team vault') : 'not recorded in the team vault yet'}`);
+    add('Ecowitt Label ID', c && c.ecowitt ? c.ecowitt : null);
   } else add('Credentials', r.credentials ? (r.credentials.ok ? 'written and verified' : `FAILED: ${r.credentials.error || 'readback mismatch'}`) : 'not written in this session');
+  add('Team production log', reportLogText(ui.reportLog));
   const pre = $('#repLines');
   pre.hidden = !(r.selftest && r.selftest.lines.length);
   pre.textContent = r.selftest ? r.selftest.lines.join('\n') : '';
@@ -8857,6 +8922,7 @@ function vStatus(key) {
     }
     case 'papers':
       if (isKim2()) {
+        if (!kim2Ecowitt()) return voy.err.papers ? 'storm' : 'todo';        // the papers need the Ecowitt Label ID
         const pp = ui.creds && ui.creds.kim2;
         if (pp && pp.ok && ui.creds.recorded) return 'done';
         if (pp && pp.ok && voy.skip.papers) return 'warn';
@@ -9296,7 +9362,9 @@ const VVIEWS = {
       voy.logged ? vBtn('Commission another module', vNextUnit, { primary: true }) : vBtn('Write it in the logbook', vLogIt, { primary: true }),
       vBtn('Download the report (PDF)', () => downloadReportPdf(currentReport())),
       vBtn('Report data (JSON)', () => downloadReportJson(currentReport())),
-      rows ? vBtn(`Download the production log (${rows} row${rows === 1 ? '' : 's'})`, () => download(`${prod().filePrefix}_production_${stamp()}.csv`, buildCsv(store.get(rowsKey(), [])), 'text/csv')) : null));
+      rows ? vBtn(`Download the production log (${rows} row${rows === 1 ? '' : 's'})`, () => download(`${prod().filePrefix}_production_${stamp()}.csv`, buildCsv(store.get(rowsKey(), [])), 'text/csv')) : null,
+      team.state === 'in' ? vBtn('Download the team production log', teamCsvDownload) : null));
+    if (ui.reportLog) out.push(el('p', { class: 'vlead small', text: `Team production log: ${reportLogText(ui.reportLog)}.` }));
     return out;
   },
 };
@@ -9377,6 +9445,13 @@ const VVIEWS_KIM2 = {
         if (!w || !w.ok) voy.err.papers = { title: 'The identity was not written', text: $('#identMsg').textContent };
       }))));
     }
+    // the Ecowitt Label ID, from the WS85 sensor's label: part of the papers (vault record, report, production log)
+    const eco = kim2Ecowitt();
+    out.push(vState(eco ? 'ok' : 'info', 'Ecowitt Label ID', eco || "Type the ID printed on the WS85 sensor's label. It goes into the team vault record and the report; the unit has no field for it."));
+    out.push(el('div', { class: 'vfields' }, el('label', { class: 'field' }, el('span', { class: 'lbl', text: 'Ecowitt Label ID' }),
+      el('input', { type: 'text', id: 'vEcowitt', class: 'mono', maxlength: String(ECOWITT_MAX), value: eco, autocomplete: 'off', spellcheck: 'false', placeholder: "from the WS85 sensor's label",
+        onchange: e => { $(ECOWITT_INPUT).value = e.target.value.trim(); if (pp) pp.ecowitt = kim2Ecowitt(); renderKimPapers(); renderReport(); vRender(); } }))));
+    if (!eco) { out.push(el('p', { class: 'vlead small', text: 'The papers are complete once the Ecowitt Label ID is entered (press Enter or Tab).' })); return out; }
     if (rec && rec.queued) out.push(vState('warn', 'Kept in this browser', 'Sent to the team vault at the next sign-in.'));
     else if (rec) out.push(vState('ok', 'Recorded in the team vault', v ? `${v.status}${v.sn ? ` on ${v.sn}` : ''}` : 'In use on this unit.'));
     else if (team.state === 'out' || team.state === 'error' || team.state === 'unknown') {
@@ -9586,6 +9661,7 @@ function vLogIt() {
   const rows = store.get(rowsKey(), []);
   rows.push(csvRecord(reportToCsvRow(r)));
   store.set(rowsKey(), rows);
+  void teamReport(r);                                   // the team production log, any verdict
   downloadReportPdf(r);
   voy.logged = true;
   if (r.verdict === 'PASS') store.set(K_VOYAGES, store.get(K_VOYAGES, 0) + 1);
@@ -10036,14 +10112,17 @@ function init() {
   $('#repNotes').addEventListener('change', renderReport);
   $('#btnRepPdf').addEventListener('click', () => downloadReportPdf(currentReport()));
   $('#btnRepJson').addEventListener('click', () => downloadReportJson(currentReport()));
-  $('#btnRepAdd').addEventListener('click', () => {
+  $('#btnRepAdd').addEventListener('click', async () => {
     const r = currentReport();
     const rows = store.get(rowsKey(), []);
     rows.push(csvRecord(reportToCsvRow(r)));
     const persisted = store.set(rowsKey(), rows);
-    setMsg('#repMsg', persisted ? `Added (${rows.length} rows stored in this browser).` : `Added to this page only: browser storage is unavailable, so download the CSV before closing (${rows.length} rows).`, persisted ? 'ok' : 'warn');
+    const lg = await teamReport(r);
+    setMsg('#repMsg', (persisted ? `Added (${rows.length} rows stored in this browser)` : `Added to this page only: browser storage is unavailable, so download the CSV before closing (${rows.length} rows)`)
+      + ` · team log: ${reportLogText(lg)}.`, persisted && !lg.error ? 'ok' : 'warn');
     renderReport();
   });
+  $('#btnRepTeamCsv').addEventListener('click', () => void teamCsvDownload());
   $('#btnRepCsv').addEventListener('click', () => {
     const rows = store.get(rowsKey(), []);
     if (!rows.length) { setMsg('#repMsg', 'No rows stored yet.', 'warn'); return; }
