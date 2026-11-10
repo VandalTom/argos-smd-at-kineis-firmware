@@ -891,7 +891,7 @@ body[data-product="kim2"] [data-only="arribada"], body:not([data-product="kim2"]
 // extracts this block and runs it under node against the built-in simulator, so it
 // must not touch window/document/navigator and must end with the NaiadProtocol object.
 
-const TOOL_VERSION = '1.8.2';
+const TOOL_VERSION = '1.8.3';
 const APP_BASE = 0x08000000;
 const APP_MAX_SIZE = 0x32000;          // 200 KB app region (Bootloader/Inc/bl_config.h APP_FLASH_SIZE)
 const RAM_START = 0x20000000;
@@ -5649,6 +5649,7 @@ async function kim2FlashFirmware(link, image, opts = {}) {
     app = await waitForApp(link, { bauds: [link.baud || 115200], settle: 1500, timeout: 30000, signal });
   } catch (e) {
     if (e instanceof CancelledError) throw e;
+    if (e.code === 'NO_PORT') { e.message = `The firmware was written, but the tool has no port to check it on. ${e.message}`; e.result = res; throw e; }
     const err = new ProtocolError(`The new firmware did not start (${e.message}). The bootloader refuses an image whose CRC or device type is wrong and stays in DFU mode: flash again.`);
     err.inBootloader = true; err.result = res;
     throw err;
@@ -5799,6 +5800,16 @@ function download(name, text, mime = 'text/plain') {
   const url = URL.createObjectURL(new Blob([text], { type: mime }));
   const a = document.createElement('a'); a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+/** A re-render replaces the focused field with a new element, and focusing that one puts the caret at its
+ *  start: caretOf() before the rebuild and refocus() after it keep the caret (or the selection) in place. */
+function caretOf(e) {
+  try { return e && typeof e.selectionStart === 'number' ? [e.selectionStart, e.selectionEnd, e.selectionDirection || 'none'] : null; }
+  catch (err) { return null; }
+}
+function refocus(f, caret) {
+  f.focus({ preventScroll: true });
+  if (caret) { try { f.setSelectionRange(caret[0], caret[1], caret[2]); } catch (err) { /* a field type with no caret */ } }
 }
 function confirmDialog(title, body, okLabel = 'OK', { focusCancel = false } = {}) {
   const d = $('#dlg');
@@ -6492,8 +6503,26 @@ async function kim2OpenBootloader({ signal }) {
 async function kim2ReopenApp({ signal }) {
   const old = ui.link.t;
   for (const t0 = Date.now(); old.isOpen && old.kind !== 'sim' && Date.now() - t0 < 4000;) await sleep(100, signal);   // the old port leaves first
-  const port = await kim2FindPort(NRF.PID_APP, 20000, signal);
-  if (!port) throw new ProtocolError('The XIAO did not come back on USB within 20 s');
+  // The browser only lists ports it was allowed to use. The restarted app is a port of its own, and one the
+  // browser has never been given when the XIAO was first connected in its bootloader (a blank or interrupted
+  // unit) or ran a firmware with the other USB ID: it is on USB, but invisible here until the user picks it.
+  let port = null, blStays = false;
+  for (let t0 = Date.now(), blGone = 0; ;) {
+    const ports = await navigator.serial.getPorts(), now = Date.now();
+    port = ports.find(x => isXiaoPort(x, NRF.PID_APP)) || null;
+    if (port) break;
+    blStays = ports.some(x => isXiaoPort(x, NRF.PID_BL));
+    if (blStays) blGone = 0; else if (!blGone) blGone = now;
+    if (now - t0 > 20000 || (blGone && now - blGone > 8000)) break;
+    await sleep(250, signal);
+  }
+  if (!port && blStays) throw new ProtocolError('The XIAO is still in its bootloader after 20 s');
+  if (!port) {
+    const go = await confirmDialog('Choose the XIAO', 'The XIAO restarted, and its application is a separate USB device that this browser has not been allowed to use yet. Click "Choose port" and pick the XIAO (USB ID 2886:8044 or 2886:8045). The browser remembers it for this XIAO.', 'Choose port');
+    if (!go) throw new CancelledError();
+    try { port = await navigator.serial.requestPort({ filters: NRF.PID_APP.map(p => ({ usbVendorId: NRF.VID, usbProductId: p })) }); }
+    catch (e) { throw new ProtocolError('No port chosen for the restarted XIAO. Click Connect and pick its port to carry on.', { code: 'NO_PORT' }); }
+  }
   const t = new WebSerialTransport(port);
   await ui.link.swapTransport(t, 115200);
   ui.transport = t; ui.port = port; showPortInfo();
@@ -7215,6 +7244,7 @@ function renderVault() {
   renderVaultPreview(); renderVaultCounts(); renderCredVault();
   const body = $('#vaultBody');
   const focusId = document.activeElement && document.activeElement.dataset ? [document.activeElement.dataset.uid, document.activeElement.dataset.f] : null;
+  const caret = focusId && focusId[0] ? caretOf(document.activeElement) : null;
   body.innerHTML = '';
   const rows = vaultRows();
   rows.forEach((r, i) => {
@@ -7257,7 +7287,7 @@ function renderVault() {
   });
   if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = VAULT_COLS.length + 2; td.className = 'muted'; td.textContent = vault.data.records.length ? 'No set matches the filter.' : 'Empty: import a CLS file, or add a row.'; tr.append(td); body.append(tr); }
   for (const th of $$('#vaultHead th[data-f]')) th.dataset.sort = vault.sort.col === th.dataset.f ? (vault.sort.dir > 0 ? 'asc' : 'desc') : '';
-  if (focusId && focusId[0]) { const el = body.querySelector(`[data-uid="${focusId[0]}"][data-f="${focusId[1]}"]`); if (el) el.focus(); }
+  if (focusId && focusId[0]) { const el = body.querySelector(`[data-uid="${focusId[0]}"][data-f="${focusId[1]}"]`); if (el) refocus(el, caret); }
 }
 
 function vaultToggleKey(uid) {
@@ -7807,6 +7837,7 @@ function renderTeam() {
   renderTeamPreview(); renderTeamCounts();
   const body = $('#teamBody');
   const fa = document.activeElement && document.activeElement.dataset ? [document.activeElement.dataset.id, document.activeElement.dataset.f] : null;
+  const caret = fa && fa[0] ? caretOf(document.activeElement) : null;
   body.innerHTML = '';
   const rows = teamRows();
   rows.forEach((r, i) => {
@@ -7863,7 +7894,7 @@ function renderTeam() {
   });
   if (!rows.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = TEAM_COLS.length + 3; td.className = 'muted'; td.textContent = team.records.length ? 'No set matches the filter.' : 'Empty: import a CLS file, add a set, or upload an offline vault.'; tr.append(td); body.append(tr); }
   for (const th of $$('#teamHead th[data-f]')) th.dataset.sort = team.sort.col === th.dataset.f ? (team.sort.dir > 0 ? 'asc' : 'desc') : '';
-  if (fa && fa[0]) { const el = body.querySelector(`[data-id="${fa[0]}"][data-f="${fa[1]}"]`); if (el) el.focus(); }
+  if (fa && fa[0]) { const el = body.querySelector(`[data-id="${fa[0]}"][data-f="${fa[1]}"]`); if (el) refocus(el, caret); }
 }
 
 function initTeam() {
@@ -9054,6 +9085,7 @@ function vRender() {
   const kept = {};
   for (const inp of card.querySelectorAll('input[id], select[id]')) kept[inp.id] = inp.value;
   const focusId = card.contains(document.activeElement) ? document.activeElement.id : null;
+  const caret = focusId ? caretOf(document.activeElement) : null;
   card.innerHTML = '';
   const s = VSTEPS[voy.step];
   card.append(el('div', { class: 'vkicker', text: s.optional ? `Before sailing · ${s.sea} · optional` : `Sea ${vSeaNo(voy.step)} of ${vRequiredSeas()} · ${s.sea}` }), el('h3', { text: s.task }));
@@ -9061,7 +9093,7 @@ function vRender() {
   card.append(vNav());
   const log = vLog(); if (log) card.append(log);
   for (const [id, v] of Object.entries(kept)) { const inp = card.querySelector('#' + CSS.escape(id)); if (inp && inp.type !== 'file' && !inp.dataset.fresh) inp.value = v; }
-  if (focusId) { const f = card.querySelector('#' + CSS.escape(focusId)); if (f) f.focus({ preventScroll: true }); }
+  if (focusId) { const f = card.querySelector('#' + CSS.escape(focusId)); if (f) refocus(f, caret); }
 }
 
 /* ---- running an operation from the Voyage view ---- */
